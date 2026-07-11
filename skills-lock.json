@@ -19,6 +19,18 @@
       "skillPath": "skills/kubernetes-specialist/SKILL.md",
       "computedHash": "9c5eb68fc9d553ee29e745258bc6198563158c4b2c57436d63647e61010b5f0a"
     },
+    "tdd": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/tdd/SKILL.md",
+      "computedHash": "c9326b88419cfba1d54dd713b7ddb23020e6a93f4b0d13aea58cebba58cda2ee"
+    },
+    "testcontainers-go": {
+      "source": "testcontainers/claude-skills",
+      "sourceType": "github",
+      "skillPath": "plugins/testcontainers/skills/testcontainers-go/SKILL.md",
+      "computedHash": "cd2d0205bfbdd95c46d8191202604c28f1862a406ef883488b084851da0c0501"
+    },
     "vercel-react-best-practices": {
       "source": "vercel-labs/agent-skills",
       "sourceType": "github",
