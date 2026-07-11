@@ -14,7 +14,7 @@ live in `.claude/skills/`.
 | [`pet-project-metadata`](.claude/skills/pet-project-metadata/SKILL.md) | Apply/audit the standard metadata every pet project needs (description, `pet-project` topic, homepage subdomain, `SPEC.md`, `README.md`, Pages config). |
 | [`subdomain-setup`](.claude/skills/subdomain-setup/SKILL.md) | Publish a repo at `<name>.garutyunov.com` — Cloudflare DNS + GitHub Pages custom domain, HTTPS enforcement, and set Pages as the repo website. |
 | [`project-task-loop`](.claude/skills/project-task-loop/SKILL.md) | Work the [project board](https://github.com/users/gaarutyunov/projects/6): pull a Ready task → In progress → clone/worktree → branch + PR → triage (openspec vs direct) → spec approval gate → work → In review. Loopable with `/loop`. |
-| [`icon-generation`](.claude/skills/icon-generation/SKILL.md) | Generate the standard minimalist 3D voxel app icon via the Gemini image API/CLI. |
+| [`icon-generation`](.claude/skills/icon-generation/SKILL.md) | Generate the standard minimalist 3D voxel app icon via OpenRouter's image models. |
 
 Invoke a skill with `/<name>` (e.g. `/project-task-loop`), or let Claude Code
 auto-select it from the task description.
