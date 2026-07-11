@@ -16,8 +16,9 @@ continuously with the `/loop` skill (see **Looping** below).
   scope**, which is *not* in the default token here. Add it once:
   `gh auth refresh -s project`. Without it, `gh project …` returns
   `authentication token is missing required scopes [read:project]`.
-- The workspace repo (this repo) is the home for **specs**. Pet-project code
-  repos are cloned under `projects/` (gitignored) or worked via git worktree.
+- The workspace repo (this repo) is the home for **specs** — OpenSpec is
+  initialized here (`/opsx:*` commands + `openspec/`). Pet-project code repos are
+  cloned under `projects/` (gitignored) or worked via git worktree.
 - Board Status values used below: **Ready**, **In progress**, **In review**
   (confirm exact option names/ids with the field query in step 1).
 
@@ -112,34 +113,54 @@ Decide **spec-first** vs **implement-directly**:
 
 - **Needs a spec (openspec)** when the work is *serious*: changing
   architecture, adding/altering public APIs, new functionality, or anything
-  spanning multiple projects. Use [openspec](https://github.com/Fission-AI/openspec)
-  (`openspec` CLI is installed).
+  spanning multiple projects. Use [OpenSpec](https://github.com/Fission-AI/openspec)
+  — it's initialized in this workspace repo (the `/opsx:*` commands and
+  `openspec/` config are already present).
 - **Implement directly** when it's a contained change: a bug fix, a small
   feature, docs, config, a self-evident tweak.
 
 When unsure, lean toward a spec for anything a reviewer would want to agree on
-*before* code is written.
+*before* code is written. If the shape is still fuzzy, run `/opsx:explore` first
+to think it through before proposing.
 
-### 6a. Spec-first path
+### 6a. Spec-first path (OpenSpec `/opsx:*`)
 
-Specs are authored in **this workspace repo**, reviewed and merged by the owner
-*before* implementation.
+Specs are authored in **this workspace repo** with OpenSpec, then reviewed and
+merged by the owner *before* implementation. OpenSpec's `/opsx:*` commands run in
+the AI chat (not the terminal) and write to `openspec/changes/<change>/`.
 
-```bash
-cd ~/Projects/workspace
-openspec init            # once, if openspec/ doesn't exist yet
-git checkout -b spec/<repo>-issue-<N>
-# author the change spec with openspec (proposal + spec deltas), then:
-openspec validate
-git add openspec && git commit -m "Spec for <repo>#<N>: <title>"
-git push -u origin spec/<repo>-issue-<N>
-gh pr create --repo gaarutyunov/workspace --fill \
-  --title "Spec: <repo>#<N> <title>" --body "Spec for gaarutyunov/<repo>#<N>"
-```
+1. Create the change and its planning artifacts (proposal, specs, design,
+   tasks) in one step:
 
-Then **wait for the owner to approve and merge** the spec PR. Do not start
-implementation until it is merged. When looping, this is a hard gate — leave the
-task in **In progress** and move on / pause (see Looping).
+   ```text
+   /opsx:propose <repo>-issue-<N>-<slug>
+   ```
+
+   (Use `/opsx:update` to revise artifacts, and `/opsx:explore` beforehand if
+   you need to think first. Kebab-case the change name.)
+
+2. Open the spec PR from the generated artifacts:
+
+   ```bash
+   cd ~/Projects/workspace
+   git checkout -b spec/<repo>-issue-<N>
+   openspec validate <repo>-issue-<N>-<slug>     # sanity-check the change
+   git add openspec/changes/<repo>-issue-<N>-<slug>
+   git diff --cached                              # inspect before committing
+   git commit -m "Spec for <repo>#<N>: <title>"
+   git push -u origin spec/<repo>-issue-<N>
+   gh pr create --repo gaarutyunov/workspace --fill \
+     --title "Spec: <repo>#<N> <title>" --body "Spec for gaarutyunov/<repo>#<N>"
+   ```
+
+Then **wait for the owner to approve and merge** the spec PR (apply the review &
+merge discipline in step 10). Do not start implementation until it is merged.
+When looping, this is a hard gate — leave the task in **In progress** and move
+on / pause (see Looping).
+
+Once the spec PR is merged, implement from the change's `tasks.md` with
+`/opsx:apply`, and after the work ships, finalize the change with
+`/opsx:archive` (moves it to `openspec/changes/archive/`).
 
 ### 6b. Direct-implementation path
 
@@ -147,9 +168,13 @@ Skip straight to the work in the code repo's branch/PR from step 4.
 
 ### 7. Perform the work
 
-Implement against the (merged) spec or the issue directly, in the code repo's
-branch/worktree. Keep changes scoped to the task. Add/adjust tests where the
-project has them.
+Implement in the code repo's branch/worktree, keeping changes scoped to the
+task and adding/adjusting tests where the project has them.
+
+- **Spec-first tasks:** drive the implementation from the merged change's
+  `tasks.md` with `/opsx:apply`, then `/opsx:archive` the change once the work
+  has shipped.
+- **Direct tasks:** implement against the issue.
 
 ### 8. Commit, push
 
@@ -195,6 +220,14 @@ this order:
    **Verify each finding against the current code** — CodeRabbit is often right
    but not always. Fix the still-valid ones (keep changes minimal); for any you
    judge invalid, skip the code change but still reply with a brief reason.
+
+   > **If CodeRabbit's review limit is reached, ignore it.** When CodeRabbit
+   > posts a "review limit reached" / "rate limited" notice instead of an actual
+   > review (its status check can still show green — that's just the notice), do
+   > **not** block on it: there are no bot threads to work, so treat this step as
+   > satisfied and proceed to the merge on the strength of the owner's review
+   > alone. Don't wait for or re-trigger the bot. (You *may* leave a
+   > `@coderabbitai review` comment for later, but never gate the merge on it.)
 3. **Resolve every thread.** After fixing, reply to the thread (reference the
    fixing commit) and resolve it; for a declined finding, reply with the reason
    and resolve. A thread is resolved via the GraphQL `resolveReviewThread`
