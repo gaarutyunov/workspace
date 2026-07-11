@@ -59,20 +59,27 @@ npm install @gaarutyunov/ui-kit
 ### 2. Standalone `<script>` (no build, no npm)
 
 Every release attaches a self-contained bundle that registers all `<ga-*>`
-elements on load — ideal for buildless GitHub Pages pet projects:
+elements on load — ideal for buildless GitHub Pages pet projects. **Always pin
+an explicit version** (`releases/download/vX.Y.Z/…`):
 
 ```html
+<!-- pin the version — replace vX.Y.Z with the release you tested against -->
 <link rel="stylesheet"
-  href="https://github.com/gaarutyunov/ui-kit/releases/latest/download/ga-ui-kit.css" />
+  href="https://github.com/gaarutyunov/ui-kit/releases/download/vX.Y.Z/ga-ui-kit.css" />
 <script
-  src="https://github.com/gaarutyunov/ui-kit/releases/latest/download/ga-ui-kit.min.js"></script>
+  src="https://github.com/gaarutyunov/ui-kit/releases/download/vX.Y.Z/ga-ui-kit.min.js"></script>
 
 <ga-button variant="primary">Hello</ga-button>
 ```
 
-An ES-module build (`ga-ui-kit.esm.js`) is attached too, for
-`<script type="module">import`. Pin a version with `releases/download/vX.Y.Z/…`
-instead of `releases/latest/…`.
+> ⚠️ **Do not use `releases/latest/download/…` on a live site.** A new ui-kit
+> release would be picked up automatically and can break the page without any
+> change on your side. Pin a version and bump it deliberately after testing.
+> (`latest` is fine only for throwaway experiments.)
+
+Find the current version on the [releases page](https://github.com/gaarutyunov/ui-kit/releases)
+or with `gh release view --repo gaarutyunov/ui-kit --json tagName`. An ES-module
+build (`ga-ui-kit.esm.js`) is attached too, for `<script type="module">import`.
 
 ## Usage by framework
 
