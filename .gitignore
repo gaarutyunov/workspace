@@ -1,0 +1,29 @@
+# Only .agents (source of truth) and .claude (symlinks) are tracked.
+# The `skills` CLI fans out to many other agent dirs — ignore them all.
+/.adal/
+/.augment/
+/.codebuddy/
+/.commandcode/
+/.continue/
+/.crush/
+/.factory/
+/.goose/
+/.iflow/
+/.junie/
+/.kilocode/
+/.kiro/
+/.kode/
+/.mcpjam/
+/.mux/
+/.neovate/
+/.openhands/
+/.pi/
+/.pochi/
+/.qoder/
+/.qwen/
+/.roo/
+/.trae/
+/.vibe/
+/.windsurf/
+/.zencoder/
+/skills/
