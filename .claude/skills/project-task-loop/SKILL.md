@@ -1,0 +1,238 @@
+---
+name: project-task-loop
+description: "Pull the next task from the gaarutyunov GitHub Project board (project #6), take it through the full delivery workflow (in progress → clone/worktree → branch + PR → triage → spec-or-implement → work → in review), and repeat. Use when asked to work the task board, pick up the next ready task, or run the project loop. Examples: \"work on the next task\", \"pull a task from the board\", \"run the project loop\"."
+---
+
+# Project task loop
+
+Drives tasks on the personal GitHub Project board
+[users/gaarutyunov/projects/6](https://github.com/users/gaarutyunov/projects/6)
+through delivery, one task at a time. Run it once for a single task, or drive it
+continuously with the `/loop` skill (see **Looping** below).
+
+## Prerequisites
+
+- `gh` authenticated. **Projects v2 needs the `project` (or `read:project`)
+  scope**, which is *not* in the default token here. Add it once:
+  `gh auth refresh -s project`. Without it, `gh project …` returns
+  `authentication token is missing required scopes [read:project]`.
+- The workspace repo (this repo) is the home for **specs**. Pet-project code
+  repos are cloned under `projects/` (gitignored) or worked via git worktree.
+- Board Status values used below: **Ready**, **In progress**, **In review**
+  (confirm exact option names/ids with the field query in step 1).
+
+## Discover the board (one-time per session)
+
+```bash
+OWNER=gaarutyunov
+PROJ=6
+# Project id + Status field id and its option ids:
+gh project field-list $PROJ --owner $OWNER --format json \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); \
+    [print(f['id'], f['name'], [(o['id'],o['name']) for o in f.get('options',[])]) \
+     for f in d['fields'] if f['name']=='Status']"
+gh project view $PROJ --owner $OWNER --format json --jq '.id'   # project node id
+```
+
+Keep the project id, Status field id, and the option ids for **Ready /
+In progress / In review**.
+
+> **Confirmed values for project #6 ("growth")** — stable, so you can skip
+> discovery unless the board schema changes:
+>
+> - Project id: `PVT_kwHOAjGWgc4Bcice`
+> - Status field id: `PVTSSF_lAHOAjGWgc4BcicezhXKdRQ`
+> - Options: Backlog `f75ad846` · Ready `61e4505c` · In progress `47fc9ee4` ·
+>   In review `df73e18b` · Done `98236657`
+
+## The workflow (per task)
+
+### 1. Get a task from **Ready**
+
+`gh project item-list` **defaults to 30 items** — pass a high `--limit` so a
+Ready task past the first page isn't missed. The board also holds PRs and draft
+items, so select only entries backed by a real **issue**:
+
+```bash
+gh project item-list $PROJ --owner $OWNER --format json --limit 200 \
+  | python3 -c "import sys,json; \
+    items=json.load(sys.stdin)['items']; \
+    r=[i for i in items if i.get('status')=='Ready' and i.get('content',{}).get('type')=='Issue']; \
+    print(json.dumps(r[0] if r else {}, indent=2))"
+```
+
+Pick the top Ready issue. Capture its **item id**, the linked **issue** (repo +
+number), and title. If there is no eligible Ready item, stop.
+
+### 2. Move it to **In progress**
+
+```bash
+gh project item-edit --project-id <PROJECT_ID> --id <ITEM_ID> \
+  --field-id <STATUS_FIELD_ID> --single-select-option-id <IN_PROGRESS_OPTION_ID>
+```
+
+### 3. Get the code repo ready (clone or worktree)
+
+The task's issue lives in some repo `gaarutyunov/<repo>`.
+
+```bash
+REPO=<repo>; N=<issue-number>
+mkdir -p ~/Projects/workspace/projects        # projects/ may not exist yet
+cd ~/Projects/workspace/projects
+if [ ! -d "$REPO" ]; then
+  gh repo clone gaarutyunov/$REPO
+else
+  # already cloned — use a worktree so the main checkout is untouched.
+  # Resolve the repo's real default branch (don't assume it's "main").
+  git -C "$REPO" fetch origin
+  DEF=$(gh repo view gaarutyunov/$REPO --json defaultBranchRef \
+        --jq .defaultBranchRef.name)
+  git -C "$REPO" worktree add "../$REPO-issue-$N" -b "issue-$N" "origin/$DEF"
+fi
+```
+
+### 4. Create a branch and a PR
+
+If you cloned fresh, branch from the default branch:
+
+```bash
+cd <repo>            # or the worktree dir
+git checkout -b issue-<N>
+git commit --allow-empty -m "Start work on #<N>"
+git push -u origin issue-<N>
+gh pr create --repo gaarutyunov/<repo> --fill \
+  --title "<task title>" --body "Closes #<N>"
+```
+
+(An empty starter commit lets you open the PR early; squash/amend later.)
+
+### 5. Triage the task
+
+Decide **spec-first** vs **implement-directly**:
+
+- **Needs a spec (openspec)** when the work is *serious*: changing
+  architecture, adding/altering public APIs, new functionality, or anything
+  spanning multiple projects. Use [openspec](https://github.com/Fission-AI/openspec)
+  (`openspec` CLI is installed).
+- **Implement directly** when it's a contained change: a bug fix, a small
+  feature, docs, config, a self-evident tweak.
+
+When unsure, lean toward a spec for anything a reviewer would want to agree on
+*before* code is written.
+
+### 6a. Spec-first path
+
+Specs are authored in **this workspace repo**, reviewed and merged by the owner
+*before* implementation.
+
+```bash
+cd ~/Projects/workspace
+openspec init            # once, if openspec/ doesn't exist yet
+git checkout -b spec/<repo>-issue-<N>
+# author the change spec with openspec (proposal + spec deltas), then:
+openspec validate
+git add openspec && git commit -m "Spec for <repo>#<N>: <title>"
+git push -u origin spec/<repo>-issue-<N>
+gh pr create --repo gaarutyunov/workspace --fill \
+  --title "Spec: <repo>#<N> <title>" --body "Spec for gaarutyunov/<repo>#<N>"
+```
+
+Then **wait for the owner to approve and merge** the spec PR. Do not start
+implementation until it is merged. When looping, this is a hard gate — leave the
+task in **In progress** and move on / pause (see Looping).
+
+### 6b. Direct-implementation path
+
+Skip straight to the work in the code repo's branch/PR from step 4.
+
+### 7. Perform the work
+
+Implement against the (merged) spec or the issue directly, in the code repo's
+branch/worktree. Keep changes scoped to the task. Add/adjust tests where the
+project has them.
+
+### 8. Commit, push
+
+Stage only the paths you intended to change — never `git add -A`, which can
+sweep in unrelated local edits, generated files, or accidentally-present
+secrets. Review the staged diff before committing:
+
+```bash
+git add <path> [<path> ...]     # the specific files for this task
+git diff --cached               # inspect exactly what will be committed
+git commit -m "<clear message>" # ref the issue/spec
+git push
+```
+
+Ensure the PR is up to date and its body links the issue (`Closes #<N>`) and,
+if applicable, the merged spec PR.
+
+### 9. Move the task to **In review**
+
+```bash
+gh project item-edit --project-id <PROJECT_ID> --id <ITEM_ID> \
+  --field-id <STATUS_FIELD_ID> --single-select-option-id <IN_REVIEW_OPTION_ID>
+```
+
+Report: task title, code PR URL, spec PR URL (if any), and what was done.
+
+### 10. Review & merge discipline
+
+**Never merge a PR/MR with unresolved review threads.** Before merging any PR
+(a code PR, or a spec PR once the owner has approved it), work the threads in
+this order:
+
+1. **Owner (human) comments first.** Address every review comment written by the
+   repo owner. These take priority over any bot.
+2. **Then CodeRabbit comments you find valid.** CodeRabbit posts findings with a
+   `🤖 Prompt for AI Agents` block containing the exact fix. Pull them all with
+   the bundled helper:
+
+   ```bash
+   .claude/skills/project-task-loop/scripts/coderabbit-prompts.py gaarutyunov/<repo> <PR#>
+   ```
+
+   **Verify each finding against the current code** — CodeRabbit is often right
+   but not always. Fix the still-valid ones (keep changes minimal); for any you
+   judge invalid, skip the code change but still reply with a brief reason.
+3. **Resolve every thread.** After fixing, reply to the thread (reference the
+   fixing commit) and resolve it; for a declined finding, reply with the reason
+   and resolve. A thread is resolved via the GraphQL `resolveReviewThread`
+   mutation (there is no REST endpoint):
+
+   ```bash
+   # find thread ids + resolved state:
+   gh api graphql -f query='query { repository(owner:"gaarutyunov", name:"<repo>") {
+     pullRequest(number: <PR#>) { reviewThreads(first:50) {
+       nodes { id isResolved comments(first:1){ nodes { author{login} body } } } } } }'
+   # resolve one:
+   gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:"<PRRT_...>"}) { thread { isResolved } } }'
+   ```
+
+4. **Only then merge**, once all threads are resolved and checks are green:
+
+   ```bash
+   gh pr merge <PR#> --repo gaarutyunov/<repo> --squash
+   ```
+
+For a **spec PR**, the owner still merges it (step 6a) — but the same rule
+applies: no unresolved threads before that merge.
+
+## Looping
+
+To process the board continuously, drive this skill with the `/loop` skill
+(e.g. `/loop /project-task-loop` for self-paced, or `/loop 15m …`). Each
+iteration handles one task end-to-end:
+
+- If there is no **Ready** task, do nothing and wait for the next tick.
+- If a task is blocked on **spec approval** (step 6a), leave it in
+  **In progress**, note that it's awaiting review, and pick up the next Ready
+  task (or idle if none) rather than blocking the whole loop.
+- Never move a task to **In review** until its work is pushed.
+
+## Related skills
+
+- `pet-project-metadata` — ensure a new/updated repo has the required metadata.
+- `subdomain-setup` — publish the result at `<name>.garutyunov.com`.
+- `ui-kit` — build the UI with the shared design system.
+- `icon-generation` — generate the project/app icon.

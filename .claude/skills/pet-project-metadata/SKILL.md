@@ -1,0 +1,76 @@
+---
+name: pet-project-metadata
+description: "Apply the standard metadata every gaarutyunov pet project must have — repo description, homepage subdomain, the pet-project topic, SPEC.md, README.md, and GitHub Pages config. Use when creating a new pet project, auditing an existing one, or before shipping/publishing. Examples: \"set up metadata for this pet project\", \"is this repo missing pet-project metadata?\", \"prepare this repo for GitHub Pages\"."
+---
+
+# Pet-project metadata standard
+
+Every pet project owned by `gaarutyunov` (e.g. stereoscope, bikelanes,
+guitar-harmony, workout, boids) follows a common metadata contract so it is
+discoverable, hostable, and self-documenting. Apply this whenever creating a new
+pet project or auditing an existing one.
+
+## Required metadata
+
+| Item | Requirement | How to verify |
+| --- | --- | --- |
+| **Description** | A one-line repo description | `gh api repos/gaarutyunov/<repo> --jq .description` |
+| **Topic `pet-project`** | Repo topics must include `pet-project` (plus subject topics) | `gh api repos/gaarutyunov/<repo> --jq .topics` |
+| **Homepage** | Set to the live URL — `https://<name>.garutyunov.com/` once the subdomain is live | `gh api repos/gaarutyunov/<repo> --jq .homepage` |
+| **`README.md`** | Human intro: what it is, how to run, live link | contents API / repo browse |
+| **`SPEC.md`** | Build specification (goal, scope, architecture, public API) | contents API / repo browse |
+| **GitHub Pages** | Enabled (`has_pages: true`) with custom subdomain + HTTPS enforced | `gh api repos/gaarutyunov/<repo>/pages` |
+| **Buildless marker** | Static/buildless sites include `.nojekyll` so `_`-prefixed paths serve | repo root |
+
+## Conventions
+
+- **Subdomain naming**: `https://<repo>.garutyunov.com/` (e.g.
+  `stereoscope.garutyunov.com`). The DNS + Pages wiring is handled by the
+  **`subdomain-setup`** skill — run that after enabling Pages.
+- **`SPEC.md` is the source of truth.** Pet projects are spec-first: `SPEC.md`
+  states goal & scope, an isolation/architecture contract, the stable public
+  API, and what is explicitly out of scope. Keep it updated as the design
+  changes. For substantial specs use the [openspec](https://github.com/Fission-AI/openspec)
+  workflow (see the `project-task-loop` skill).
+- **Topics**: always `pet-project`, plus 1–3 subject topics (e.g. `3d-photo`,
+  `stereoscopy`).
+- **Design system**: personal-site and pet-project UIs use the GA UI Kit — see
+  the `ui-kit` skill.
+
+## Setting the metadata
+
+```bash
+# Replace these placeholder values before running.
+NAME=your-repo                    # the repo name / subdomain label
+REPO=gaarutyunov/$NAME
+SUBJECT_TOPIC=your-subject-topic  # e.g. stereoscopy
+
+# Description
+gh repo edit "$REPO" --description "One-line description"
+
+# Homepage (once the subdomain is live)
+gh repo edit "$REPO" --homepage "https://$NAME.garutyunov.com/"
+
+# Topics — --add-topic ADDS to the existing set (it does not replace it).
+# To drop a stale topic, remove it explicitly with --remove-topic.
+gh repo edit "$REPO" --add-topic pet-project --add-topic "$SUBJECT_TOPIC"
+```
+
+`README.md` and `SPEC.md` are committed files. For a buildless static site,
+add an empty `.nojekyll` at the deploy root.
+
+## Audit checklist
+
+Run through this for any pet project:
+
+- [ ] `description` set and meaningful
+- [ ] topics include `pet-project`
+- [ ] `README.md` present (what / run / live link)
+- [ ] `SPEC.md` present and current
+- [ ] `has_pages: true`
+- [ ] Pages `cname` = `<name>.garutyunov.com` and `https_enforced: true`
+- [ ] `homepage` points to the live subdomain URL
+- [ ] `.nojekyll` present if the site is buildless/static
+
+To wire the subdomain + Pages custom domain + HTTPS, hand off to the
+**`subdomain-setup`** skill.
