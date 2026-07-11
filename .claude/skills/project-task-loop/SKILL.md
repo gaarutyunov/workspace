@@ -220,6 +220,14 @@ this order:
    **Verify each finding against the current code** — CodeRabbit is often right
    but not always. Fix the still-valid ones (keep changes minimal); for any you
    judge invalid, skip the code change but still reply with a brief reason.
+
+   > **If CodeRabbit's review limit is reached, ignore it.** When CodeRabbit
+   > posts a "review limit reached" / "rate limited" notice instead of an actual
+   > review (its status check can still show green — that's just the notice), do
+   > **not** block on it: there are no bot threads to work, so treat this step as
+   > satisfied and proceed to the merge on the strength of the owner's review
+   > alone. Don't wait for or re-trigger the bot. (You *may* leave a
+   > `@coderabbitai review` comment for later, but never gate the merge on it.)
 3. **Resolve every thread.** After fixing, reply to the thread (reference the
    fixing commit) and resolve it; for a declined finding, reply with the reason
    and resolve. A thread is resolved via the GraphQL `resolveReviewThread`
