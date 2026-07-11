@@ -2,6 +2,10 @@
 
 `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md`, never `CLAUDE.md`.
 
+## Git
+
+Never push to `main`. Always create a feature branch, push it, and open a pull request — even for small changes. Let the PR be reviewed/merged rather than pushing directly.
+
 ## Skills
 
 Install skills into this repo, never globally.
