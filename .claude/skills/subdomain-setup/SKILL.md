@@ -16,17 +16,20 @@ Prefer the CLIs/APIs below over the web UI so the steps are reproducible.
 ## Prerequisites
 
 - `gh` authenticated with `repo` scope (already present in this environment).
-- Cloudflare API token with **Zone → DNS → Edit** on the `garutyunov.com` zone,
-  exported as `CLOUDFLARE_API_TOKEN`. (No Cloudflare CLI is installed; use the
-  v4 REST API via `curl`. `flarectl`/`wrangler` are optional alternatives.)
+- Cloudflare API token with **Zone → DNS → Edit** *and* **Zone → Read** on the
+  `garutyunov.com` zone, exported as `CLOUDFLARE_API_TOKEN`. Zone→Read is
+  required because the setup calls `GET /zones` to resolve the zone id; without
+  it the workflow fails before any record is created. (No Cloudflare CLI is
+  installed; use the v4 REST API via `curl`. `flarectl`/`wrangler` are optional
+  alternatives.)
 - The repo must have a deployable site (a `gh-pages` branch, a `/docs` folder,
   or a Pages-publishing GitHub Action).
 
-Set variables used throughout:
+Set variables used throughout (replace the placeholder):
 
 ```bash
-REPO=gaarutyunov/<repo>
-NAME=<repo>                       # subdomain label
+NAME=your-repo                    # repo name / subdomain label
+REPO=gaarutyunov/$NAME
 DOMAIN=$NAME.garutyunov.com
 ```
 
@@ -37,22 +40,29 @@ so GitHub can provision its Let's Encrypt certificate and HTTPS enforcement
 works. (You may switch the record to proxied/orange-cloud with Full SSL *after*
 the GitHub cert is issued, but DNS-only is the reliable default.)
 
+The snippet below is **rerunnable**: it looks the record up first and updates it
+if present, otherwise creates it (a plain `POST` fails once the CNAME exists).
+
 ```bash
+CF="https://api.cloudflare.com/client/v4"
+AUTH=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+
 # Resolve the zone id for garutyunov.com
-ZONE_ID=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-  "https://api.cloudflare.com/client/v4/zones?name=garutyunov.com" \
+ZONE_ID=$(curl -s "${AUTH[@]}" "$CF/zones?name=garutyunov.com" \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['result'][0]['id'])")
 
-# Create the CNAME (idempotent-ish: check first)
-curl -s -X POST \
-  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
-  -d "{\"type\":\"CNAME\",\"name\":\"$NAME\",\"content\":\"gaarutyunov.github.io\",\"proxied\":false,\"ttl\":1}"
-```
+# Does the record already exist? (empty if not)
+REC_ID=$(curl -s "${AUTH[@]}" "$CF/zones/$ZONE_ID/dns_records?name=$DOMAIN&type=CNAME" \
+  | python3 -c "import sys,json;r=json.load(sys.stdin)['result'];print(r[0]['id'] if r else '')")
 
-If the record already exists, update it instead (find its id via
-`GET /zones/$ZONE_ID/dns_records?name=$DOMAIN`, then `PUT` the same body).
+BODY="{\"type\":\"CNAME\",\"name\":\"$NAME\",\"content\":\"gaarutyunov.github.io\",\"proxied\":false,\"ttl\":1}"
+
+if [ -n "$REC_ID" ]; then
+  curl -s -X PUT "${AUTH[@]}" "$CF/zones/$ZONE_ID/dns_records/$REC_ID" -d "$BODY"
+else
+  curl -s -X POST "${AUTH[@]}" "$CF/zones/$ZONE_ID/dns_records" -d "$BODY"
+fi
+```
 
 ### Optional but recommended — domain verification
 
@@ -64,16 +74,31 @@ in the same Cloudflare zone.
 
 ## Step 2 — Enable GitHub Pages
 
-Create the Pages site. Choose the source matching how the site is built:
+Create the Pages site with the **one** command matching how the site is built.
+GitHub supports three sources: a branch at root, a branch's `/docs` folder, or a
+GitHub Actions workflow.
 
 ```bash
-# From a branch (classic — e.g. gh-pages at root):
-gh api -X POST repos/$REPO/pages \
-  -f 'source[branch]=gh-pages' -f 'source[path]=/' 2>/dev/null \
-  || echo "Pages may already be enabled; continuing."
+# a) From a branch at root (classic — e.g. gh-pages):
+gh api -X POST repos/$REPO/pages -f 'source[branch]=gh-pages' -f 'source[path]=/'
 
-# OR, if built by a GitHub Action:
+# b) From a branch's /docs folder:
+# gh api -X POST repos/$REPO/pages -f 'source[branch]=main' -f 'source[path]=/docs'
+
+# c) Built by a GitHub Actions workflow:
 # gh api -X POST repos/$REPO/pages -f build_type=workflow
+```
+
+If Pages is **already enabled**, that `POST` returns HTTP **409**; treat only
+that as "already set up" and let every other error (auth, missing repo, bad
+source, service error) fail loudly:
+
+```bash
+if ! err=$(gh api -X POST repos/$REPO/pages -f 'source[branch]=gh-pages' -f 'source[path]=/' 2>&1); then
+  echo "$err" | grep -q 'HTTP 409' \
+    && echo "Pages already enabled; continuing." \
+    || { echo "$err" >&2; exit 1; }
+fi
 ```
 
 ## Step 3 — Custom domain + enforce HTTPS

@@ -49,16 +49,20 @@ In progress / In review**.
 
 ### 1. Get a task from **Ready**
 
+`gh project item-list` **defaults to 30 items** — pass a high `--limit` so a
+Ready task past the first page isn't missed. The board also holds PRs and draft
+items, so select only entries backed by a real **issue**:
+
 ```bash
-gh project item-list $PROJ --owner $OWNER --format json \
+gh project item-list $PROJ --owner $OWNER --format json --limit 200 \
   | python3 -c "import sys,json; \
     items=json.load(sys.stdin)['items']; \
-    r=[i for i in items if i.get('status')=='Ready']; \
+    r=[i for i in items if i.get('status')=='Ready' and i.get('content',{}).get('type')=='Issue']; \
     print(json.dumps(r[0] if r else {}, indent=2))"
 ```
 
-Pick the top Ready item. Capture its **item id**, the linked **issue** (repo +
-number), and title. If there is no Ready item, stop.
+Pick the top Ready issue. Capture its **item id**, the linked **issue** (repo +
+number), and title. If there is no eligible Ready item, stop.
 
 ### 2. Move it to **In progress**
 
@@ -72,13 +76,18 @@ gh project item-edit --project-id <PROJECT_ID> --id <ITEM_ID> \
 The task's issue lives in some repo `gaarutyunov/<repo>`.
 
 ```bash
+REPO=<repo>; N=<issue-number>
+mkdir -p ~/Projects/workspace/projects        # projects/ may not exist yet
 cd ~/Projects/workspace/projects
-if [ ! -d "<repo>" ]; then
-  gh repo clone gaarutyunov/<repo>
+if [ ! -d "$REPO" ]; then
+  gh repo clone gaarutyunov/$REPO
 else
-  # already cloned — use a worktree so the main checkout is untouched
-  git -C <repo> fetch origin
-  git -C <repo> worktree add ../<repo>-issue-<N> -b issue-<N> origin/main
+  # already cloned — use a worktree so the main checkout is untouched.
+  # Resolve the repo's real default branch (don't assume it's "main").
+  git -C "$REPO" fetch origin
+  DEF=$(gh repo view gaarutyunov/$REPO --json defaultBranchRef \
+        --jq .defaultBranchRef.name)
+  git -C "$REPO" worktree add "../$REPO-issue-$N" -b "issue-$N" "origin/$DEF"
 fi
 ```
 
@@ -144,8 +153,14 @@ project has them.
 
 ### 8. Commit, push
 
+Stage only the paths you intended to change — never `git add -A`, which can
+sweep in unrelated local edits, generated files, or accidentally-present
+secrets. Review the staged diff before committing:
+
 ```bash
-git add -A && git commit -m "<clear message>"   # ref the issue/spec
+git add <path> [<path> ...]     # the specific files for this task
+git diff --cached               # inspect exactly what will be committed
+git commit -m "<clear message>" # ref the issue/spec
 git push
 ```
 
@@ -160,6 +175,48 @@ gh project item-edit --project-id <PROJECT_ID> --id <ITEM_ID> \
 ```
 
 Report: task title, code PR URL, spec PR URL (if any), and what was done.
+
+### 10. Review & merge discipline
+
+**Never merge a PR/MR with unresolved review threads.** Before merging any PR
+(a code PR, or a spec PR once the owner has approved it), work the threads in
+this order:
+
+1. **Owner (human) comments first.** Address every review comment written by the
+   repo owner. These take priority over any bot.
+2. **Then CodeRabbit comments you find valid.** CodeRabbit posts findings with a
+   `🤖 Prompt for AI Agents` block containing the exact fix. Pull them all with
+   the bundled helper:
+
+   ```bash
+   .claude/skills/project-task-loop/scripts/coderabbit-prompts.py gaarutyunov/<repo> <PR#>
+   ```
+
+   **Verify each finding against the current code** — CodeRabbit is often right
+   but not always. Fix the still-valid ones (keep changes minimal); for any you
+   judge invalid, skip the code change but still reply with a brief reason.
+3. **Resolve every thread.** After fixing, reply to the thread (reference the
+   fixing commit) and resolve it; for a declined finding, reply with the reason
+   and resolve. A thread is resolved via the GraphQL `resolveReviewThread`
+   mutation (there is no REST endpoint):
+
+   ```bash
+   # find thread ids + resolved state:
+   gh api graphql -f query='query { repository(owner:"gaarutyunov", name:"<repo>") {
+     pullRequest(number: <PR#>) { reviewThreads(first:50) {
+       nodes { id isResolved comments(first:1){ nodes { author{login} body } } } } } }'
+   # resolve one:
+   gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:"<PRRT_...>"}) { thread { isResolved } } }'
+   ```
+
+4. **Only then merge**, once all threads are resolved and checks are green:
+
+   ```bash
+   gh pr merge <PR#> --repo gaarutyunov/<repo> --squash
+   ```
+
+For a **spec PR**, the owner still merges it (step 6a) — but the same rule
+applies: no unresolved threads before that merge.
 
 ## Looping
 

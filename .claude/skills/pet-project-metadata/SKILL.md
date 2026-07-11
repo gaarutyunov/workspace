@@ -40,8 +40,10 @@ pet project or auditing an existing one.
 ## Setting the metadata
 
 ```bash
-REPO=gaarutyunov/<repo>
-NAME=<repo>
+# Replace these placeholder values before running.
+NAME=your-repo                    # the repo name / subdomain label
+REPO=gaarutyunov/$NAME
+SUBJECT_TOPIC=your-subject-topic  # e.g. stereoscopy
 
 # Description
 gh repo edit "$REPO" --description "One-line description"
@@ -49,8 +51,9 @@ gh repo edit "$REPO" --description "One-line description"
 # Homepage (once the subdomain is live)
 gh repo edit "$REPO" --homepage "https://$NAME.garutyunov.com/"
 
-# Topics (replaces the full set — include every topic you want to keep)
-gh repo edit "$REPO" --add-topic pet-project --add-topic <subject-topic>
+# Topics — --add-topic ADDS to the existing set (it does not replace it).
+# To drop a stale topic, remove it explicitly with --remove-topic.
+gh repo edit "$REPO" --add-topic pet-project --add-topic "$SUBJECT_TOPIC"
 ```
 
 `README.md` and `SPEC.md` are committed files. For a buildless static site,

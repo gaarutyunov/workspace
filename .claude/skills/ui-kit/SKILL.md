@@ -83,14 +83,27 @@ build (`ga-ui-kit.esm.js`) is attached too, for `<script type="module">import`.
 
 ## Usage by framework
 
-### Vanilla HTML / JS
+### Vanilla HTML / JS (no build — standalone release)
+
+Bare specifiers like `@gaarutyunov/ui-kit` do **not** resolve in a browser
+without a bundler or import map, so a true no-build page uses the pinned
+standalone release assets from the section above:
 
 ```html
-<link rel="stylesheet" href="@gaarutyunov/ui-kit/tokens.css" />
-<script type="module">import "@gaarutyunov/ui-kit";</script>
+<link rel="stylesheet"
+  href="https://github.com/gaarutyunov/ui-kit/releases/download/vX.Y.Z/ga-ui-kit.css" />
+<script
+  src="https://github.com/gaarutyunov/ui-kit/releases/download/vX.Y.Z/ga-ui-kit.min.js"></script>
 
 <ga-button variant="primary">Get started</ga-button>
 <ga-alert tone="success" title="Done">Saved your changes.</ga-alert>
+```
+
+With a **bundler** (Vite, etc.), import the package specifiers instead:
+
+```js
+import "@gaarutyunov/ui-kit";              // registers the elements
+import "@gaarutyunov/ui-kit/tokens.css";   // resolved by the bundler
 ```
 
 ### React / Next.js
@@ -156,9 +169,19 @@ Types ship **inside** the kit — no `@types/…` package. Three things are wire
 
 The kit is themed with CSS custom properties that pierce the Shadow DOM
 boundary — set them on `:root` or a container. Load `tokens.css` (npm) or
-`ga-ui-kit.css` (standalone) for the defaults, then override tokens
-(e.g. `--accent`, `--radius`) to match the project. Style isolation is via
-Shadow DOM, so host-page styles cannot leak into components — theme through
+`ga-ui-kit.css` (standalone) for the defaults, then override the **`--ga-`
+prefixed** tokens to match the project:
+
+```css
+:root {
+  --ga-accent: #ac4bff;
+  --ga-radius: 10px;
+  --ga-font-sans: "Inter", system-ui, sans-serif;
+}
+```
+
+See `src/tokens/tokens.css` in the kit for the full token set. Style isolation is
+via Shadow DOM, so host-page styles cannot leak into components — theme through
 tokens, not descendant selectors.
 
 ## Checklist when adding the kit to a project
