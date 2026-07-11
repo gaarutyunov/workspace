@@ -37,6 +37,14 @@ gh project view $PROJ --owner $OWNER --format json --jq '.id'   # project node i
 Keep the project id, Status field id, and the option ids for **Ready /
 In progress / In review**.
 
+> **Confirmed values for project #6 ("growth")** — stable, so you can skip
+> discovery unless the board schema changes:
+>
+> - Project id: `PVT_kwHOAjGWgc4Bcice`
+> - Status field id: `PVTSSF_lAHOAjGWgc4BcicezhXKdRQ`
+> - Options: Backlog `f75ad846` · Ready `61e4505c` · In progress `47fc9ee4` ·
+>   In review `df73e18b` · Done `98236657`
+
 ## The workflow (per task)
 
 ### 1. Get a task from **Ready**

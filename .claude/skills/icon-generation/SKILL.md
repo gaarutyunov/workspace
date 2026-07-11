@@ -22,6 +22,10 @@ A minimalist 3D app icon featuring {ARGUMENT}. The entire icon is a square image
 ## Prerequisites
 
 - `GEMINI_API_KEY` exported (a Google AI Studio / Gemini API key).
+- **Billing enabled** on the key's Google Cloud project. Image models have
+  **zero free-tier quota** — a key without billing returns
+  `429 RESOURCE_EXHAUSTED` (`free_tier … limit: 0`) even though the key and
+  model name are valid.
 - An image-capable Gemini model — currently `gemini-3.1-flash-image` (the 2.5
   image model is old). If a newer image model is current, prefer it and pass it
   as the 3rd script arg.
