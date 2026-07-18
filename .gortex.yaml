@@ -1,0 +1,6 @@
+# Guard: this workspace repo should never be indexed by gortex — only the
+# project clones under projects/ are tracked. Excluding "*" means that even if
+# someone accidentally runs `gortex track` on this repo, it indexes zero source
+# files. The real protection is simply not tracking it; this is belt-and-suspenders.
+exclude:
+    - '*'
