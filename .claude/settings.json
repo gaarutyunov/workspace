@@ -3,5 +3,68 @@
     "allow": [
       "mcp__gortex__*"
     ]
+  },
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "gortex hook",
+            "statusMessage": "Injecting Gortex orientation snapshot...",
+            "timeout": 3000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "gortex hook",
+            "statusMessage": "Enriching with Gortex graph context...",
+            "timeout": 3000,
+            "type": "command"
+          }
+        ],
+        "matcher": "Read|Grep|Glob|Task|Bash|Edit|Write|mcp__gortex__read_file|mcp__gortex__get_editing_context"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "gortex hook",
+            "statusMessage": "Loading Gortex graph orientation...",
+            "timeout": 3000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "gortex hook",
+            "statusMessage": "Running Gortex post-task diagnostics...",
+            "timeout": 5000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "gortex hook",
+            "statusMessage": "Surfacing relevant Gortex symbols...",
+            "timeout": 3000,
+            "type": "command"
+          }
+        ]
+      }
+    ]
   }
 }
