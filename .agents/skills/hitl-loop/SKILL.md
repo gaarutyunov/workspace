@@ -1,14 +1,17 @@
 ---
-name: project-task-loop
-description: "Pull the next task from the gaarutyunov GitHub Project board (project #6), take it through the full delivery workflow (in progress → clone/worktree → branch + PR → triage → spec-or-implement → work → in review), and repeat. Use when asked to work the task board, pick up the next ready task, or run the project loop. Examples: \"work on the next task\", \"pull a task from the board\", \"run the project loop\"."
+name: hitl-loop
+description: "Human-in-the-loop delivery loop: pull the next Ready task from the gaarutyunov GitHub Project board (project #6) and take it through the full workflow (in progress → clone/worktree → branch + PR → triage → spec-or-implement → work → in review) with human gates — waits for owner spec approval before coding, and leaves every PR for human review and merge (never auto-merges). Use when asked to work the task board with review gates. Examples: \"work on the next task\", \"pull a task from the board\", \"run the project loop\". For unattended runs that skip the gates and self-merge on green CI, use the auto-loop skill instead."
 ---
 
-# Project task loop
+# HITL task loop
 
 Drives tasks on the personal GitHub Project board
 [users/gaarutyunov/projects/6](https://github.com/users/gaarutyunov/projects/6)
-through delivery, one task at a time. Run it once for a single task, or drive it
-continuously with the `/loop` skill (see **Looping** below).
+through delivery, one task at a time, **with human review gates** — the owner
+approves specs before implementation, and every PR waits for human review and
+merge. Run it once for a single task, or drive it continuously with the `/loop`
+skill (see **Looping** below). For a fully autonomous variant that skips both
+gates and self-merges once CI is green, use the **auto-loop** skill.
 
 ## Prerequisites
 
@@ -214,7 +217,7 @@ this order:
    the bundled helper:
 
    ```bash
-   .claude/skills/project-task-loop/scripts/coderabbit-prompts.py gaarutyunov/<repo> <PR#>
+   .claude/skills/hitl-loop/scripts/coderabbit-prompts.py gaarutyunov/<repo> <PR#>
    ```
 
    **Verify each finding against the current code** — CodeRabbit is often right
@@ -254,7 +257,7 @@ applies: no unresolved threads before that merge.
 ## Looping
 
 To process the board continuously, drive this skill with the `/loop` skill
-(e.g. `/loop /project-task-loop` for self-paced, or `/loop 15m …`). Each
+(e.g. `/loop /hitl-loop` for self-paced, or `/loop 15m …`). Each
 iteration handles one task end-to-end:
 
 - If there is no **Ready** task, do nothing and wait for the next tick.

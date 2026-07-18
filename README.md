@@ -15,7 +15,8 @@ Authored in this repo:
 | [`ui-kit`](.claude/skills/ui-kit/SKILL.md) | Use the [GA UI Kit](https://github.com/gaarutyunov/ui-kit) (`@gaarutyunov/ui-kit`) web components on pet projects and the personal site. |
 | [`pet-project-metadata`](.claude/skills/pet-project-metadata/SKILL.md) | Apply/audit the standard metadata every pet project needs (description, `pet-project` topic, homepage subdomain, `SPEC.md`, `README.md`, Pages config). |
 | [`subdomain-setup`](.claude/skills/subdomain-setup/SKILL.md) | Publish a repo at `<name>.garutyunov.com` — Cloudflare DNS + GitHub Pages custom domain, HTTPS enforcement, and set Pages as the repo website. |
-| [`project-task-loop`](.claude/skills/project-task-loop/SKILL.md) | Work the [project board](https://github.com/users/gaarutyunov/projects/6): pull a Ready task → In progress → clone/worktree → branch + PR → triage (openspec vs direct) → spec approval gate → work → In review. Includes review/merge discipline (address owner then valid CodeRabbit comments; never merge with unresolved threads) and a `coderabbit-prompts.py` helper. Loopable with `/loop`. |
+| [`hitl-loop`](.claude/skills/hitl-loop/SKILL.md) | **Human-in-the-loop** board driver. Work the [project board](https://github.com/users/gaarutyunov/projects/6): pull a Ready task → In progress → clone/worktree → branch + PR → triage (openspec vs direct) → spec approval gate → work → In review. Includes review/merge discipline (address owner then valid CodeRabbit comments; never merge with unresolved threads) and a `coderabbit-prompts.py` helper. Loopable with `/loop`. |
+| [`auto-loop`](.claude/skills/auto-loop/SKILL.md) | **Autonomous** variant of `hitl-loop`: same flow but no human gates — doesn't wait for spec approval or code review, self-merges each PR once CI is green, then moves the task to Done. For unattended runs where CI is the trust boundary. Loopable with `/loop`. |
 | [`icon-generation`](.claude/skills/icon-generation/SKILL.md) | Generate the standard minimalist 3D voxel app icon via OpenRouter's image models. |
 
 Installed via [`npx skills`](https://skills.sh) (tracked in `skills-lock.json`):
@@ -31,6 +32,6 @@ Installed via [OpenSpec](https://github.com/Fission-AI/openspec) (`openspec init
 `openspec-*` skills and `/opsx:*` commands (`.claude/commands/opsx/`) that drive the
 spec-driven `propose → apply → archive` workflow; project config in `openspec/`.
 
-Invoke a skill with `/<name>` (e.g. `/project-task-loop`), or let Claude Code
+Invoke a skill with `/<name>` (e.g. `/hitl-loop`), or let Claude Code
 auto-select it from the task description. Restore the `npx skills` set on a fresh
 checkout with `npx skills experimental_install`.

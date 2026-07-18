@@ -31,7 +31,7 @@ pet project or auditing an existing one.
   states goal & scope, an isolation/architecture contract, the stable public
   API, and what is explicitly out of scope. Keep it updated as the design
   changes. For substantial specs use the [openspec](https://github.com/Fission-AI/openspec)
-  workflow (see the `project-task-loop` skill).
+  workflow (see the `hitl-loop` skill).
 - **Topics**: always `pet-project`, plus 1–3 subject topics (e.g. `3d-photo`,
   `stereoscopy`).
 - **Design system**: personal-site and pet-project UIs use the GA UI Kit — see

@@ -1,0 +1,133 @@
+---
+name: auto-loop
+description: "Autonomous delivery loop: pull the next Ready task from the gaarutyunov GitHub Project board (project #6) and drive it end-to-end WITHOUT human gates — never waits for owner spec approval or human code review; self-merges each PR once CI is green, then moves the task to Done. Use when asked to run the board unattended / fully autonomously. Examples: \"auto-run the board\", \"run the auto loop\", \"work the board without stopping for review\", \"drive the tasks and merge when CI passes\". For the gated, review-first variant, use the hitl-loop skill instead."
+---
+
+# Auto task loop
+
+The **autonomous** sibling of `hitl-loop`. It drives tasks on the personal
+GitHub Project board
+[users/gaarutyunov/projects/6](https://github.com/users/gaarutyunov/projects/6)
+through delivery one at a time, but **removes every human gate**:
+
+- it does **not** wait for the owner to approve a spec before implementing;
+- it does **not** leave PRs for human review;
+- it **self-merges each PR as soon as CI is green**, then moves the task to
+  **Done**.
+
+> **Use only when the owner has opted into unattended operation.** This loop
+> merges code into default branches without a human in the loop. The only merge
+> gate is green CI, so the project's CI must actually be trustworthy (build +
+> tests + lint on every PR). If in doubt, use `hitl-loop` instead.
+
+The mechanics it shares with `hitl-loop` — board discovery, clone/worktree,
+branch/PR, the OpenSpec `/opsx:*` flow, the `coderabbit-prompts.py` helper — are
+**not duplicated here**; read `hitl-loop`'s SKILL.md for those. This file
+specifies only what differs.
+
+## Prerequisites
+
+Same as `hitl-loop`: `gh` authenticated with the `project` scope
+(`gh auth refresh -s project`), specs authored via OpenSpec in this workspace
+repo, code repos cloned/worktree'd under `projects/` (gitignored — see the
+workspace `AGENTS.md` clone rule).
+
+## Board IDs (project #6 "growth")
+
+Stable — skip discovery unless the schema changes:
+
+- Project id: `PVT_kwHOAjGWgc4Bcice`
+- Status field id: `PVTSSF_lAHOAjGWgc4BcicezhXKdRQ`
+- Options: Backlog `f75ad846` · Ready `61e4505c` · In progress `47fc9ee4` ·
+  In review `df73e18b` · Done `98236657`
+
+## The workflow (per task)
+
+### 1. Get a task from **Ready**, move it to **In progress**
+
+Identical to `hitl-loop` steps 1–2: pick the top item with `status == 'Ready'`
+and `content.type == 'Issue'` (pass `--limit 200`), capture its item id + linked
+issue + title, and set Status to **In progress** (`47fc9ee4`). If there is no
+eligible Ready item, stop (or idle on the next tick when looping).
+
+### 2. Get the code repo ready, branch, open a PR
+
+Identical to `hitl-loop` steps 3–4: clone into `projects/<repo>` or add a
+worktree; create `issue-<N>`; open a PR early with `--body "Closes #<N>"`.
+
+### 3. Triage — spec-first vs direct (no approval gate)
+
+Use the same spec-vs-direct judgment as `hitl-loop` step 5. The difference is
+**there is no human approval gate on either path**:
+
+- **Spec-first:** author the change with `/opsx:propose <repo>-issue-<N>-<slug>`,
+  open the spec PR in this workspace repo, wait for **its** CI to go green, then
+  **self-merge it** (`gh pr merge --squash --auto`, see step 5). Do **not** wait
+  for owner approval. Then implement from the change's `tasks.md` with
+  `/opsx:apply`, and `/opsx:archive` once the work has shipped.
+- **Direct:** go straight to the work.
+
+Autonomy caveat: without a human approving the spec, be conservative — keep the
+change scoped to exactly what the issue asks, and prefer the direct path unless a
+spec genuinely reduces risk.
+
+### 4. Perform the work, commit, push
+
+Implement in the branch/worktree with tests where the project has them. Keep the
+staging discipline from `hitl-loop` step 8 — **never `git add -A`**; stage only
+the specific paths, inspect `git diff --cached`, commit referencing the issue,
+push. Ensure the PR body links the issue (`Closes #<N>`).
+
+### 5. Merge when CI is green (the only gate)
+
+Enable auto-merge so the PR merges itself the moment required checks pass:
+
+```bash
+gh pr merge <PR#> --repo gaarutyunov/<repo> --squash --auto
+```
+
+If the repo has no branch protection (auto-merge unavailable), poll and merge:
+
+```bash
+gh pr checks <PR#> --repo gaarutyunov/<repo> --watch   # blocks until checks settle
+gh pr merge  <PR#> --repo gaarutyunov/<repo> --squash  # merge once green
+```
+
+Rules:
+
+- **Green CI is the sole merge gate.** Merge once all *required* checks pass.
+- **If CI fails, fix it — do not merge.** Push fixes to the same branch and let
+  checks re-run. If it can't be made green (e.g. a genuine blocker), leave the
+  task in **In progress**, comment why on the issue/PR, and move on to the next
+  Ready task rather than merging red or blocking the loop.
+- **Bots never gate the merge.** You *may* fold in already-posted CodeRabbit
+  findings opportunistically (using `hitl-loop`'s `coderabbit-prompts.py`), but
+  do **not** wait for CodeRabbit or for any human review, and do not block on a
+  rate-limited/limit-reached bot.
+
+### 6. Move the task to **Done**
+
+After the merge lands:
+
+```bash
+gh project item-edit --project-id PVT_kwHOAjGWgc4Bcice --id <ITEM_ID> \
+  --field-id PVTSSF_lAHOAjGWgc4BcicezhXKdRQ --single-select-option-id 98236657
+```
+
+Report: task title, merged PR URL, spec PR URL (if any), and what shipped.
+
+## Looping
+
+Drive continuously with `/loop` (e.g. `/loop /auto-loop`, or `/loop 15m …`). Each
+iteration takes one task from Ready all the way to **merged + Done**. Unlike
+`hitl-loop`, there is **no spec-approval hard gate**, so a task is never parked
+waiting on a human — the only reason to leave a task in **In progress** is CI
+that can't be made green. If there is no Ready task, idle until the next tick.
+
+## Related skills
+
+- `hitl-loop` — the gated, review-first variant (owner approves specs; humans
+  review and merge). Shares the board mechanics and the `coderabbit-prompts.py`
+  helper this skill refers to.
+- `pet-project-metadata`, `subdomain-setup`, `ui-kit`, `icon-generation` — same
+  supporting skills `hitl-loop` lists.
