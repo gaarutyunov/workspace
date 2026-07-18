@@ -1,6 +1,6 @@
 ---
 name: hitl-loop
-description: "Human-in-the-loop delivery loop: pull the next Ready task from the gaarutyunov GitHub Project board (project #6) and take it through the full workflow (in progress → clone/worktree → branch + PR → triage → spec-or-implement → work → in review) with human gates — waits for owner spec approval before coding, and leaves every PR for human review and merge (never auto-merges). Use when asked to work the task board with review gates. Examples: \"work on the next task\", \"pull a task from the board\", \"run the project loop\". For unattended runs that skip the gates and self-merge on green CI, use the auto-loop skill instead."
+description: "Human-in-the-loop delivery loop: pull the next Ready task marked Loop=hitl on the gaarutyunov GitHub Project board (project #6) and take it through the full workflow (in progress → clone/worktree → branch + PR → triage → spec-or-implement → work → in review) with human gates — waits for owner spec approval before coding, and leaves every PR for human review and merge (never auto-merges). Use when asked to work the task board with review gates. Examples: \"work on the next task\", \"pull a task from the board\", \"run the project loop\". For unattended runs that skip the gates and self-merge on green CI, use the auto-loop skill instead."
 ---
 
 # HITL task loop
@@ -48,25 +48,36 @@ In progress / In review**.
 > - Status field id: `PVTSSF_lAHOAjGWgc4BcicezhXKdRQ`
 > - Options: Backlog `f75ad846` · Ready `61e4505c` · In progress `47fc9ee4` ·
 >   In review `df73e18b` · Done `98236657`
+> - **Loop field id: `PVTSSF_lAHOAjGWgc4BcicezhYRXrw`** · options: hitl
+>   `d03523f4` · auto `ee15c5cc`
+
+The **Loop** field routes each task to exactly one loop: this skill only handles
+items with **Loop = `hitl`**; `auto`-marked items belong to the `auto-loop`
+skill. In the item-list JSON the value appears under the top-level `loop` key.
 
 ## The workflow (per task)
 
-### 1. Get a task from **Ready**
+### 1. Get a task from **Ready** marked **Loop = hitl**
 
 `gh project item-list` **defaults to 30 items** — pass a high `--limit` so a
 Ready task past the first page isn't missed. The board also holds PRs and draft
-items, so select only entries backed by a real **issue**:
+items, so select only entries backed by a real **issue**, and only those routed
+to this loop (**`loop == 'hitl'`**):
 
 ```bash
 gh project item-list $PROJ --owner $OWNER --format json --limit 200 \
   | python3 -c "import sys,json; \
     items=json.load(sys.stdin)['items']; \
-    r=[i for i in items if i.get('status')=='Ready' and i.get('content',{}).get('type')=='Issue']; \
+    r=[i for i in items if i.get('status')=='Ready' \
+       and i.get('loop')=='hitl' \
+       and i.get('content',{}).get('type')=='Issue']; \
     print(json.dumps(r[0] if r else {}, indent=2))"
 ```
 
-Pick the top Ready issue. Capture its **item id**, the linked **issue** (repo +
-number), and title. If there is no eligible Ready item, stop.
+Pick the top matching issue. Capture its **item id**, the linked **issue** (repo
++ number), and title. If there is no eligible item, stop. A Ready issue with **no
+Loop value** (or `Loop = auto`) is **not** this loop's to take — leave it
+untouched.
 
 ### 2. Move it to **In progress**
 
@@ -260,7 +271,8 @@ To process the board continuously, drive this skill with the `/loop` skill
 (e.g. `/loop /hitl-loop` for self-paced, or `/loop 15m …`). Each
 iteration handles one task end-to-end:
 
-- If there is no **Ready** task, do nothing and wait for the next tick.
+- If there is no **Ready** task marked **Loop = hitl**, do nothing and wait for
+  the next tick. (`auto`-marked and unrouted tasks are not this loop's.)
 - If a task is blocked on **spec approval** (step 6a), leave it in
   **In progress**, note that it's awaiting review, and pick up the next Ready
   task (or idle if none) rather than blocking the whole loop.

@@ -1,6 +1,6 @@
 ---
 name: auto-loop
-description: "Autonomous delivery loop: pull the next Ready task from the gaarutyunov GitHub Project board (project #6) and drive it end-to-end WITHOUT human gates — never waits for owner spec approval or human code review; self-merges each PR once CI is green, then moves the task to Done. Use when asked to run the board unattended / fully autonomously. Examples: \"auto-run the board\", \"run the auto loop\", \"work the board without stopping for review\", \"drive the tasks and merge when CI passes\". For the gated, review-first variant, use the hitl-loop skill instead."
+description: "Autonomous delivery loop: pull the next Ready task marked Loop=auto on the gaarutyunov GitHub Project board (project #6) and drive it end-to-end WITHOUT human gates — never waits for owner spec approval or human code review; self-merges each PR once CI is green, then moves the task to Done. Use when asked to run the board unattended / fully autonomously. Examples: \"auto-run the board\", \"run the auto loop\", \"work the board without stopping for review\", \"drive the tasks and merge when CI passes\". For the gated, review-first variant, use the hitl-loop skill instead."
 ---
 
 # Auto task loop
@@ -40,15 +40,33 @@ Stable — skip discovery unless the schema changes:
 - Status field id: `PVTSSF_lAHOAjGWgc4BcicezhXKdRQ`
 - Options: Backlog `f75ad846` · Ready `61e4505c` · In progress `47fc9ee4` ·
   In review `df73e18b` · Done `98236657`
+- **Loop field id: `PVTSSF_lAHOAjGWgc4BcicezhYRXrw`** · options: hitl `d03523f4`
+  · auto `ee15c5cc`
+
+The **Loop** field routes each task to one loop. This skill only handles items
+with **Loop = `auto`**; `hitl`-marked items belong to the `hitl-loop` skill. In
+the item-list JSON the value is the top-level `loop` key.
 
 ## The workflow (per task)
 
-### 1. Get a task from **Ready**, move it to **In progress**
+### 1. Get a task from **Ready** marked **Loop = auto**, move it to **In progress**
 
-Identical to `hitl-loop` steps 1–2: pick the top item with `status == 'Ready'`
-and `content.type == 'Issue'` (pass `--limit 200`), capture its item id + linked
-issue + title, and set Status to **In progress** (`47fc9ee4`). If there is no
-eligible Ready item, stop (or idle on the next tick when looping).
+Same as `hitl-loop` step 1 but filtered to this loop (**`loop == 'auto'`**):
+
+```bash
+gh project item-list $PROJ --owner $OWNER --format json --limit 200 \
+  | python3 -c "import sys,json; \
+    items=json.load(sys.stdin)['items']; \
+    r=[i for i in items if i.get('status')=='Ready' \
+       and i.get('loop')=='auto' \
+       and i.get('content',{}).get('type')=='Issue']; \
+    print(json.dumps(r[0] if r else {}, indent=2))"
+```
+
+Capture the top match's item id + linked issue + title, then set Status to
+**In progress** (`47fc9ee4`). A Ready issue with **no Loop value** (or
+`Loop = hitl`) is **not** this loop's — leave it untouched. If there is no
+eligible item, stop (or idle on the next tick when looping).
 
 ### 2. Get the code repo ready, branch, open a PR
 
@@ -122,7 +140,8 @@ Drive continuously with `/loop` (e.g. `/loop /auto-loop`, or `/loop 15m …`). E
 iteration takes one task from Ready all the way to **merged + Done**. Unlike
 `hitl-loop`, there is **no spec-approval hard gate**, so a task is never parked
 waiting on a human — the only reason to leave a task in **In progress** is CI
-that can't be made green. If there is no Ready task, idle until the next tick.
+that can't be made green. If there is no Ready task marked **Loop = auto**, idle
+until the next tick.
 
 ## Related skills
 
