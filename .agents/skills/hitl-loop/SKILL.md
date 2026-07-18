@@ -86,33 +86,56 @@ gh project item-edit --project-id <PROJECT_ID> --id <ITEM_ID> \
   --field-id <STATUS_FIELD_ID> --single-select-option-id <IN_PROGRESS_OPTION_ID>
 ```
 
-### 3. Get the code repo ready (clone or worktree)
+### 3. Get the code repo ready (clone once, then a worktree per task)
 
-The task's issue lives in some repo `gaarutyunov/<repo>`.
+The task's issue lives in some repo `gaarutyunov/<repo>`. Clone it **once** into
+`projects/<repo>` — the base checkout stays on the default branch and is never
+worked on directly; every task gets its own git worktree under
+`projects/<repo>/.worktrees/<branch>`.
 
 ```bash
 REPO=<repo>; N=<issue-number>
 mkdir -p ~/Projects/workspace/projects        # projects/ may not exist yet
 cd ~/Projects/workspace/projects
+
+# Clone the base repo once and index it; keep .worktrees/ out of its git status.
 if [ ! -d "$REPO" ]; then
   gh repo clone gaarutyunov/$REPO
-else
-  # already cloned — use a worktree so the main checkout is untouched.
-  # Resolve the repo's real default branch (don't assume it's "main").
-  git -C "$REPO" fetch origin
-  DEF=$(gh repo view gaarutyunov/$REPO --json defaultBranchRef \
-        --jq .defaultBranchRef.name)
-  git -C "$REPO" worktree add "../$REPO-issue-$N" -b "issue-$N" "origin/$DEF"
+  gortex track ~/Projects/workspace/projects/$REPO       # index the base clone
+  grep -qxF '.worktrees/' "$REPO/.git/info/exclude" 2>/dev/null \
+    || echo '.worktrees/' >> "$REPO/.git/info/exclude"
 fi
+
+# ALWAYS branch from fresh origin/<default> so a stale local main can't produce a
+# broken branch. Resolve the real default branch (don't assume it's "main").
+git -C "$REPO" fetch origin
+DEF=$(gh repo view gaarutyunov/$REPO --json defaultBranchRef \
+      --jq .defaultBranchRef.name)
+git -C "$REPO" worktree add ".worktrees/issue-$N" -b "issue-$N" "origin/$DEF"
+
+# gortex does NOT auto-index a worktree — register it explicitly as its own
+# instance so the graph/MCP tools cover the code you're actually editing.
+gortex track --as-worktree ~/Projects/workspace/projects/$REPO/.worktrees/issue-$N
 ```
 
-### 4. Create a branch and a PR
+**gortex tracking — worktrees are not picked up automatically.** gortex indexes
+only paths it has been told to track. A worktree created under `.worktrees/` is
+*untracked in the base repo*, so a plain `gortex track <repo>` does **not** reach
+it (verified: the worktree's symbols never appear in the base repo's graph).
+Register the base clone once with `gortex track <repo>` and **each worktree** with
+`gortex track --as-worktree <worktree-path>`, so the graph/MCP code tools
+(`search_symbols`, `find_usages`, `get_callers`, `smart_context`, …) can query
+the code you're editing. Tracking indexes in the background; add `--wait`
+(optionally `--wait-timeout 5m`) when you need the graph queryable before the
+next step. Re-tracking an already-tracked path is a harmless no-op.
 
-If you cloned fresh, branch from the default branch:
+### 4. Open a PR
+
+The worktree already created the `issue-<N>` branch from fresh `origin/<default>`.
+From inside it, push an empty starter commit and open the PR early:
 
 ```bash
-cd <repo>            # or the worktree dir
-git checkout -b issue-<N>
+cd ~/Projects/workspace/projects/<repo>/.worktrees/issue-<N>
 git commit --allow-empty -m "Start work on #<N>"
 git push -u origin issue-<N>
 gh pr create --repo gaarutyunov/<repo> --fill \

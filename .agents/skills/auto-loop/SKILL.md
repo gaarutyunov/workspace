@@ -70,8 +70,13 @@ eligible item, stop (or idle on the next tick when looping).
 
 ### 2. Get the code repo ready, branch, open a PR
 
-Identical to `hitl-loop` steps 3–4: clone into `projects/<repo>` or add a
-worktree; create `issue-<N>`; open a PR early with `--body "Closes #<N>"`.
+Identical to `hitl-loop` steps 3–4: clone the repo **once** into
+`projects/<repo>`, then add a per-task git worktree under
+`projects/<repo>/.worktrees/issue-<N>` branched from **fresh `origin/<default>`**
+(always `git fetch` first — never branch off a stale local main); open a PR early
+with `--body "Closes #<N>"`. Index for the graph/MCP tools as you go: `gortex
+track` the base clone once, and `gortex track --as-worktree <worktree-path>` each
+worktree — gortex does **not** auto-index worktrees. See `hitl-loop` step 3.
 
 ### 3. Triage — spec-first vs direct (no approval gate)
 
