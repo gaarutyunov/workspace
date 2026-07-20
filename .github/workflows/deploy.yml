@@ -1,0 +1,28 @@
+name: Deploy
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+permissions:
+  contents: write # push to gh-pages branch
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The landing under site/ is static HTML — no build step. Deploy it as-is.
+      - name: Deploy to gh-pages (root)
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: gh-pages
+          folder: site
+          clean: true
+          # Preserve preview subfolders so deploys don't wipe open PR previews:
+          clean-exclude: |
+            pr-preview/
