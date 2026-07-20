@@ -68,31 +68,45 @@ Capture the top match's item id + linked issue + title, then set Status to
 `Loop = hitl`) is **not** this loop's — leave it untouched. If there is no
 eligible item, stop (or idle on the next tick when looping).
 
-### 1a. Epic check — decompose if too large to finish in one iteration
+### 1a. Epic / blocked check — decompose or unblock, never dead-end
 
 Before touching code, judge whether the task can realistically be **implemented
-and merged to Done in a single iteration**. Treat it as an **epic** (too large)
-when any of these hold: it spans multiple independent subsystems/layers; it would
-run to thousands of LOC or many separate deliverables; or its body is a
-multi-part checklist where each box is itself a shippable unit. A ground-up
-reimplementation, a whole new subsystem, or "implement spec X" where X defines
-several layers is almost always an epic.
+and merged to Done in a single iteration**. Two conditions divert it from the
+normal path — and **both are resolved the same way: research a path forward and
+decompose into Ready/auto sub-issues. Never silently park a task as "blocked."**
 
-If it is an epic, **do not try to build it all in one PR.** Instead decompose it
-and let the loop grind the pieces:
+- **Epic (too large):** it spans multiple independent subsystems/layers; it would
+  run to thousands of LOC or many separate deliverables; or its body is a
+  multi-part checklist where each box is itself a shippable unit. A ground-up
+  reimplementation, a whole new subsystem, or "implement spec X" where X defines
+  several layers is almost always an epic.
+- **Blocked (can't reach merged-green this iteration):** it depends on something
+  not yet on `main` — an unimplemented or unwired subsystem, unmerged/parked
+  branches, an upstream fix, or an unmade design decision. A blocker is **not** a
+  reason to stop; it is the signal to **research the fix or the decomposition**
+  and turn it into actionable work the loop can grind down.
 
-1. **Design the breakdown.** Split the epic into the smallest set of
-   **independently deliverable, independently mergeable** sub-issues, ordered so
-   each builds only on already-merged ones (foundation layers first). Each
-   sub-issue must be sized to go Ready → merged in one iteration on its own.
+In either case, **do not force it through in one PR, and do not just comment
+"blocked" and move on.** Research the path forward, then decompose and let the
+loop grind the pieces:
+
+1. **Research the fix / breakdown.** Understand *why* it is too big or blocked —
+   read the code, the specs, the parked branches, the failing checks — then design
+   the smallest set of **independently deliverable, independently mergeable**
+   sub-issues, ordered so each builds only on already-merged ones (foundation /
+   unblocking layers first). Each sub-issue must be sized to go Ready → merged in
+   one iteration on its own. If a foundation piece is *itself* still an epic or
+   still blocked, that is fine: a later iteration picks it up and decomposes it
+   **again** by this same rule (recursive decomposition — the loop never
+   dead-ends).
 2. **Create a GitHub issue per piece** in the **code repo** (not the workspace
    repo): `gh issue create --repo gaarutyunov/<repo> --title "…" --body "…" --label auto`.
-   Write a self-contained body (goal, scope, acceptance) and reference the epic
-   (`Part of #<EPIC>`). Create the `auto` label first if missing
+   Write a self-contained body (goal, scope, acceptance) and reference the parent
+   (`Part of #<PARENT>`). Create the `auto` label first if missing
    (`gh label create auto -R gaarutyunov/<repo> --color ededed 2>/dev/null || true`).
 3. **Put each sub-issue on the board as this loop's work.** Add it to project #6
-   and set **Status = Ready** (`61e4505c`) and **Loop = auto** (`ee15c5cc`) so
-   future iterations pick it up:
+   and set **Status = Ready** (`61e4505c`) and **Loop = auto** (`ee15c5cc`) so the
+   **next iteration picks it up automatically**:
 
    ```bash
    ITEM=$(gh project item-add 6 --owner gaarutyunov --url <issue-url> --format json | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
@@ -101,19 +115,20 @@ and let the loop grind the pieces:
    gh project item-edit --project-id PVT_kwHOAjGWgc4Bcice --id "$ITEM" \
      --field-id PVTSSF_lAHOAjGWgc4BcicezhYRXrw --single-select-option-id ee15c5cc   # Loop=auto
    ```
-4. **Turn the epic into a tracking checklist.** Edit the epic body to add a
+4. **Turn the parent into a tracking checklist.** Edit the parent body to add a
    `## Sub-issues` checklist linking every child (`- [ ] #<n> — <title>`), so the
-   epic reflects progress as children merge.
-5. **Park the epic, don't finish it.** Set the epic itself to **In progress**
-   (`47fc9ee4`) — it is a tracker now, not a codeable task. It moves to **Done**
-   only in a later iteration once **all** its sub-issues are merged (verify every
-   checklist box is checked / every child is Done before moving the epic).
+   parent reflects progress as children merge.
+5. **Park the parent as a tracker, don't finish it.** Set the parent itself to
+   **In progress** (`47fc9ee4`) — it is a tracker now, not a codeable task. It
+   moves to **Done** only in a later iteration once **all** its sub-issues are
+   merged (verify every checklist box is checked / every child is Done before
+   moving the parent).
 6. **Continue.** Proceed to work the first sub-issue this iteration (steps 2–6
-   below), or let the next tick pick it up. Never leave the epic itself as the
+   below), or let the next tick pick it up. Never leave the parent itself as the
    task to "implement".
 
-For a normally-sized task (fits one iteration), skip all of this and go straight
-to step 2.
+For a normally-sized, unblocked task (fits one iteration), skip all of this and go
+straight to step 2.
 
 ### 2. Get the code repo ready, branch, open a PR
 
@@ -167,9 +182,12 @@ Rules:
 
 - **Green CI is the sole merge gate.** Merge once all *required* checks pass.
 - **If CI fails, fix it — do not merge.** Push fixes to the same branch and let
-  checks re-run. If it can't be made green (e.g. a genuine blocker), leave the
-  task in **In progress**, comment why on the issue/PR, and move on to the next
-  Ready task rather than merging red or blocking the loop.
+  checks re-run when the fix is small and local. If it can't be made green because
+  the task depends on missing/unmerged foundations or an upstream fix, treat it as
+  **blocked** and hand it back to the step 1a decomposition — research the
+  unblock, file Ready/auto sub-issues for the foundation work, turn this task into
+  a tracker, and move on. **Never merge red, and never leave a blocker as a bare
+  "blocked" comment with no follow-up work created.**
 - **Bots never gate the merge.** You *may* fold in already-posted CodeRabbit
   findings opportunistically (using `hitl-loop`'s `coderabbit-prompts.py`), but
   do **not** wait for CodeRabbit or for any human review, and do not block on a
@@ -190,13 +208,17 @@ Report: task title, merged PR URL, spec PR URL (if any), and what shipped.
 
 Drive continuously with `/loop` (e.g. `/loop /auto-loop`, or `/loop 15m …`). Each
 iteration takes one task from Ready all the way to **merged + Done** — except an
-**epic**, which an iteration instead decomposes into Ready sub-issues and parks
-as a tracker (step 1a); the loop then delivers those sub-issues on subsequent
-ticks and closes the epic once they are all merged. Unlike `hitl-loop`, there is
-**no spec-approval hard gate**, so a task is never parked waiting on a human — the
-only reasons to leave a task in **In progress** are an epic acting as a tracker,
-or CI that can't be made green. If there is no Ready task marked **Loop = auto**,
-idle until the next tick.
+**epic or a blocked task**, which an iteration instead **researches and
+decomposes** into Ready/auto sub-issues and parks as a tracker (step 1a); the loop
+then delivers those sub-issues on subsequent ticks (decomposing again if any is
+itself still an epic or blocked) and closes the parent once all its children are
+merged. Unlike `hitl-loop`, there is **no spec-approval hard gate**, so a task is
+never parked waiting on a human. **The only reason to leave a task in In progress
+is that it has become a tracker** — an epic or blocker this iteration decomposed
+into Ready/auto sub-issues. A blocker is never a dead end: it is researched,
+broken into foundation sub-issues, and those are picked up on later ticks until
+the parent's children are all merged. If there is no Ready task marked
+**Loop = auto**, idle until the next tick.
 
 ## Related skills
 
