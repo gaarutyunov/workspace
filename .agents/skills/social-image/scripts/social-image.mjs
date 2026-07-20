@@ -105,13 +105,19 @@ async function renderHeroToTempDir({ title, tagline, iconPath }) {
   const templatePath = join(here, "hero-template.html");
   let html = await readFile(templatePath, "utf8");
 
+  // Validate the icon before creating the temp dir, and throw (not fail/exit)
+  // so main()'s finally block still runs its browser/temp cleanup.
+  let iconAbs = null;
+  if (iconPath) {
+    iconAbs = resolve(process.cwd(), iconPath);
+    if (!existsSync(iconAbs)) throw new Error(`--icon not found: ${iconPath}`);
+  }
+
   const dir = await mkdtemp(join(tmpdir(), "social-image-hero-"));
   // Copy the icon next to the HTML so the page can reference it relatively.
   let iconRef = "";
-  if (iconPath) {
-    const abs = resolve(process.cwd(), iconPath);
-    if (!existsSync(abs)) fail(`--icon not found: ${iconPath}`);
-    await copyFile(abs, join(dir, "icon.png"));
+  if (iconAbs) {
+    await copyFile(iconAbs, join(dir, "icon.png"));
     iconRef = "./icon.png";
   }
 
@@ -129,32 +135,23 @@ async function capture(page, { selector }) {
   await page.waitForLoadState("networkidle").catch(() => {});
   await page.evaluate(() => document.fonts && document.fonts.ready).catch(() => {});
 
+  // The context viewport is fixed at OG_WIDTH x OG_HEIGHT, so a plain viewport
+  // screenshot is exactly 1200x630 — no clip (which can go out of bounds).
   if (selector === "__viewport__") {
-    return page.screenshot({
-      clip: { x: 0, y: 0, width: OG_WIDTH, height: OG_HEIGHT },
-      type: "png",
-    });
+    return page.screenshot({ type: "png" });
   }
 
   const candidates = selector ? [selector] : DEFAULT_SELECTORS;
   for (const sel of candidates) {
     const el = await page.$(sel);
-    if (el) {
-      // Clip to OG size anchored at the element's top-left for a stable frame.
-      const box = await el.boundingBox();
-      if (!box) continue;
-      return page.screenshot({
-        clip: {
-          x: Math.max(0, box.x),
-          y: Math.max(0, box.y),
-          width: OG_WIDTH,
-          height: OG_HEIGHT,
-        },
-        type: "png",
-      });
-    }
+    if (!el) continue;
+    // Scroll the hero to the viewport's top-left, then capture the fixed
+    // viewport. Aligning by scroll (not a page-coordinate clip) keeps the frame
+    // in-bounds even when the hero sits below the fold.
+    await el.evaluate((e) => e.scrollIntoView({ block: "start", inline: "start" }));
+    return page.screenshot({ type: "png" });
   }
-  fail(
+  throw new Error(
     `no hero element matched (${(selector ? [selector] : DEFAULT_SELECTORS).join(
       ", ",
     )}). Pass --selector to point at the hero.`,
