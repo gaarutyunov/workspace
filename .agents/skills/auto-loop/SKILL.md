@@ -20,53 +20,43 @@ through delivery one at a time, but **removes every human gate**:
 > gate is green CI, so the project's CI must actually be trustworthy (build +
 > tests + lint on every PR). If in doubt, use `hitl-loop` instead.
 
-The mechanics it shares with `hitl-loop` — board discovery, clone/worktree,
-branch/PR, the OpenSpec `/opsx:*` flow, the `coderabbit-prompts.py` helper — are
-**not duplicated here**; read `hitl-loop`'s SKILL.md for those. This file
-specifies only what differs.
+## Shared mechanics live in `loop-common`
+
+The board IDs, Ready-task selection, the **always-read-comments** rule,
+clone/worktree + gortex tracking, opening a PR early, the OpenSpec `/opsx:*`
+flow, commit/push discipline, moving a task's status, and the
+`coderabbit-prompts.py` helper are all documented **once** in the `loop-common`
+skill — read `.claude/skills/loop-common/SKILL.md`. This file specifies only what
+differs in the **autonomous path**: `Loop = auto`, epic/blocked decomposition,
+and self-merging on green CI.
+
+> **Read the comments every time — even unattended.** Per `loop-common`, before
+> you act on a task in **any** active status (Ready / In progress / In review) —
+> including each time a later tick resumes it or returns to its PR — read the
+> issue's and the PR's comments first and treat owner comments as instructions.
+> Only Backlog and Done are exempt. This is how the owner steers an
+> otherwise-unattended loop: a comment left between ticks is a directive, so a
+> loop that never reads comments will ship work the owner already redirected.
 
 ## Prerequisites
 
-Same as `hitl-loop`: `gh` authenticated with the `project` scope
-(`gh auth refresh -s project`), specs authored via OpenSpec in this workspace
-repo, code repos cloned/worktree'd under `projects/` (gitignored — see the
-workspace `AGENTS.md` clone rule).
-
-## Board IDs (project #6 "growth")
-
-Stable — skip discovery unless the schema changes:
-
-- Project id: `PVT_kwHOAjGWgc4Bcice`
-- Status field id: `PVTSSF_lAHOAjGWgc4BcicezhXKdRQ`
-- Options: Backlog `f75ad846` · Ready `61e4505c` · In progress `47fc9ee4` ·
-  In review `df73e18b` · Done `98236657`
-- **Loop field id: `PVTSSF_lAHOAjGWgc4BcicezhYRXrw`** · options: hitl `d03523f4`
-  · auto `ee15c5cc`
-
-The **Loop** field routes each task to one loop. This skill only handles items
-with **Loop = `auto`**; `hitl`-marked items belong to the `hitl-loop` skill. In
-the item-list JSON the value is the top-level `loop` key.
+Same as `loop-common`: `gh` authenticated with the `project` scope
+(`gh auth refresh -s project`); OpenSpec initialized in this workspace repo; code
+repos cloned/worktree'd under `projects/`.
 
 ## The workflow (per task)
 
 ### 1. Get a task from **Ready** marked **Loop = auto**, move it to **In progress**
 
-Same as `hitl-loop` step 1 but filtered to this loop (**`loop == 'auto'`**):
+Use the `loop-common` **Select a Ready task** query with `LOOP=auto`. Capture the
+item id, linked issue (repo + number), and title. A Ready issue with no Loop
+value (or `Loop = hitl`) is **not** this loop's — leave it untouched. If there is
+no eligible item, stop (or idle on the next tick when looping).
 
-```bash
-gh project item-list $PROJ --owner $OWNER --format json --limit 200 \
-  | python3 -c "import sys,json; \
-    items=json.load(sys.stdin)['items']; \
-    r=[i for i in items if i.get('status')=='Ready' \
-       and i.get('loop')=='auto' \
-       and i.get('content',{}).get('type')=='Issue']; \
-    print(json.dumps(r[0] if r else {}, indent=2))"
-```
-
-Capture the top match's item id + linked issue + title, then set Status to
-**In progress** (`47fc9ee4`). A Ready issue with **no Loop value** (or
-`Loop = hitl`) is **not** this loop's — leave it untouched. If there is no
-eligible item, stop (or idle on the next tick when looping).
+**Read the comments now** (`loop-common` → *Always read the comments*): pull the
+issue's comments before touching code, so any owner direction left on the task
+shapes what you build. Then move the item to **In progress** (`47fc9ee4`) with the
+status-edit command in `loop-common`.
 
 ### 1a. Epic / blocked check — decompose or unblock, never dead-end
 
@@ -123,49 +113,46 @@ loop grind the pieces:
    moves to **Done** only in a later iteration once **all** its sub-issues are
    merged (verify every checklist box is checked / every child is Done before
    moving the parent).
-6. **Continue.** Proceed to work the first sub-issue this iteration (steps 2–6
+6. **Continue.** Proceed to work the first sub-issue this iteration (steps 2–4
    below), or let the next tick pick it up. Never leave the parent itself as the
    task to "implement".
 
 For a normally-sized, unblocked task (fits one iteration), skip all of this and go
 straight to step 2.
 
-### 2. Get the code repo ready, branch, open a PR
+### 2. Get the code repo ready, open a PR, triage
 
-Identical to `hitl-loop` steps 3–4: clone the repo **once** into
-`projects/<repo>`, then add a per-task git worktree under
-`projects/<repo>/.worktrees/issue-<N>` branched from **fresh `origin/<default>`**
-(always `git fetch` first — never branch off a stale local main); open a PR early
-with `--body "Closes #<N>"`. Index for the graph/MCP tools as you go: `gortex
-track` the base clone once, and `gortex track --as-worktree <worktree-path>` each
-worktree — gortex does **not** auto-index worktrees. See `hitl-loop` step 3.
+Follow `loop-common` verbatim: clone once into `projects/<repo>`, add a per-task
+worktree from fresh `origin/<default>`, `gortex track` the base + worktree, open
+the PR early with `--body "Closes #<N>"`, then triage **spec-first vs
+implement-directly**.
 
-### 3. Triage — spec-first vs direct (no approval gate)
+The difference from `hitl-loop` is that **there is no human approval gate on
+either path**:
 
-Use the same spec-vs-direct judgment as `hitl-loop` step 5. The difference is
-**there is no human approval gate on either path**:
-
-- **Spec-first:** author the change with `/opsx:propose <repo>-issue-<N>-<slug>`,
+- **Spec-first:** author the change with `loop-common`'s `/opsx:propose` flow,
   open the spec PR in this workspace repo, wait for **its** CI to go green, then
-  **self-merge it** (`gh pr merge --squash --auto`, see step 5). Do **not** wait
-  for owner approval. Then implement from the change's `tasks.md` with
-  `/opsx:apply`, and `/opsx:archive` once the work has shipped.
+  **self-merge it** (`gh pr merge --squash --auto`, see step 4). Do **not** wait
+  for owner approval. Then implement from `tasks.md` with `/opsx:apply`, and
+  `/opsx:archive` once the work ships.
 - **Direct:** go straight to the work.
 
 Autonomy caveat: without a human approving the spec, be conservative — keep the
-change scoped to exactly what the issue asks, and prefer the direct path unless a
-spec genuinely reduces risk.
+change scoped to exactly what the issue (and any owner comments) ask, and prefer
+the direct path unless a spec genuinely reduces risk.
 
-### 4. Perform the work, commit, push
+### 3. Perform the work, commit, push
 
-Implement in the branch/worktree with tests where the project has them. Keep the
-staging discipline from `hitl-loop` step 8 — **never `git add -A`**; stage only
-the specific paths, inspect `git diff --cached`, commit referencing the issue,
-push. Ensure the PR body links the issue (`Closes #<N>`).
+Implement in the branch/worktree with tests where the project has them, keeping
+`loop-common`'s commit/push discipline — **never `git add -A`**; stage only the
+specific paths, inspect `git diff --cached`, commit referencing the issue, push.
+Ensure the PR body links the issue (`Closes #<N>`).
 
-### 5. Merge when CI is green (the only gate)
+### 4. Merge when CI is green (the only gate)
 
-Enable auto-merge so the PR merges itself the moment required checks pass:
+**Re-read the PR comments first** (`loop-common` → *Always read the comments*) so
+you don't merge over feedback the owner left on the open PR. Then enable
+auto-merge so the PR merges itself the moment required checks pass:
 
 ```bash
 gh pr merge <PR#> --repo gaarutyunov/<repo> --squash --auto
@@ -181,6 +168,8 @@ gh pr merge  <PR#> --repo gaarutyunov/<repo> --squash  # merge once green
 Rules:
 
 - **Green CI is the sole merge gate.** Merge once all *required* checks pass.
+- **Owner comments still come first.** If the owner commented on the issue or PR,
+  address it before merging — an owner comment overrides "just merge on green".
 - **If CI fails, fix it — do not merge.** Push fixes to the same branch and let
   checks re-run when the fix is small and local. If it can't be made green because
   the task depends on missing/unmerged foundations or an upstream fix, treat it as
@@ -189,11 +178,11 @@ Rules:
   a tracker, and move on. **Never merge red, and never leave a blocker as a bare
   "blocked" comment with no follow-up work created.**
 - **Bots never gate the merge.** You *may* fold in already-posted CodeRabbit
-  findings opportunistically (using `hitl-loop`'s `coderabbit-prompts.py`), but
-  do **not** wait for CodeRabbit or for any human review, and do not block on a
-  rate-limited/limit-reached bot.
+  findings opportunistically (via `loop-common`'s **CodeRabbit + review threads**
+  section), but do **not** wait for CodeRabbit or for any human review, and do
+  not block on a rate-limited/limit-reached bot.
 
-### 6. Move the task to **Done**
+### 5. Move the task to **Done**
 
 After the merge lands:
 
@@ -222,8 +211,8 @@ the parent's children are all merged. If there is no Ready task marked
 
 ## Related skills
 
+- `loop-common` — the shared board/clone/PR/spec/comments mechanics this loop builds on.
 - `hitl-loop` — the gated, review-first variant (owner approves specs; humans
-  review and merge). Shares the board mechanics and the `coderabbit-prompts.py`
-  helper this skill refers to.
+  review and merge).
 - `pet-project-metadata`, `subdomain-setup`, `ui-kit`, `icon-generation` — same
   supporting skills `hitl-loop` lists.
