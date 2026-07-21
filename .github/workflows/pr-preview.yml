@@ -1,0 +1,26 @@
+name: PR Preview
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+    paths:
+      - "site/**"
+      - ".github/workflows/pr-preview.yml"
+permissions:
+  contents: write # write preview into gh-pages branch
+  pull-requests: write # post/update the preview-link comment
+concurrency:
+  group: pr-preview-${{ github.event.number }}
+  cancel-in-progress: true
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Static site — nothing to build. Deploy site/ straight to a preview dir.
+      - name: Deploy / update / remove preview
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: site
+          preview-branch: gh-pages
+          umbrella-dir: pr-preview
+          action: auto # deploy on open/sync, remove on close
