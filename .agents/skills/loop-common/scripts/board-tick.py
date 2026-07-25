@@ -480,30 +480,37 @@ fragment PrBits on PullRequest {
 """
 
 
+def build_query(chunk: list[Item]) -> str:
+    parts = []
+    for idx, item in enumerate(chunk):
+        parts.append(
+            f'i{idx}: repository(owner: "{OWNER}", name: "{item.repo}") '
+            f"{{ issue(number: {item.number}) {{ ...IssueBits }} }}"
+        )
+        if item.pr_number:
+            parts.append(
+                f'p{idx}: repository(owner: "{OWNER}", name: "{item.repo}") '
+                f"{{ pullRequest(number: {item.pr_number}) {{ ...PrBits }} }}"
+            )
+        if item.spec_pr_number:
+            parts.append(
+                f's{idx}: repository(owner: "{OWNER}", name: "{SPEC_REPO}") '
+                f"{{ pullRequest(number: {item.spec_pr_number}) {{ ...SpecBits }} }}"
+            )
+    # GraphQL rejects a fragment that is defined but never referenced, so a
+    # chunk of issues with no PRs must not declare the PR fragments.
+    query = "query {\n" + "\n".join(parts) + "\n}\n" + ISSUE_FRAGMENT
+    if any(i.pr_number for i in chunk):
+        query += PR_FRAGMENT
+    if any(i.spec_pr_number for i in chunk):
+        query += SPEC_FRAGMENT
+    return query
+
+
 def hydrate(items: list[Item], chunk_size: int = 6) -> None:
     for start in range(0, len(items), chunk_size):
         chunk = items[start : start + chunk_size]
-        parts = []
-        for idx, item in enumerate(chunk):
-            parts.append(
-                f'i{idx}: repository(owner: "{OWNER}", name: "{item.repo}") '
-                f"{{ issue(number: {item.number}) {{ ...IssueBits }} }}"
-            )
-            if item.pr_number:
-                parts.append(
-                    f'p{idx}: repository(owner: "{OWNER}", name: "{item.repo}") '
-                    f"{{ pullRequest(number: {item.pr_number}) {{ ...PrBits }} }}"
-                )
-            if item.spec_pr_number:
-                parts.append(
-                    f's{idx}: repository(owner: "{OWNER}", name: "{SPEC_REPO}") '
-                    f"{{ pullRequest(number: {item.spec_pr_number}) {{ ...SpecBits }} }}"
-                )
-        query = (
-            "query {\n" + "\n".join(parts) + "\n}\n"
-            + ISSUE_FRAGMENT + PR_FRAGMENT + SPEC_FRAGMENT
-        )
-        data = gh_graphql(query)
+        data = gh_graphql(build_query(chunk))
         for idx, item in enumerate(chunk):
             issue = (data.get(f"i{idx}") or {}).get("issue") or {}
             apply_issue(item, issue)
@@ -714,6 +721,8 @@ def compute_signal(item: Item) -> None:
         )
     if item.status == "In review" and not (owner_waiting | (labels & set(OWNER_LABELS))):
         item.warnings.append("in review with no needs:*/blocked label — say what it waits for")
+    if item.status == "Ready" and not item.loop:
+        item.warnings.append("Ready but no Loop value — neither loop will pick this up")
     if item.status == "In review" and item.pr_number is None and "needs:input" not in labels:
         item.warnings.append("in review with no PR — is the blocker written on the issue?")
     if item.local_work:
