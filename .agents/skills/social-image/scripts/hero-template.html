@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Throwaway hero for social-image generation. Rendered headlessly and
+      screenshotted at 1200x630 — NEVER deployed. Tokens mirror the GA ui-kit
+      dark house style so the card matches the sites; kept self-contained (no
+      external CSS) so the render is deterministic and offline.
+      Placeholders {{TITLE}} {{TAGLINE}} {{ICON}} are substituted by
+      social-image.mjs.
+    -->
+    <style>
+      :root {
+        --ga-bg: #0a0e14;
+        --ga-bg-elev: #111722;
+        --ga-fg: #cdd9e5;
+        --ga-muted: #8b98a9;
+        --ga-accent: #7fd1ff;
+        --ga-border: rgba(127, 209, 255, 0.28);
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+        background: var(--ga-bg);
+        color: var(--ga-fg);
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      .stage {
+        width: 1200px;
+        height: 630px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 28px;
+        padding: 96px;
+        background: radial-gradient(
+            1200px 630px at 82% 12%,
+            rgba(127, 209, 255, 0.12),
+            transparent 60%
+          ),
+          var(--ga-bg);
+        border: 1px solid var(--ga-border);
+      }
+      .icon {
+        width: 128px;
+        height: 128px;
+        border-radius: 24px;
+        background-color: var(--ga-bg-elev);
+        background-image: url("{{ICON}}");
+        background-size: cover;
+        background-position: center;
+        border: 1px solid var(--ga-border);
+        box-shadow: 0 8px 40px rgba(127, 209, 255, 0.18);
+      }
+      .title {
+        font-size: 76px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        line-height: 1.05;
+        color: #fff;
+      }
+      .tagline {
+        font-size: 30px;
+        line-height: 1.4;
+        color: var(--ga-muted);
+        max-width: 900px;
+      }
+      .brand {
+        position: absolute;
+        left: 96px;
+        bottom: 64px;
+        font-size: 22px;
+        color: var(--ga-accent);
+        letter-spacing: 0.02em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="stage">
+      <div class="icon"></div>
+      <div class="title">{{TITLE}}</div>
+      <div class="tagline">{{TAGLINE}}</div>
+    </div>
+    <div class="brand">garutyunov.com</div>
+  </body>
+</html>
