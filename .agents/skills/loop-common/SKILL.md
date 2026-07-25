@@ -1,6 +1,6 @@
 ---
 name: loop-common
-description: "Shared mechanics for the auto-loop and hitl-loop delivery skills: board discovery + IDs (gaarutyunov project #6), Ready-task selection, the always-read-comments rule, clone/worktree + gortex tracking, opening a PR early, the OpenSpec /opsx:* spec flow, commit/push discipline, and CodeRabbit + review-thread handling. NOT a standalone loop — it has no merge gate of its own; auto-loop and hitl-loop invoke it and add their own gates. Read it when running or editing either loop."
+description: "Shared mechanics for the auto-loop and hitl-loop delivery skills: the board-tick.py digest that starts every tick, the label protocol for intermediate states, the comment ack ledger, GitHub-only interaction (never AskUserQuestion), the blocked/needs-owner → In review rule, board IDs (gaarutyunov project #6), clone/worktree + gortex tracking, opening a PR early, the OpenSpec /opsx:* spec flow, commit/push discipline, and CodeRabbit + review-thread handling. NOT a standalone loop — it has no merge gate of its own; auto-loop and hitl-loop invoke it and add their own gates. Read it when running or editing either loop."
 ---
 
 # Loop common mechanics
@@ -25,6 +25,10 @@ this file apply and layers its own gates on top.
 - The workspace repo (this repo) is the home for **specs** — OpenSpec is
   initialized here (`/opsx:*` commands + `openspec/`). Pet-project code repos are
   cloned under `projects/` (gitignored) or worked via git worktree.
+- `.claude/skills/loop-common/scripts/board-tick.py` — the digest/ack/label tool
+  every tick runs through. Python 3 stdlib only; shells out to `gh`. Run
+  `board-tick.py init-labels --repo <repo>` once per repo the loops touch so the
+  loop label set exists there.
 
 ## Board IDs (project #6 "growth")
 
@@ -54,64 +58,190 @@ belong to `hitl-loop`; `auto`-marked items belong to `auto-loop`. In the
 item-list JSON the value appears under the top-level `loop` key. A Ready issue
 with **no Loop value** belongs to neither loop — leave it untouched.
 
-## Select a Ready task (parameterize by loop)
+## ⚠️ Start every tick with the digest
 
-`gh project item-list` **defaults to 30 items** — pass a high `--limit` so a
-Ready task past the first page isn't missed. The board also holds PRs and draft
-items, so select only entries backed by a real **issue**, and only those routed
-to the caller's loop. Substitute `LOOP` with `hitl` or `auto`:
+**The first command of every tick is the board digest. Never hand-roll board or
+comment queries — the digest is the only sanctioned way to see the board.**
 
 ```bash
-LOOP=hitl   # or auto — set by the calling skill
-gh project item-list 6 --owner gaarutyunov --format json --limit 200 \
-  | python3 -c "import sys,json,os; L=os.environ['LOOP']; \
-    items=json.load(sys.stdin)['items']; \
-    r=[i for i in items if i.get('status')=='Ready' \
-       and i.get('loop')==L \
-       and i.get('content',{}).get('type')=='Issue']; \
-    print(json.dumps(r[0] if r else {}, indent=2))"
+.claude/skills/loop-common/scripts/board-tick.py --loop hitl   # or --loop auto
 ```
 
-Pick the top matching issue. Capture its **item id**, the linked **issue** (repo
-+ number), and title. If there is no eligible item, stop (or idle until the next
-tick when looping).
+One call (~5s) returns every **active** board item — everything except Backlog
+and Done — with, for each one: its status, Loop routing, labels, the linked PR,
+CI, mergeability, unresolved review threads, and **the full text of every
+owner comment that has not yet been acknowledged**. Machine comments are
+classified out, so the digest is signal only.
 
-## ⚠️ Always read the comments (except Backlog / Done)
+The output is a decision table sorted by urgency, then a details block:
 
-**Before you act on any task that is not in Backlog or Done — every time you pick
-it up, resume it, work it, review it, move its status, or merge its PR — first
-read the current comments on both the issue and its PR.** The owner leaves
-direction and feedback as comments; a loop that skips them ships work the owner
-already redirected, or re-merges over a change the owner asked for. This is the
-single most common way the loop goes wrong.
+```
+SIGNAL       TASK           STATUS       LOOP  LABELS  HUM  BOT  THR  PR   CI       MRG
+HUMAN-INPUT  workspace#12   In review    hitl  N:rev   4    3    -    #13  FAIL(1)  ok
+SPEC-APPROVED site-review#2 In review    hitl  A:spec  -    -    -    #3   ok       ok
+READY        workout#4      Ready        hitl  -       -    -    -    -    -        -
+```
 
-Applies at **Ready, In progress, and In review** — i.e. any active task. Only
-**Backlog** (not yet picked up) and **Done** (finished) are exempt. Read the
-comments even when you *think* you already know the task: the owner may have
-commented since the last tick.
+`HUM` counts **unaddressed owner comments** — the column that matters most.
+Work the table top-down; the signals, in the order the digest sorts them:
 
-Read, in this order, whatever exists for the task:
+| Signal | Means | Do |
+|---|---|---|
+| `HUMAN-INPUT` | owner comments you have never acted on | read them, act, then **ack** |
+| `PR-APPROVED` | owner applied `approved:pr` | merge (per the calling skill's gate) |
+| `SPEC-APPROVED` | owner applied `approved:spec` | implement from `tasks.md` |
+| `CI-RED` | checks failing, or the PR conflicts | fix |
+| `THREADS` | unresolved review threads | address + resolve |
+| `READY` | Ready and routed to this loop | pick it up |
+| `WIP` | In progress, nothing new | continue it |
+| `TRACKER` | an epic whose work lives in sub-issues | **skip** — work the children |
+| `WAITING-OWNER` | needs the owner, nothing new since | **skip** — do not touch |
+| `BLOCKED` | blocked, blocker already written on the issue | **skip** — do not touch |
+
+Rows also carry `⚠` **hygiene warnings** (a blocked task parked In progress, an
+In-review task with no reason label). Fix the hygiene problem in the same tick
+you see it.
+
+Useful flags: `--repo <name>` to narrow, `--include-bots` to expand suppressed
+machine comments, `--json` for the structured form, `--status <s>` to override
+which statuses count as active.
+
+## Comments: read → act → **ack**
+
+The owner leaves direction as comments, and both the loop and the owner post from
+the *same* GitHub account. Two mechanisms keep them apart:
+
+1. **Every comment the loop writes carries an agent marker.** Post through the
+   script so the marker is never forgotten:
+
+   ```bash
+   .claude/skills/loop-common/scripts/board-tick.py post \
+     --repo <repo> --issue <N> --body "…"      # or --pr <PR#>, or --body - for stdin
+   ```
+
+   Never post loop output with a bare `gh issue comment` / `gh pr comment` — an
+   unmarked comment will come back next tick as if the owner wrote it.
+
+2. **Addressed comments are acked in a per-issue ledger.** The ledger is a
+   single machine-managed comment on the issue (`<!-- loop-state:v1 -->`, a
+   collapsed JSON block) listing the comment ids already handled. Acked comments
+   are filtered out of every future digest — permanently. **After you act on the
+   owner comments in a digest, ack them:**
+
+   ```bash
+   .claude/skills/loop-common/scripts/board-tick.py ack \
+     --repo <repo> --issue <N> --all --note "restyled per comment; title changed"
+   ```
+
+   `--all` acks everything the digest currently shows for that task. To ack
+   selectively, pass `--issue-comment <id>` / `--pr-comment <id>` /
+   `--review-comment <id>` (the ids are printed in the details block). Add
+   `--dry-run` to see the ledger without writing it.
+
+**An owner comment is never "read and skipped".** Either act on it and ack it,
+or — if you decide not to act — reply on GitHub saying why, then ack. An
+unacked comment will re-surface on every tick until one of those happens, which
+is the point.
+
+Unresolved **review threads** are their own ack channel: resolving the thread is
+the ack (see *CodeRabbit + review threads*). Don't ack a review comment whose
+thread is still open.
+
+> **First tick on an old task:** issues worked before the marker existed have
+> agent comments indistinguishable from owner comments, so the digest prints
+> `⚠ no ack ledger yet`. Read that task's comments once, handle what's real, and
+> `ack --all --note "baseline"`. From then on the ledger is authoritative.
+
+## Labels carry every state the board can't
+
+The board has five statuses and the owner only ever moves an item to **Ready**.
+Everything else — every other status move, and every intermediate state — is the
+loop's job, expressed as **labels on the issue**.
+
+| Label | Set by | Meaning |
+|---|---|---|
+| `approved:spec` | **owner** | spec approved — implement it |
+| `approved:pr` | **owner** | PR approved — merge it |
+| `needs:spec-approval` | loop | spec PR open, waiting on the owner |
+| `needs:review` | loop | code PR ready, waiting on the owner |
+| `needs:input` | loop | a question is posted on the issue, waiting on the owner |
+| `blocked` | loop | blocked by something external; the blocker is written on the issue |
+| `tracker` | loop | an epic decomposed into sub-issues; progress lives in the children |
+
+`tracker` is the one loop label that does **not** mean "waiting on the owner", so
+a tracker may legitimately sit In progress while its sub-issues are worked. Every
+other loop label forces **In review**.
 
 ```bash
-REPO=<repo>; N=<issue-number>; PR=<pr-number>   # PR only once one is open
-
-# 1) Issue comments — owner direction on the task itself.
-gh issue view "$N" --repo "gaarutyunov/$REPO" --comments
-
-# 2) PR conversation comments — feedback on the open change.
-[ -n "$PR" ] && gh pr view "$PR" --repo "gaarutyunov/$REPO" --comments
-
-# 3) PR review threads (inline code comments + their resolved state).
-[ -n "$PR" ] && gh api graphql -f query='query { repository(owner:"gaarutyunov", name:"'"$REPO"'") {
-  pullRequest(number: '"$PR"') { reviewThreads(first:50) {
-    nodes { isResolved comments(first:10){ nodes { author{login} body } } } } } }'
+.claude/skills/loop-common/scripts/board-tick.py label \
+  --repo <repo> --issue <N> --add needs:review --remove needs:spec-approval
+.claude/skills/loop-common/scripts/board-tick.py init-labels --repo <repo>   # first time in a repo
 ```
 
-**Treat owner comments as instructions for the task**, ahead of the issue's
-original text — if the owner narrowed the scope, changed the approach, or asked
-for a fix in a comment, do that. Note anything you act on (or deliberately don't)
-so the next tick doesn't re-litigate it. Bot comments (CodeRabbit) are handled
-under **CodeRabbit + review threads** below; owner comments always come first.
+`label` creates any missing label with the right colour/description, and
+**refuses to set `approved:*`** — those are the owner's alone.
+
+Rules:
+
+- **Never invent a new status.** If a state isn't one of the five, it's a label.
+- Clear a `needs:*` label the moment it stops being true; leaving stale labels
+  makes the digest lie.
+- When the owner grants `approved:spec` / `approved:pr`, drop the matching
+  `needs:*` label as you act on it.
+- The owner is not expected to move anything out of **In review** — an approval
+  label is the whole signal. **You** move the status.
+
+## Interaction happens on GitHub, nowhere else
+
+**Never ask the owner anything in the Claude Code window.** No `AskUserQuestion`,
+no "should I…?" in the chat, no waiting on a reply in-session. A loop tick may
+run unattended; a question asked in the terminal is a question nobody will ever
+see.
+
+When you need the owner — a decision, an approval, a credential, an answer:
+
+1. Post the question on the **issue** with `board-tick.py post` (state the
+   options and your recommendation, so a one-word reply is enough).
+2. Add `needs:input`.
+3. Move the item to **In review**.
+4. Move on to the next task.
+
+The answer arrives as an owner comment and reaches you as `HUMAN-INPUT` on a
+later tick.
+
+## Anything that needs the owner sits in **In review**
+
+**In review** means "this needs the owner". It is not only for finished code —
+it is the single place the owner looks. A task belongs there the moment it is
+waiting on a human, whatever the reason: review, spec approval, an answer, or a
+blocker.
+
+**Never leave a blocked task In progress.** *In progress* means the loop is
+actively working it; a blocked task is not being worked, and parking it there
+hides it from the owner and re-parks it every tick. When you discover a blocker:
+
+1. Post the blocker on the issue with `board-tick.py post` — what is blocked,
+   what it depends on (link the issue/PR), and what unblocks it.
+2. Add the `blocked` label.
+3. Move the item to **In review**.
+4. Pick up the next task.
+
+The same applies to any partial work: push what you have, say what's outstanding
+on the issue, label it, and move it to **In review** rather than leaving it
+parked In progress.
+
+## Select a task to work
+
+Take it from the digest, not from a fresh board query. Work the first row whose
+signal is actionable for your loop (`HUMAN-INPUT` → `PR-APPROVED` →
+`SPEC-APPROVED` → `CI-RED` → `THREADS` → `READY` → `WIP`), skipping
+`WAITING-OWNER` and `BLOCKED`. Capture the row's **item id** (printed in the
+details block), the **issue** (repo + number), and the title.
+
+A `READY` row is a new pickup: only rows whose `LOOP` column matches the calling
+skill (`hitl` or `auto`) are yours — a Ready issue with `LOOP=-` belongs to
+neither loop, leave it untouched. If nothing is actionable, stop (or idle until
+the next tick when looping).
 
 ## Get the code repo ready (clone once, then a worktree per task)
 
@@ -242,13 +372,27 @@ applicable, the merged spec PR.
 
 ## Move a task's status
 
+**Status moves are yours, not the owner's.** The owner only ever moves an item to
+**Ready** (and applies `approved:*` labels). Every other transition — Ready → In
+progress, In progress → In review, In review → In progress, → Done — is performed
+by the loop. Don't wait for the owner to move anything, and don't ask them to.
+
 ```bash
 gh project item-edit --project-id PVT_kwHOAjGWgc4Bcice --id <ITEM_ID> \
   --field-id PVTSSF_lAHOAjGWgc4BcicezhXKdRQ --single-select-option-id <OPTION_ID>
 ```
 
 Option ids are listed under **Board IDs** above (Backlog / Ready / In progress /
-In review / Done).
+In review / Done). The `<ITEM_ID>` is the `item=PVTI_…` line in the digest's
+details block.
+
+Every move must leave the board honest:
+
+- **In progress** — you are actively working it *right now* and nothing is
+  waiting on the owner. Never park anything here.
+- **In review** — waiting on the owner, for any reason. Always carries a
+  `needs:*` or `blocked` label saying which.
+- **Done** — merged and finished.
 
 ## CodeRabbit + review threads
 
@@ -288,4 +432,9 @@ gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:"<PRRT_.
 Whether unresolved bot threads *block the merge* is the calling skill's call:
 `hitl-loop` never merges with unresolved threads; `auto-loop` folds them in
 opportunistically but does not gate on bots. Either way, **owner comments are
-handled first** (see *Always read the comments* above).
+handled first** (see *Comments: read → act → ack* above).
+
+Resolving a thread is what clears it from the digest's `THR` column — there is no
+separate ack for review threads. Plain (non-threaded) bot comments on the PR are
+suppressed from the digest body and counted in `BOT`; ack them like any other
+comment once handled.

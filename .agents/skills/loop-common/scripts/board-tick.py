@@ -1,0 +1,987 @@
+#!/usr/bin/env python3
+"""board-tick — one-call situational awareness for the delivery loops.
+
+Fetches every *active* item on the gaarutyunov project board (everything except
+Backlog and Done), and for each one pulls the issue, its labels, its comments,
+the linked PR's comments, review threads and CI status. Comments are classified
+(human / agent / bot) and filtered against a per-issue **ack ledger** stored as a
+machine-managed comment on the issue itself, so comments that were already seen
+and addressed never come back.
+
+The output is a decision table for the orchestrator plus a details block holding
+the full text of everything still unaddressed.
+
+Subcommands
+-----------
+  tick          (default) print the decision table + details
+  ack           mark comments as seen/addressed in an issue's ledger
+  post          add a comment carrying the agent marker (issue or PR)
+  label         add/remove loop labels on an issue (creates them if missing)
+  init-labels   create the loop label set in a repo
+
+Requires: `gh` authenticated with the `project` scope.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+OWNER = "gaarutyunov"
+PROJECT = 6
+
+# Statuses the loops care about. Backlog = not picked up, Done = finished.
+ACTIVE_STATUSES = ("Ready", "In progress", "In review")
+
+# Every comment the loops write carries this marker so a later tick can tell
+# agent output from owner input — both are posted by the same GitHub account.
+AGENT_MARKER = "<!-- loop-agent -->"
+LEDGER_MARKER = "<!-- loop-state:v1 -->"
+
+BOT_LOGINS = {
+    "coderabbitai",
+    "github-actions",
+    "dependabot",
+    "codecov",
+    "sonarcloud",
+    "vercel",
+    "netlify",
+    "renovate",
+}
+
+# ── Label protocol ──────────────────────────────────────────────────────────
+# The owner only ever moves an item to Ready and applies `approved:*` labels.
+# Every other status move, and every `needs:*`/`blocked` label, is the agent's.
+OWNER_LABELS = {
+    "approved:spec": ("0e8a16", "Owner approved the spec — agent may implement"),
+    "approved:pr": ("0e8a16", "Owner approved the PR — agent may merge"),
+}
+# Agent labels that mean "the owner has to do something" — these force In review.
+WAITING_LABELS = {
+    "needs:spec-approval": ("fbca04", "Spec PR open, waiting for owner approval"),
+    "needs:review": ("fbca04", "Code PR ready, waiting for owner review"),
+    "needs:input": ("fbca04", "Question posted on the issue, waiting for owner"),
+    "blocked": ("b60205", "Blocked — blocker described in the issue"),
+}
+# Agent labels that describe a state without waiting on anyone.
+INFO_LABELS = {
+    "tracker": ("c5def5", "Epic decomposed into sub-issues; tracks their progress"),
+}
+AGENT_LABELS = {**WAITING_LABELS, **INFO_LABELS}
+LOOP_LABELS = {**OWNER_LABELS, **AGENT_LABELS}
+
+# Short display forms for the table's label column.
+LABEL_ABBREV = {
+    "approved:spec": "A:spec",
+    "approved:pr": "A:pr",
+    "needs:spec-approval": "N:spec",
+    "needs:review": "N:rev",
+    "needs:input": "N:inp",
+    "blocked": "BLOCKED",
+    "tracker": "trk",
+}
+
+
+# ── gh plumbing ─────────────────────────────────────────────────────────────
+
+
+def gh(*args: str, check: bool = True, stdin: str | None = None) -> str:
+    proc = subprocess.run(
+        ["gh", *args],
+        capture_output=True,
+        text=True,
+        input=stdin,
+    )
+    if check and proc.returncode != 0:
+        raise RuntimeError(f"gh {' '.join(args)} failed:\n{proc.stderr.strip()}")
+    return proc.stdout
+
+
+def gh_graphql(query: str) -> dict:
+    out = gh("api", "graphql", "-f", f"query={query}")
+    payload = json.loads(out)
+    if payload.get("errors"):
+        raise RuntimeError("GraphQL errors: " + json.dumps(payload["errors"], indent=2))
+    return payload["data"]
+
+
+# ── Data model ──────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Comment:
+    kind: str  # issue | pr | review
+    cid: int  # databaseId — the id used by the ledger
+    author: str
+    body: str
+    created: str
+    url: str
+    who: str = "human"  # human | agent | bot
+    thread_id: str | None = None
+    thread_resolved: bool = False
+    path: str | None = None
+
+
+@dataclass
+class Item:
+    item_id: str
+    status: str
+    loop: str | None
+    repo: str  # short name, no owner
+    number: int
+    title: str
+    issue_url: str
+    labels: list[str] = field(default_factory=list)
+    pr_number: int | None = None
+    pr_url: str | None = None
+    pr_draft: bool = False
+    pr_state: str = ""
+    pr_mergeable: str = "UNKNOWN"
+    pr_review_decision: str | None = None
+    ci_state: str | None = None
+    ci_failing: list[str] = field(default_factory=list)
+    ci_pending: list[str] = field(default_factory=list)
+    comments: list[Comment] = field(default_factory=list)
+    unresolved_threads: int = 0
+    has_ledger: bool = False
+    ledger: dict = field(default_factory=dict)
+    signal: str = ""
+    reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def slug(self) -> str:
+        return f"{self.repo}#{self.number}"
+
+    @property
+    def pending(self) -> list[Comment]:
+        """Comments that still need the agent's attention."""
+        return [c for c in self.comments if c.who != "agent"]
+
+    @property
+    def pending_human(self) -> list[Comment]:
+        return [c for c in self.comments if c.who == "human"]
+
+    @property
+    def pending_bot(self) -> list[Comment]:
+        return [c for c in self.comments if c.who == "bot"]
+
+
+# ── Board ───────────────────────────────────────────────────────────────────
+
+
+def fetch_board(statuses: tuple[str, ...]) -> list[Item]:
+    raw = json.loads(
+        gh(
+            "project",
+            "item-list",
+            str(PROJECT),
+            "--owner",
+            OWNER,
+            "--format",
+            "json",
+            "--limit",
+            "300",
+        )
+    )
+    items: list[Item] = []
+    for entry in raw.get("items", []):
+        content = entry.get("content") or {}
+        if content.get("type") != "Issue":
+            continue
+        if entry.get("status") not in statuses:
+            continue
+        repo_full = content.get("repository", "")
+        repo = repo_full.split("/")[-1]
+        item = Item(
+            item_id=entry["id"],
+            status=entry.get("status", ""),
+            loop=entry.get("loop"),
+            repo=repo,
+            number=content["number"],
+            title=content.get("title", ""),
+            issue_url=content.get("url", ""),
+        )
+        for url in entry.get("linked pull requests", []) or []:
+            m = re.search(rf"/{OWNER}/{re.escape(repo)}/pull/(\d+)$", url)
+            if m:
+                item.pr_number = int(m.group(1))
+                item.pr_url = url
+                break  # newest link wins; a task has one code PR
+        if item.pr_number is None:
+            item.pr_number = find_pr_by_branch(repo, item.number)
+        items.append(item)
+    return items
+
+
+def find_pr_by_branch(repo: str, issue: int) -> int | None:
+    """Fallback for a PR the board didn't link: the loops' `issue-<N>` branch."""
+    out = gh(
+        "pr",
+        "list",
+        "--repo",
+        f"{OWNER}/{repo}",
+        "--head",
+        f"issue-{issue}",
+        "--state",
+        "all",
+        "--json",
+        "number,state",
+        check=False,
+    )
+    try:
+        prs = json.loads(out or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not prs:
+        return None
+    openish = [p for p in prs if p.get("state") == "OPEN"]
+    return (openish or prs)[-1]["number"]
+
+
+# ── GraphQL hydration ───────────────────────────────────────────────────────
+
+ISSUE_FRAGMENT = """
+fragment IssueBits on Issue {
+  number url title state
+  labels(first: 50) { nodes { name } }
+  comments(last: 100) {
+    nodes { databaseId author { login } body createdAt url }
+  }
+}
+"""
+
+PR_FRAGMENT = """
+fragment PrBits on PullRequest {
+  number url isDraft state mergeable reviewDecision headRefName
+  comments(last: 100) {
+    nodes { databaseId author { login } body createdAt url }
+  }
+  reviews(last: 30) {
+    nodes { databaseId author { login } body state submittedAt url }
+  }
+  reviewThreads(first: 60) {
+    nodes {
+      id isResolved isOutdated path line
+      comments(first: 10) {
+        nodes { databaseId author { login } body createdAt url }
+      }
+    }
+  }
+  commits(last: 1) {
+    nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
+      __typename
+      ... on CheckRun { name conclusion status detailsUrl }
+      ... on StatusContext { context state targetUrl }
+    } } } } }
+  }
+}
+"""
+
+
+def hydrate(items: list[Item], chunk_size: int = 6) -> None:
+    for start in range(0, len(items), chunk_size):
+        chunk = items[start : start + chunk_size]
+        parts = []
+        for idx, item in enumerate(chunk):
+            parts.append(
+                f'i{idx}: repository(owner: "{OWNER}", name: "{item.repo}") '
+                f"{{ issue(number: {item.number}) {{ ...IssueBits }} }}"
+            )
+            if item.pr_number:
+                parts.append(
+                    f'p{idx}: repository(owner: "{OWNER}", name: "{item.repo}") '
+                    f"{{ pullRequest(number: {item.pr_number}) {{ ...PrBits }} }}"
+                )
+        query = "query {\n" + "\n".join(parts) + "\n}\n" + ISSUE_FRAGMENT + PR_FRAGMENT
+        data = gh_graphql(query)
+        for idx, item in enumerate(chunk):
+            issue = (data.get(f"i{idx}") or {}).get("issue") or {}
+            apply_issue(item, issue)
+            pr = (data.get(f"p{idx}") or {}).get("pullRequest") if item.pr_number else None
+            if pr:
+                apply_pr(item, pr)
+
+
+def classify(login: str, body: str) -> str:
+    if login.endswith("[bot]") or login.lower() in BOT_LOGINS:
+        return "bot"
+    if AGENT_MARKER in body:
+        return "agent"
+    if login.lower() == OWNER.lower():
+        return "human"
+    return "human"  # an outside human is still a human to answer
+
+
+def apply_issue(item: Item, issue: dict) -> None:
+    item.labels = [n["name"] for n in (issue.get("labels") or {}).get("nodes", [])]
+    for node in (issue.get("comments") or {}).get("nodes", []):
+        body = node.get("body") or ""
+        if LEDGER_MARKER in body:
+            item.has_ledger = True
+            item.ledger = parse_ledger(body)
+            item.ledger["_comment_id"] = node["databaseId"]
+            continue
+        item.comments.append(
+            Comment(
+                kind="issue",
+                cid=node["databaseId"],
+                author=(node.get("author") or {}).get("login", "ghost"),
+                body=body,
+                created=node.get("createdAt", ""),
+                url=node.get("url", ""),
+                who=classify((node.get("author") or {}).get("login", "ghost"), body),
+            )
+        )
+
+
+def apply_pr(item: Item, pr: dict) -> None:
+    item.pr_draft = pr.get("isDraft", False)
+    item.pr_state = pr.get("state", "")
+    item.pr_mergeable = pr.get("mergeable", "UNKNOWN")
+    item.pr_review_decision = pr.get("reviewDecision")
+    item.pr_url = pr.get("url") or item.pr_url
+
+    for node in (pr.get("comments") or {}).get("nodes", []):
+        body = node.get("body") or ""
+        if LEDGER_MARKER in body:
+            continue
+        login = (node.get("author") or {}).get("login", "ghost")
+        item.comments.append(
+            Comment(
+                kind="pr",
+                cid=node["databaseId"],
+                author=login,
+                body=body,
+                created=node.get("createdAt", ""),
+                url=node.get("url", ""),
+                who=classify(login, body),
+            )
+        )
+
+    for node in (pr.get("reviews") or {}).get("nodes", []):
+        body = (node.get("body") or "").strip()
+        state = node.get("state", "")
+        if not body and state not in ("CHANGES_REQUESTED", "APPROVED"):
+            continue
+        login = (node.get("author") or {}).get("login", "ghost")
+        item.comments.append(
+            Comment(
+                kind="pr",
+                cid=node["databaseId"],
+                author=login,
+                body=f"[review {state}] {body}".strip(),
+                created=node.get("submittedAt", ""),
+                url=node.get("url", ""),
+                who=classify(login, body),
+            )
+        )
+
+    for thread in (pr.get("reviewThreads") or {}).get("nodes", []):
+        if thread.get("isResolved"):
+            continue  # resolving a thread *is* the ack for review comments
+        item.unresolved_threads += 1
+        nodes = (thread.get("comments") or {}).get("nodes", [])
+        for node in nodes:
+            body = node.get("body") or ""
+            login = (node.get("author") or {}).get("login", "ghost")
+            who = classify(login, body)
+            if who == "agent":
+                continue
+            item.comments.append(
+                Comment(
+                    kind="review",
+                    cid=node["databaseId"],
+                    author=login,
+                    body=body,
+                    created=node.get("createdAt", ""),
+                    url=node.get("url", ""),
+                    who=who,
+                    thread_id=thread["id"],
+                    thread_resolved=False,
+                    path=f"{thread.get('path')}:{thread.get('line')}",
+                )
+            )
+
+    commits = (pr.get("commits") or {}).get("nodes", [])
+    rollup = (commits[0]["commit"].get("statusCheckRollup") if commits else None) or {}
+    item.ci_state = rollup.get("state")
+    for ctx in (rollup.get("contexts") or {}).get("nodes", []):
+        if ctx.get("__typename") == "CheckRun":
+            name = ctx.get("name", "?")
+            if ctx.get("status") != "COMPLETED":
+                item.ci_pending.append(name)
+            elif ctx.get("conclusion") in ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"):
+                item.ci_failing.append(name)
+        else:
+            name = ctx.get("context", "?")
+            state = ctx.get("state")
+            if state == "PENDING":
+                item.ci_pending.append(name)
+            elif state in ("FAILURE", "ERROR"):
+                item.ci_failing.append(name)
+
+
+# ── Ledger ──────────────────────────────────────────────────────────────────
+
+
+def parse_ledger(body: str) -> dict:
+    m = re.search(r"```json\s*(\{.*?\})\s*```", body, re.S)
+    if not m:
+        return {"v": 1, "acked": {}}
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return {"v": 1, "acked": {}}
+    data.setdefault("acked", {})
+    return data
+
+
+def render_ledger(data: dict) -> str:
+    payload = {k: v for k, v in data.items() if not k.startswith("_")}
+    payload["updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    body = json.dumps(payload, indent=2, sort_keys=True)
+    return (
+        f"{LEDGER_MARKER}\n"
+        "<details><summary>🤖 loop state — machine-managed, ignore</summary>\n\n"
+        f"```json\n{body}\n```\n\n"
+        "</details>\n"
+    )
+
+
+def acked_ids(item: Item) -> set[int]:
+    out: set[int] = set()
+    for bucket in (item.ledger.get("acked") or {}).values():
+        out.update(int(x) for x in bucket)
+    return out
+
+
+def drop_acked(item: Item) -> None:
+    seen = acked_ids(item)
+    item.comments = [c for c in item.comments if c.cid not in seen]
+
+
+# ── Signals ─────────────────────────────────────────────────────────────────
+
+
+def compute_signal(item: Item) -> None:
+    labels = set(item.labels)
+    n_human = len(item.pending_human)
+    reasons = item.reasons
+
+    # Board hygiene — the loops must never park a blocked/owner-waiting task in
+    # "In progress"; anything that needs the owner belongs in "In review".
+    owner_waiting = labels & set(WAITING_LABELS)
+    if item.status == "In progress" and owner_waiting:
+        item.warnings.append(
+            f"in progress but carries {', '.join(sorted(owner_waiting))} → move to In review"
+        )
+    if item.status == "In review" and not (owner_waiting | (labels & set(OWNER_LABELS))):
+        item.warnings.append("in review with no needs:*/blocked label — say what it waits for")
+    if item.status == "In review" and item.pr_number is None and "needs:input" not in labels:
+        item.warnings.append("in review with no PR — is the blocker written on the issue?")
+
+    if n_human:
+        reasons.append(f"{n_human} unaddressed owner comment(s)")
+        item.signal = "HUMAN-INPUT"
+    elif "approved:pr" in labels:
+        reasons.append("owner approved the PR")
+        item.signal = "PR-APPROVED"
+    elif "approved:spec" in labels and "needs:spec-approval" in labels:
+        reasons.append("owner approved the spec")
+        item.signal = "SPEC-APPROVED"
+    elif item.ci_failing:
+        reasons.append("CI failing: " + ", ".join(item.ci_failing[:4]))
+        item.signal = "CI-RED"
+    elif item.pr_mergeable == "CONFLICTING":
+        reasons.append("PR has conflicts")
+        item.signal = "CI-RED"
+    elif item.unresolved_threads:
+        reasons.append(f"{item.unresolved_threads} unresolved review thread(s)")
+        item.signal = "THREADS"
+    elif "blocked" in labels:
+        reasons.append("blocked — waiting on the owner to unblock")
+        item.signal = "BLOCKED"
+    elif labels & set(WAITING_LABELS):
+        reasons.append("waiting on owner: " + ", ".join(sorted(labels & set(WAITING_LABELS))))
+        item.signal = "WAITING-OWNER"
+    elif "tracker" in labels:
+        reasons.append("tracker — progress lives in its sub-issues")
+        item.signal = "TRACKER"
+    elif item.status == "Ready":
+        reasons.append("ready to pick up")
+        item.signal = "READY"
+    elif item.status == "In progress":
+        reasons.append("work in flight")
+        item.signal = "WIP"
+    else:
+        item.signal = "IDLE"
+
+    if item.ci_pending and item.signal in ("PR-APPROVED", "WAITING-OWNER", "WIP"):
+        reasons.append(f"CI pending: {len(item.ci_pending)} check(s)")
+
+
+# Ordering used to sort the table — what the orchestrator should look at first.
+SIGNAL_ORDER = [
+    "HUMAN-INPUT",
+    "PR-APPROVED",
+    "SPEC-APPROVED",
+    "CI-RED",
+    "THREADS",
+    "READY",
+    "WIP",
+    "TRACKER",
+    "WAITING-OWNER",
+    "BLOCKED",
+    "IDLE",
+]
+
+
+# ── Rendering ───────────────────────────────────────────────────────────────
+
+
+def ci_cell(item: Item) -> str:
+    if not item.pr_number:
+        return "-"
+    if item.ci_failing:
+        return f"FAIL({len(item.ci_failing)})"
+    if item.ci_pending:
+        return f"pend({len(item.ci_pending)})"
+    if item.ci_state == "SUCCESS":
+        return "ok"
+    return (item.ci_state or "-").lower()
+
+
+def label_cell(item: Item) -> str:
+    marks = [LABEL_ABBREV[l] for l in item.labels if l in LABEL_ABBREV]
+    return ",".join(marks) if marks else "-"
+
+
+def render_table(items: list[Item]) -> str:
+    headers = ["SIGNAL", "TASK", "STATUS", "LOOP", "LABELS", "HUM", "BOT", "THR", "PR", "CI", "MRG"]
+    rows = []
+    for it in items:
+        rows.append(
+            [
+                it.signal,
+                it.slug,
+                it.status,
+                it.loop or "-",
+                label_cell(it),
+                str(len(it.pending_human)) if it.pending_human else "-",
+                str(len(it.pending_bot)) if it.pending_bot else "-",
+                str(it.unresolved_threads) if it.unresolved_threads else "-",
+                (f"#{it.pr_number}" + ("d" if it.pr_draft else "")) if it.pr_number else "-",
+                ci_cell(it),
+                {"MERGEABLE": "ok", "CONFLICTING": "CONFLICT"}.get(it.pr_mergeable, "?")
+                if it.pr_number
+                else "-",
+            ]
+        )
+    widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
+    out = ["  ".join(h.ljust(w) for h, w in zip(headers, widths)).rstrip()]
+    out.append("  ".join("-" * w for w in widths))
+    for row in rows:
+        out.append("  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())
+    return "\n".join(out)
+
+
+def wrap_body(body: str, limit: int, indent: str = "      ") -> str:
+    body = body.strip()
+    if len(body) > limit:
+        body = body[:limit].rstrip() + f"\n… [truncated, {len(body)} chars total]"
+    lines = []
+    for raw in body.splitlines():
+        lines.extend(textwrap.wrap(raw, width=100) or [""])
+    return "\n".join(indent + l for l in lines)
+
+
+def render_details(items: list[Item], include_bots: bool, body_limit: int) -> str:
+    out = []
+    for it in items:
+        quiet = ("IDLE", "TRACKER", "WAITING-OWNER", "BLOCKED")
+        if it.signal in quiet and not it.pending and not it.warnings:
+            continue  # nothing to do and nothing new — keep the digest lean
+        out.append("")
+        out.append(f"── {it.slug} · {it.status} · loop={it.loop or '-'} · {it.signal}")
+        out.append(f"   {it.title}")
+        out.append(f"   item={it.item_id}")
+        out.append(f"   issue={it.issue_url}")
+        out.append(f"   labels: {', '.join(it.labels) if it.labels else '(none)'}")
+        if it.pr_number:
+            bits = [
+                f"PR #{it.pr_number}{' (draft)' if it.pr_draft else ''}",
+                f"CI={ci_cell(it)}",
+                f"mergeable={it.pr_mergeable}",
+                f"review={it.pr_review_decision or '-'}",
+                f"threads={it.unresolved_threads} unresolved",
+            ]
+            out.append("   " + " · ".join(bits))
+            if it.ci_failing:
+                out.append("   failing: " + ", ".join(it.ci_failing))
+            out.append(f"   {it.pr_url}")
+        for reason in it.reasons:
+            out.append(f"   → {reason}")
+        for warn in it.warnings:
+            out.append(f"   ⚠ {warn}")
+        if not it.has_ledger and it.comments:
+            out.append(
+                "   ⚠ no ack ledger yet — comments below may include pre-marker agent output; "
+                "read them, then ack what is already handled"
+            )
+        for c in it.pending_human:
+            head = f"   [OWNER · {c.kind} {c.cid}] @{c.author} {c.created}"
+            if c.path:
+                head += f" · {c.path}"
+            out.append(head)
+            out.append(wrap_body(c.body, body_limit))
+        bots = it.pending_bot
+        if bots:
+            if include_bots:
+                for c in bots:
+                    head = f"   [BOT · {c.kind} {c.cid}] @{c.author} {c.created}"
+                    if c.path:
+                        head += f" · {c.path}"
+                    out.append(head)
+                    out.append(wrap_body(c.body, body_limit))
+            else:
+                out.append(
+                    f"   [BOT] {len(bots)} machine comment(s) suppressed — "
+                    f"use --include-bots, or coderabbit-prompts.py {OWNER}/{it.repo} {it.pr_number}"
+                )
+        if it.pending:
+            out.append(
+                f"   ack: board-tick.py ack --repo {it.repo} --issue {it.number} --all "
+                f'--note "<what you did>"'
+            )
+    return "\n".join(out)
+
+
+def render_json(items: list[Item]) -> str:
+    payload = []
+    for it in items:
+        payload.append(
+            {
+                "item_id": it.item_id,
+                "repo": it.repo,
+                "issue": it.number,
+                "title": it.title,
+                "issue_url": it.issue_url,
+                "status": it.status,
+                "loop": it.loop,
+                "labels": it.labels,
+                "signal": it.signal,
+                "reasons": it.reasons,
+                "warnings": it.warnings,
+                "has_ledger": it.has_ledger,
+                "pr": (
+                    {
+                        "number": it.pr_number,
+                        "url": it.pr_url,
+                        "draft": it.pr_draft,
+                        "state": it.pr_state,
+                        "mergeable": it.pr_mergeable,
+                        "review_decision": it.pr_review_decision,
+                        "ci_state": it.ci_state,
+                        "ci_failing": it.ci_failing,
+                        "ci_pending": it.ci_pending,
+                        "unresolved_threads": it.unresolved_threads,
+                    }
+                    if it.pr_number
+                    else None
+                ),
+                "pending_comments": [
+                    {
+                        "kind": c.kind,
+                        "id": c.cid,
+                        "who": c.who,
+                        "author": c.author,
+                        "created": c.created,
+                        "url": c.url,
+                        "path": c.path,
+                        "thread_id": c.thread_id,
+                        "body": c.body,
+                    }
+                    for c in it.pending
+                ],
+            }
+        )
+    return json.dumps(payload, indent=2)
+
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+
+def cmd_tick(args: argparse.Namespace) -> int:
+    statuses = tuple(args.status) if args.status else ACTIVE_STATUSES
+    items = fetch_board(statuses)
+    if args.loop:
+        items = [i for i in items if i.loop == args.loop]
+    if args.repo:
+        items = [i for i in items if i.repo == args.repo]
+    if not items:
+        print("No active board items match.")
+        return 0
+    hydrate(items)
+    for it in items:
+        drop_acked(it)
+        compute_signal(it)
+    items.sort(key=lambda i: (SIGNAL_ORDER.index(i.signal) if i.signal in SIGNAL_ORDER else 99, i.slug))
+
+    if args.json:
+        print(render_json(items))
+        return 0
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    print(f"Board tick · {stamp} · {len(items)} active item(s)\n")
+    print(render_table(items))
+    details = render_details(items, args.include_bots, args.body_limit)
+    if details.strip():
+        print("\nDETAILS")
+        print(details)
+    return 0
+
+
+def find_ledger_comment(repo: str, issue: int) -> tuple[int | None, dict]:
+    out = gh(
+        "api",
+        f"repos/{OWNER}/{repo}/issues/{issue}/comments",
+        "--paginate",
+        "-q",
+        ".[] | {id: .id, body: .body}",
+    )
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        node = json.loads(line)
+        if LEDGER_MARKER in (node.get("body") or ""):
+            return node["id"], parse_ledger(node["body"])
+    return None, {"v": 1, "acked": {}}
+
+
+def collect_pending_ids(repo: str, issue: int) -> dict[str, list[int]]:
+    """Re-fetch one item so `ack --all` covers exactly what a tick would show."""
+    items = [i for i in fetch_board(ACTIVE_STATUSES) if i.repo == repo and i.number == issue]
+    if not items:
+        # Not on the board (or not active) — still ack what is on the issue/PR.
+        item = Item(item_id="", status="", loop=None, repo=repo, number=issue, title="", issue_url="")
+        item.pr_number = find_pr_by_branch(repo, issue)
+        items = [item]
+    item = items[0]
+    hydrate([item])
+    drop_acked(item)
+    buckets: dict[str, list[int]] = {"issue": [], "pr": [], "review": []}
+    for c in item.pending:
+        buckets[c.kind].append(c.cid)
+    return buckets
+
+
+def cmd_ack(args: argparse.Namespace) -> int:
+    comment_id, ledger = find_ledger_comment(args.repo, args.issue)
+    acked = ledger.setdefault("acked", {})
+
+    if args.all:
+        buckets = collect_pending_ids(args.repo, args.issue)
+    else:
+        buckets = {
+            "issue": list(args.issue_comment),
+            "pr": list(args.pr_comment),
+            "review": list(args.review_comment),
+        }
+    total = sum(len(v) for v in buckets.values())
+    if not total:
+        print("Nothing to ack.")
+        return 0
+
+    for kind, ids in buckets.items():
+        if not ids:
+            continue
+        bucket = acked.setdefault(kind, [])
+        bucket.extend(i for i in ids if i not in bucket)
+        bucket.sort()
+
+    if args.note:
+        notes = ledger.setdefault("notes", [])
+        notes.append(
+            {
+                "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "acked": total,
+                "note": args.note,
+            }
+        )
+        del notes[:-20]  # keep the ledger small
+
+    body = render_ledger(ledger)
+    if args.dry_run:
+        print(f"[dry-run] would ack {total} comment(s) on {args.repo}#{args.issue}")
+        print(f"[dry-run] {'PATCH comment ' + str(comment_id) if comment_id else 'POST new ledger comment'}")
+        print(body)
+        return 0
+    if comment_id:
+        gh(
+            "api",
+            "-X",
+            "PATCH",
+            f"repos/{OWNER}/{args.repo}/issues/comments/{comment_id}",
+            "-f",
+            f"body={body}",
+        )
+    else:
+        gh(
+            "api",
+            "-X",
+            "POST",
+            f"repos/{OWNER}/{args.repo}/issues/{args.issue}/comments",
+            "-f",
+            f"body={body}",
+        )
+    print(f"Acked {total} comment(s) on {args.repo}#{args.issue}.")
+    return 0
+
+
+def cmd_post(args: argparse.Namespace) -> int:
+    body = sys.stdin.read() if args.body == "-" else args.body
+    body = body.rstrip() + f"\n\n{AGENT_MARKER}\n"
+    target = args.pr or args.issue
+    gh(
+        "api",
+        "-X",
+        "POST",
+        f"repos/{OWNER}/{args.repo}/issues/{target}/comments",
+        "-f",
+        f"body={body}",
+    )
+    print(f"Posted agent comment on {args.repo}#{target}.")
+    return 0
+
+
+def ensure_labels(repo: str, names: list[str]) -> None:
+    for name in names:
+        if name not in LOOP_LABELS:
+            continue
+        color, desc = LOOP_LABELS[name]
+        gh(
+            "label",
+            "create",
+            name,
+            "--repo",
+            f"{OWNER}/{repo}",
+            "--color",
+            color,
+            "--description",
+            desc,
+            check=False,
+        )
+
+
+def cmd_label(args: argparse.Namespace) -> int:
+    if not args.add and not args.remove:
+        print("Nothing to do — pass --add and/or --remove.", file=sys.stderr)
+        return 2
+    unknown = [n for n in args.add if n not in LOOP_LABELS]
+    if unknown:
+        print(f"warning: not a loop label: {', '.join(unknown)}", file=sys.stderr)
+    if args.add and set(args.add) & set(OWNER_LABELS):
+        print(
+            f"refusing to set owner-only label(s): "
+            f"{', '.join(sorted(set(args.add) & set(OWNER_LABELS)))} — only the owner approves",
+            file=sys.stderr,
+        )
+        return 2
+    ensure_labels(args.repo, args.add)
+    cmd = ["issue", "edit", str(args.issue), "--repo", f"{OWNER}/{args.repo}"]
+    for name in args.add:
+        cmd += ["--add-label", name]
+    for name in args.remove:
+        cmd += ["--remove-label", name]
+    if args.dry_run:
+        print("[dry-run] gh " + " ".join(cmd))
+        return 0
+    gh(*cmd)
+    print(f"{args.repo}#{args.issue}: +{args.add or []} -{args.remove or []}")
+    return 0
+
+
+def cmd_init_labels(args: argparse.Namespace) -> int:
+    ensure_labels(args.repo, list(LOOP_LABELS))
+    print(f"Loop labels ensured on {OWNER}/{args.repo}: {', '.join(LOOP_LABELS)}")
+    return 0
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────
+
+
+def main(argv: list[str]) -> int:
+    if not shutil.which("gh"):
+        print("gh CLI not found on PATH", file=sys.stderr)
+        return 2
+
+    parser = argparse.ArgumentParser(prog="board-tick.py", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_tick = sub.add_parser("tick", help="print the decision table (default)")
+    p_tick.add_argument("--loop", choices=["hitl", "auto"], help="only items routed to this loop")
+    p_tick.add_argument("--repo", help="only items in this repo")
+    p_tick.add_argument("--status", action="append", help="override the active statuses")
+    p_tick.add_argument("--include-bots", action="store_true", help="print bot comment bodies too")
+    p_tick.add_argument("--body-limit", type=int, default=1800, help="chars per comment body")
+    p_tick.add_argument("--json", action="store_true", help="machine-readable output")
+    p_tick.set_defaults(func=cmd_tick)
+
+    p_ack = sub.add_parser("ack", help="mark comments seen/addressed in the issue's ledger")
+    p_ack.add_argument("--repo", required=True)
+    p_ack.add_argument("--issue", required=True, type=int)
+    p_ack.add_argument("--all", action="store_true", help="ack every currently pending comment")
+    p_ack.add_argument("--issue-comment", action="append", type=int, default=[])
+    p_ack.add_argument("--pr-comment", action="append", type=int, default=[])
+    p_ack.add_argument("--review-comment", action="append", type=int, default=[])
+    p_ack.add_argument("--note", help="short record of what was done about them")
+    p_ack.add_argument("--dry-run", action="store_true")
+    p_ack.set_defaults(func=cmd_ack)
+
+    p_post = sub.add_parser("post", help="comment as the agent (adds the agent marker)")
+    p_post.add_argument("--repo", required=True)
+    p_post.add_argument("--issue", type=int)
+    p_post.add_argument("--pr", type=int)
+    p_post.add_argument("--body", required=True, help="text, or - to read stdin")
+    p_post.set_defaults(func=cmd_post)
+
+    p_label = sub.add_parser("label", help="add/remove loop labels on an issue")
+    p_label.add_argument("--repo", required=True)
+    p_label.add_argument("--issue", required=True, type=int)
+    p_label.add_argument("--add", action="append", default=[])
+    p_label.add_argument("--remove", action="append", default=[])
+    p_label.add_argument("--dry-run", action="store_true")
+    p_label.set_defaults(func=cmd_label)
+
+    p_init = sub.add_parser("init-labels", help="create the loop label set in a repo")
+    p_init.add_argument("--repo", required=True)
+    p_init.set_defaults(func=cmd_init_labels)
+
+    # `tick` is the default subcommand, but keep top-level -h/--help working.
+    if not argv or (argv[0].startswith("-") and argv[0] not in ("-h", "--help")):
+        argv = ["tick", *argv]
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        parser.print_help()
+        return 1
+    if args.cmd == "post" and not (args.issue or args.pr):
+        print("post: pass --issue or --pr", file=sys.stderr)
+        return 2
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)

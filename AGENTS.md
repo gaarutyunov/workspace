@@ -8,6 +8,17 @@ Never push to `main`. Always create a feature branch, push it, and open a pull r
 
 **Always branch from fresh upstream default.** Before creating a branch in any repo, `git fetch origin` and branch off `origin/<default>` (resolve the real default branch — don't assume `main`), never off a possibly-stale local checkout. Branching from a stale main produces a branch that's behind and conflict-prone.
 
+## Board work: interact through GitHub, never in the chat
+
+When working the project board (the `hitl-loop` / `auto-loop` / `loop-common` skills), **all owner interaction happens on GitHub**. Never use `AskUserQuestion` and never ask a question in the Claude Code window — a tick may run unattended, so a question asked there is a question nobody sees. Post it on the issue instead (with your recommended option), label it `needs:input`, and move the item to **In review**.
+
+Corollaries, all detailed in `.claude/skills/loop-common/SKILL.md`:
+
+- Every tick starts with `.claude/skills/loop-common/scripts/board-tick.py` — never hand-roll board or comment queries.
+- Intermediate states are **labels**, never new statuses. The owner sets only `approved:spec` / `approved:pr` and only ever moves an item to **Ready**; every other status move is the agent's.
+- **In review** means "needs the owner", for any reason. Nothing blocked or awaiting a human is ever left **In progress**.
+- Every comment the agent posts carries the agent marker (use `board-tick.py post`), and every owner comment acted on is acked (`board-tick.py ack`) so it never re-surfaces.
+
 ## Cloning repos
 
 Clone any external repo (pet projects, repos you're inspecting) into `projects/`, never the workspace root. `projects/.gitignore` is `*` (with `!.gitignore`), so everything under it is ignored and can never be accidentally committed into this repo. Clone each repo **once**; keep its base checkout on the default branch and give every task its own git worktree under `projects/<repo>/.worktrees/<branch>` (add `.worktrees/` to the repo's `.git/info/exclude` so it stays out of that repo's git status). Create the worktree from fresh `origin/<default>` per the branch rule above.

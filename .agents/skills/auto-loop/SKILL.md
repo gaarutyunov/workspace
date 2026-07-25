@@ -1,6 +1,6 @@
 ---
 name: auto-loop
-description: "Autonomous delivery loop: pull the next Ready task marked Loop=auto on the gaarutyunov GitHub Project board (project #6) and drive it end-to-end WITHOUT human gates — never waits for owner spec approval or human code review; self-merges each PR once CI is green, then moves the task to Done. Use when asked to run the board unattended / fully autonomously. Examples: \"auto-run the board\", \"run the auto loop\", \"work the board without stopping for review\", \"drive the tasks and merge when CI passes\". For the gated, review-first variant, use the hitl-loop skill instead."
+description: "Autonomous delivery loop: run the board-tick digest, take the highest-signal task routed to Loop=auto on the gaarutyunov GitHub Project board (project #6), and drive it end-to-end WITHOUT human gates — never waits for owner spec approval or human code review; self-merges each PR once CI is green, then moves the task to Done. Still obeys owner comments surfaced by the digest, uses labels for intermediate states, and never asks anything in the Claude Code window. Use when asked to run the board unattended / fully autonomously. Examples: \"auto-run the board\", \"run the auto loop\", \"work the board without stopping for review\", \"drive the tasks and merge when CI passes\". For the gated, review-first variant, use the hitl-loop skill instead."
 ---
 
 # Auto task loop
@@ -22,7 +22,8 @@ through delivery one at a time, but **removes every human gate**:
 
 ## Shared mechanics live in `loop-common`
 
-The board IDs, Ready-task selection, the **always-read-comments** rule,
+The **board-tick digest**, the **label protocol**, the **comment ack ledger**,
+**GitHub-only interaction**, the **blocked → In review** rule, board IDs,
 clone/worktree + gortex tracking, opening a PR early, the OpenSpec `/opsx:*`
 flow, commit/push discipline, moving a task's status, and the
 `coderabbit-prompts.py` helper are all documented **once** in the `loop-common`
@@ -30,33 +31,58 @@ skill — read `.claude/skills/loop-common/SKILL.md`. This file specifies only w
 differs in the **autonomous path**: `Loop = auto`, epic/blocked decomposition,
 and self-merging on green CI.
 
-> **Read the comments every time — even unattended.** Per `loop-common`, before
-> you act on a task in **any** active status (Ready / In progress / In review) —
-> including each time a later tick resumes it or returns to its PR — read the
-> issue's and the PR's comments first and treat owner comments as instructions.
-> Only Backlog and Done are exempt. This is how the owner steers an
-> otherwise-unattended loop: a comment left between ticks is a directive, so a
-> loop that never reads comments will ship work the owner already redirected.
+## Three rules that override everything else
+
+1. **Start with the digest.** Never query the board or read comments by hand —
+   the digest is how an unattended tick sees owner direction at all:
+
+   ```bash
+   .claude/skills/loop-common/scripts/board-tick.py --loop auto
+   ```
+
+   Its `HUM` column is every owner comment you have not yet acted on. A comment
+   left between ticks is a directive that outranks the issue text. Act on it,
+   then **ack** it (`loop-common` → *Comments: read → act → ack*); an unacked
+   comment re-surfaces every tick until you do.
+
+2. **Never ask the owner anything in the Claude Code window.** No
+   `AskUserQuestion`, ever — nobody is watching an unattended run. If you truly
+   need the owner, post the question on the issue, add `needs:input`, move the
+   item to **In review**, and continue with the next task.
+
+3. **Never park a task In progress.** *In progress* means actively being worked
+   this tick. Anything waiting on the owner goes to **In review** with a label
+   saying why. The one exception is a `tracker` (step 1a) — an epic whose real
+   work is in its sub-issues.
 
 ## Prerequisites
 
 Same as `loop-common`: `gh` authenticated with the `project` scope
 (`gh auth refresh -s project`); OpenSpec initialized in this workspace repo; code
-repos cloned/worktree'd under `projects/`.
+repos cloned/worktree'd under `projects/`; `board-tick.py init-labels --repo <repo>`
+run once per repo so the loop labels exist.
 
-## The workflow (per task)
+## The workflow (per tick)
 
-### 1. Get a task from **Ready** marked **Loop = auto**, move it to **In progress**
+### 1. Run the digest and choose one task
 
-Use the `loop-common` **Select a Ready task** query with `LOOP=auto`. Capture the
-item id, linked issue (repo + number), and title. A Ready issue with no Loop
-value (or `Loop = hitl`) is **not** this loop's — leave it untouched. If there is
-no eligible item, stop (or idle on the next tick when looping).
+```bash
+.claude/skills/loop-common/scripts/board-tick.py --loop auto
+```
 
-**Read the comments now** (`loop-common` → *Always read the comments*): pull the
-issue's comments before touching code, so any owner direction left on the task
-shapes what you build. Then move the item to **In progress** (`47fc9ee4`) with the
-status-edit command in `loop-common`.
+Work the top actionable row (`HUMAN-INPUT` → `CI-RED` → `THREADS` → `READY` →
+`WIP`), skipping `TRACKER`, `WAITING-OWNER` and `BLOCKED`. Capture the row's item
+id (in the details block), issue (repo + number), and title. A Ready issue with
+no Loop value (or `Loop = hitl`) is **not** this loop's — leave it untouched. If
+nothing is actionable, stop (or idle on the next tick when looping).
+
+Fix any `⚠` hygiene warning on the row in the same tick. If the chosen row is
+`READY`, move it to **In progress** (`47fc9ee4`) with the status-edit command in
+`loop-common`.
+
+Note that `PR-APPROVED` / `SPEC-APPROVED` rows are not gates for this loop — it
+merges on green CI without waiting for either label — but if the owner *has*
+labelled one, that's still a green light, not something to undo.
 
 ### 1a. Epic / blocked check — decompose or unblock, never dead-end
 
@@ -108,14 +134,29 @@ loop grind the pieces:
 4. **Turn the parent into a tracking checklist.** Edit the parent body to add a
    `## Sub-issues` checklist linking every child (`- [ ] #<n> — <title>`), so the
    parent reflects progress as children merge.
-5. **Park the parent as a tracker, don't finish it.** Set the parent itself to
-   **In progress** (`47fc9ee4`) — it is a tracker now, not a codeable task. It
-   moves to **Done** only in a later iteration once **all** its sub-issues are
-   merged (verify every checklist box is checked / every child is Done before
-   moving the parent).
+5. **Park the parent as a tracker, don't finish it.** Label it `tracker` and set
+   it to **In progress** (`47fc9ee4`):
+
+   ```bash
+   .claude/skills/loop-common/scripts/board-tick.py label \
+     --repo <repo> --issue <PARENT> --add tracker
+   ```
+
+   `tracker` is the only loop label that may sit In progress — it says "the work
+   is in the children", so the digest reports the parent as `TRACKER` and later
+   ticks skip it instead of re-picking it. It moves to **Done** only once **all**
+   its sub-issues are merged (verify every checklist box is checked / every child
+   is Done before moving the parent), dropping the label as you do.
 6. **Continue.** Proceed to work the first sub-issue this iteration (steps 2–4
    below), or let the next tick pick it up. Never leave the parent itself as the
    task to "implement".
+
+**If a blocker genuinely can't be decomposed** — it needs the owner (a
+credential, an access grant, a product decision only they can make) — then and
+only then hand it back: post the blocker and your recommended option on the issue
+with `board-tick.py post`, add `blocked` (or `needs:input`), move the item to
+**In review**, and go to the next task. Never park it In progress, and never
+leave a bare "blocked" comment with no follow-up work created.
 
 For a normally-sized, unblocked task (fits one iteration), skip all of this and go
 straight to step 2.
@@ -123,8 +164,9 @@ straight to step 2.
 ### 2. Get the code repo ready, open a PR, triage
 
 Follow `loop-common` verbatim: clone once into `projects/<repo>`, add a per-task
-worktree from fresh `origin/<default>`, `gortex track` the base + worktree, open
-the PR early with `--body "Closes #<N>"`, then triage **spec-first vs
+worktree from fresh `origin/<default>`, `gortex track` the base + worktree, run
+`board-tick.py init-labels --repo <repo>` if the loop labels aren't there yet,
+open the PR early with `--body "Closes #<N>"`, then triage **spec-first vs
 implement-directly**.
 
 The difference from `hitl-loop` is that **there is no human approval gate on
@@ -150,9 +192,10 @@ Ensure the PR body links the issue (`Closes #<N>`).
 
 ### 4. Merge when CI is green (the only gate)
 
-**Re-read the PR comments first** (`loop-common` → *Always read the comments*) so
-you don't merge over feedback the owner left on the open PR. Then enable
-auto-merge so the PR merges itself the moment required checks pass:
+**Re-run the digest for this task first** — `board-tick.py --repo <repo>` — so you
+don't merge over feedback the owner left on the open PR since you started. Its
+`HUM` count must be zero (act on and ack anything it shows) before you merge.
+Then enable auto-merge so the PR merges itself the moment required checks pass:
 
 ```bash
 gh pr merge <PR#> --repo gaarutyunov/<repo> --squash --auto
@@ -184,9 +227,11 @@ Rules:
 
 ### 5. Move the task to **Done**
 
-After the merge lands:
+After the merge lands, drop any loop labels it still carries and close it out:
 
 ```bash
+.claude/skills/loop-common/scripts/board-tick.py label \
+  --repo <repo> --issue <N> --remove needs:review --remove blocked
 gh project item-edit --project-id PVT_kwHOAjGWgc4Bcice --id <ITEM_ID> \
   --field-id PVTSSF_lAHOAjGWgc4BcicezhXKdRQ --single-select-option-id 98236657
 ```
@@ -196,18 +241,20 @@ Report: task title, merged PR URL, spec PR URL (if any), and what shipped.
 ## Looping
 
 Drive continuously with `/loop` (e.g. `/loop /auto-loop`, or `/loop 15m …`). Each
-iteration takes one task from Ready all the way to **merged + Done** — except an
-**epic or a blocked task**, which an iteration instead **researches and
-decomposes** into Ready/auto sub-issues and parks as a tracker (step 1a); the loop
-then delivers those sub-issues on subsequent ticks (decomposing again if any is
-itself still an epic or blocked) and closes the parent once all its children are
-merged. Unlike `hitl-loop`, there is **no spec-approval hard gate**, so a task is
-never parked waiting on a human. **The only reason to leave a task in In progress
-is that it has become a tracker** — an epic or blocker this iteration decomposed
-into Ready/auto sub-issues. A blocker is never a dead end: it is researched,
-broken into foundation sub-issues, and those are picked up on later ticks until
-the parent's children are all merged. If there is no Ready task marked
-**Loop = auto**, idle until the next tick.
+iteration starts with the digest and takes one task from Ready all the way to
+**merged + Done** — except an **epic or a blocked task**, which an iteration
+instead **researches and decomposes** into Ready/auto sub-issues and parks as a
+`tracker` (step 1a); the loop then delivers those sub-issues on subsequent ticks
+(decomposing again if any is itself still an epic or blocked) and closes the
+parent once all its children are merged. Unlike `hitl-loop`, there is **no
+spec-approval hard gate**, so a task is never parked waiting on a human review.
+
+**The only reason to leave a task In progress is that it has become a
+`tracker`.** A blocker is never a dead end: it is researched and broken into
+foundation sub-issues, and only a blocker that genuinely needs the *owner* goes
+to **In review** with `blocked` / `needs:input`. Never leave a blocked task In
+progress, and never ask in the chat. If nothing is actionable for **Loop = auto**,
+idle until the next tick.
 
 ## Related skills
 
