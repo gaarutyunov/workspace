@@ -70,9 +70,10 @@ run once per repo so the loop labels exist.
 .claude/skills/loop-common/scripts/board-tick.py --loop auto
 ```
 
-Work the top actionable row (`HUMAN-INPUT` → `CI-RED` → `THREADS` → `READY` →
-`WIP`), skipping `TRACKER`, `WAITING-OWNER` and `BLOCKED`. Capture the row's item
-id (in the details block), issue (repo + number), and title. A Ready issue with
+Work the top actionable row (`HUMAN-INPUT` → `UNPUSHED` → `SPEC-MERGED` →
+`CI-RED` → `THREADS` → `READY` → `NOT-STARTED` → `WIP`), skipping `TRACKER`,
+`WAITING-OWNER` and `BLOCKED`. Capture the row's item id (in the details block),
+issue (repo + number), and title. A Ready issue with
 no Loop value (or `Loop = hitl`) is **not** this loop's — leave it untouched. If
 nothing is actionable, stop (or idle on the next tick when looping).
 

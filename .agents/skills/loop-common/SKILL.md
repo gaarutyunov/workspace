@@ -67,40 +67,89 @@ comment queries — the digest is the only sanctioned way to see the board.**
 .claude/skills/loop-common/scripts/board-tick.py --loop hitl   # or --loop auto
 ```
 
-One call (~5s) returns every **active** board item — everything except Backlog
-and Done — with, for each one: its status, Loop routing, labels, the linked PR,
-CI, mergeability, unresolved review threads, and **the full text of every
-owner comment that has not yet been acknowledged**. Machine comments are
-classified out, so the digest is signal only.
+One call (~7s) returns every **active** board item — everything except Backlog
+and Done — with, for each one: its status, Loop routing, labels, the code PR,
+**the spec PR**, CI, mergeability, unresolved review threads, staleness, and
+**the full text of every owner comment that has not yet been acknowledged**.
+Machine comments are classified out, so the digest is signal only.
 
 The output is a decision table sorted by urgency, then a details block:
 
 ```
-SIGNAL       TASK           STATUS       LOOP  LABELS  HUM  BOT  THR  PR   CI       MRG
-HUMAN-INPUT  workspace#12   In review    hitl  N:rev   4    3    -    #13  FAIL(1)  ok
-SPEC-APPROVED site-review#2 In review    hitl  A:spec  -    -    -    #3   ok       ok
-READY        workout#4      Ready        hitl  -       -    -    -    -    -        -
+SIGNAL       TASK           STATUS       LOOP  LABELS  AGE  HUM   BOT  THR  PR   WORK   LOCAL  CI       MRG  SPEC
+HUMAN-INPUT  site-review#2  In progress  hitl  -       4d   4·5d  1    -    #3   EMPTY  clean  ok       ok   #10:merged
+UNPUSHED     workout#4      In progress  hitl  -       4d   -     -    -    #5   EMPTY  2c+3f  -        -    -
+NOT-STARTED  boids#7        In progress  hitl  -       4d   -     -    -    -    -      -      -        -    -
 ```
 
-`HUM` counts **unaddressed owner comments** — the column that matters most.
-Work the table top-down; the signals, in the order the digest sorts them:
+- **`HUM`** — `count·age`: unaddressed owner comments, and how long the oldest
+  has been waiting. The column that matters most.
+- **`AGE`** — time since the last real activity (a comment or a pushed commit).
+  Ledger writes deliberately don't count, so acking can't make a rotting task
+  look fresh.
+- **`WORK`** — what the PR actually contains: `8f` (8 changed files) or
+  **`EMPTY`** for a PR holding nothing but the starter commit.
+- **`LOCAL`** — work in the task's worktree that GitHub has never seen:
+  `2c+3f` = 2 unpushed commits + 3 uncommitted files. `clean` = worktree exists
+  and is in sync; `-` = no worktree on this machine.
+- **`SPEC`** — the task's spec PR and its state.
+
+Work the table top-down; the signals, in the order the digest sorts them (ties
+broken by who has waited longest):
 
 | Signal | Means | Do |
 |---|---|---|
 | `HUMAN-INPUT` | owner comments you have never acted on | read them, act, then **ack** |
 | `PR-APPROVED` | owner applied `approved:pr` | merge (per the calling skill's gate) |
 | `SPEC-APPROVED` | owner applied `approved:spec` | implement from `tasks.md` |
+| `UNPUSHED` | work exists only in the local worktree | **push it first** — it is the only state that can lose work |
+| `SPEC-MERGED` | spec PR merged but no work pushed | start implementing |
 | `CI-RED` | checks failing, or the PR conflicts | fix |
 | `THREADS` | unresolved review threads | address + resolve |
 | `READY` | Ready and routed to this loop | pick it up |
-| `WIP` | In progress, nothing new | continue it |
+| `NOT-STARTED` | In progress but nothing pushed | start (or restart) the work |
+| `WIP` | In progress with pushed work, nothing new | continue it |
 | `TRACKER` | an epic whose work lives in sub-issues | **skip** — work the children |
 | `WAITING-OWNER` | needs the owner, nothing new since | **skip** — do not touch |
 | `BLOCKED` | blocked, blocker already written on the issue | **skip** — do not touch |
 
 Rows also carry `⚠` **hygiene warnings** (a blocked task parked In progress, an
-In-review task with no reason label). Fix the hygiene problem in the same tick
-you see it.
+In-review task with no reason label, an In-progress task with nothing pushed).
+Fix the hygiene problem in the same tick you see it.
+
+### An empty PR is a diagnosis, not a dead end
+
+A PR with no changed files means a previous tick claimed the task and produced
+nothing — but *why* matters, because one of the reasons is recoverable. The
+digest checks the task's local checkout (`projects/<repo>/.worktrees/issue-<N>`,
+and the base clone if it happens to sit on that branch) and tells you which case
+you're in:
+
+| `WORK` | `LOCAL` | What happened | Do |
+|---|---|---|---|
+| `EMPTY` | `2c+3f` | the run was stopped / ran out of context **after** editing | **push the work** — review the diff, commit, push |
+| `EMPTY` | `clean` | interrupted before any edit landed | restart the work |
+| `EMPTY` | `-` | no worktree on this machine either | restart from the issue + spec |
+| `8f` | `2c+3f` | pushed work **plus** newer local edits | push the remainder before anything else |
+
+Anything with local-only work is signalled **`UNPUSHED`** and ranks above CI
+failures and review threads: it is the only state where effort can actually be
+lost. The `⚠` warning names the worktree path and the exact counts.
+
+The check is local and free (no API calls). Skip it with `--no-local`, or point
+it elsewhere with `--projects-dir <path>` — useful when a tick runs on a
+different machine from the one that did the work, where `LOCAL` is meaningless.
+
+### The spec PR is fetched too
+
+A task's spec lives in the **workspace** repo on `spec/<repo>-issue-<N>` — for
+every project task that is a *different repo* from the issue, so nothing on the
+issue links to it. The digest resolves it by branch name and pulls its comments,
+reviews and unresolved threads into the same pool, tagged `spec`.
+
+This matters: owner approvals and scope changes are routinely written on the
+spec PR, and before this was wired the loop simply never saw them. Ack them like
+any other comment (`--spec-comment <id>`, or `--all`).
 
 Useful flags: `--repo <name>` to narrow, `--include-bots` to expand suppressed
 machine comments, `--json` for the structured form, `--status <s>` to override
@@ -133,9 +182,10 @@ the *same* GitHub account. Two mechanisms keep them apart:
      --repo <repo> --issue <N> --all --note "restyled per comment; title changed"
    ```
 
-   `--all` acks everything the digest currently shows for that task. To ack
-   selectively, pass `--issue-comment <id>` / `--pr-comment <id>` /
-   `--review-comment <id>` (the ids are printed in the details block). Add
+   `--all` acks everything the digest currently shows for that task, across the
+   issue, the code PR **and the spec PR**. To ack selectively, pass
+   `--issue-comment <id>` / `--pr-comment <id>` / `--review-comment <id>` /
+   `--spec-comment <id>` (the ids are printed in the details block). Add
    `--dry-run` to see the ledger without writing it.
 
 **An owner comment is never "read and skipped".** Either act on it and ack it,
@@ -234,9 +284,10 @@ parked In progress.
 
 Take it from the digest, not from a fresh board query. Work the first row whose
 signal is actionable for your loop (`HUMAN-INPUT` → `PR-APPROVED` →
-`SPEC-APPROVED` → `CI-RED` → `THREADS` → `READY` → `WIP`), skipping
-`WAITING-OWNER` and `BLOCKED`. Capture the row's **item id** (printed in the
-details block), the **issue** (repo + number), and the title.
+`SPEC-APPROVED` → `UNPUSHED` → `SPEC-MERGED` → `CI-RED` → `THREADS` →
+`READY` → `NOT-STARTED` → `WIP`), skipping `TRACKER`, `WAITING-OWNER` and `BLOCKED`.
+Capture the row's **item id** (printed in the details block), the **issue**
+(repo + number), and the title.
 
 A `READY` row is a new pickup: only rows whose `LOOP` column matches the calling
 skill (`hitl` or `auto`) are yours — a Ready issue with `LOOP=-` belongs to
