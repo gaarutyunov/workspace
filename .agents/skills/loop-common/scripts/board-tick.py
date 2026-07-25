@@ -149,6 +149,14 @@ class Item:
     ci_failing: list[str] = field(default_factory=list)
     ci_pending: list[str] = field(default_factory=list)
     pr_changed_files: int = 0
+    pr_additions: int = 0
+    pr_deletions: int = 0
+    pr_commits: int = 0
+    # Local state — work that exists on this machine but not on GitHub.
+    worktree: str | None = None
+    wt_dirty: int = 0  # uncommitted files
+    wt_unpushed: int = 0  # commits ahead of the remote branch
+    wt_stat: str = ""
     comments: list[Comment] = field(default_factory=list)
     unresolved_threads: int = 0
     # The spec PR lives in the *workspace* repo on `spec/<repo>-issue-<N>`, i.e.
@@ -174,9 +182,18 @@ class Item:
         return self.spec_pr_state == "MERGED"
 
     @property
-    def work_started(self) -> bool:
-        """Is there anything to show for this task yet?"""
+    def pushed_work(self) -> bool:
+        """Is there anything on GitHub to show for this task?"""
         return bool(self.pr_number) and self.pr_changed_files > 0
+
+    @property
+    def local_work(self) -> bool:
+        """Is there work on this machine that never reached GitHub?"""
+        return self.wt_dirty > 0 or self.wt_unpushed > 0
+
+    @property
+    def work_started(self) -> bool:
+        return self.pushed_work or self.local_work
 
     @property
     def oldest_pending_human(self) -> str:
@@ -273,6 +290,63 @@ def fetch_board(statuses: tuple[str, ...]) -> list[Item]:
             item.pr_number = find_pr_by_branch(repo, item.number)
         items.append(item)
     return items
+
+
+# ── Local worktrees ─────────────────────────────────────────────────────────
+# A PR with no changed files is ambiguous on its own: the run may have been
+# stopped, run out of context, or crashed — possibly *after* editing files that
+# were never committed or never pushed. Only the local checkout can tell which,
+# and stranded work is the one failure mode that loses effort outright.
+
+
+def workspace_root() -> "Path":
+    from pathlib import Path
+
+    # <root>/.agents/skills/loop-common/scripts/board-tick.py — resolve() so the
+    # .claude/skills symlink lands on the real path.
+    return Path(__file__).resolve().parents[4]
+
+
+def git(cwd, *args: str) -> str | None:
+    proc = subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def inspect_worktree(item: Item, projects_dir) -> None:
+    """Look for uncommitted / unpushed work in the task's local checkout."""
+    from pathlib import Path
+
+    branch = f"issue-{item.number}"
+    candidates = [Path(projects_dir) / item.repo / ".worktrees" / branch]
+    # The work may also sit in the base clone if it was checked out there.
+    base = Path(projects_dir) / item.repo
+    if git(base, "rev-parse", "--abbrev-ref", "HEAD") == branch:
+        candidates.append(base)
+
+    for path in candidates:
+        if not (path / ".git").exists():
+            continue
+        if git(path, "rev-parse", "--is-inside-work-tree") != "true":
+            continue
+        item.worktree = str(path)
+
+        status = git(path, "status", "--porcelain")
+        item.wt_dirty = len([l for l in (status or "").splitlines() if l.strip()])
+
+        # Commits reachable from HEAD but from no remote-tracking branch. This
+        # covers the case that matters most — a branch that was never pushed at
+        # all, where `@{upstream}` does not resolve.
+        ahead = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes")
+        if ahead is None:
+            ahead = git(path, "rev-list", "--count", "@{upstream}..HEAD")
+        item.wt_unpushed = int(ahead) if ahead and ahead.isdigit() else 0
+
+        stat = git(path, "diff", "--shortstat", "HEAD")
+        if stat:
+            item.wt_stat = stat
+        return
 
 
 SPEC_REPO = "workspace"  # specs are always authored in the workspace repo
@@ -378,7 +452,8 @@ fragment SpecBits on PullRequest {
 
 PR_FRAGMENT = """
 fragment PrBits on PullRequest {
-  number url isDraft state mergeable reviewDecision headRefName changedFiles
+  number url isDraft state mergeable reviewDecision headRefName
+  changedFiles additions deletions
   comments(last: 100) {
     nodes { databaseId author { login } body createdAt url }
   }
@@ -394,6 +469,7 @@ fragment PrBits on PullRequest {
     }
   }
   commits(last: 1) {
+    totalCount
     nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes {
       __typename
       ... on CheckRun { name conclusion status detailsUrl }
@@ -513,6 +589,9 @@ def apply_pr(item: Item, pr: dict) -> None:
     item.pr_review_decision = pr.get("reviewDecision")
     item.pr_url = pr.get("url") or item.pr_url
     item.pr_changed_files = pr.get("changedFiles") or 0
+    item.pr_additions = pr.get("additions") or 0
+    item.pr_deletions = pr.get("deletions") or 0
+    item.pr_commits = ((pr.get("commits") or {}).get("totalCount")) or 0
 
     for node in (pr.get("comments") or {}).get("nodes", []):
         ingest(item, node, "pr")
@@ -603,6 +682,24 @@ def drop_acked(item: Item) -> None:
 # ── Signals ─────────────────────────────────────────────────────────────────
 
 
+def diagnose_empty(item: Item) -> str:
+    """Explain an empty PR: a stopped run, an exhausted one, or a lost worktree."""
+    if not item.pr_number:
+        if item.worktree:
+            return f"no PR exists, but a worktree does ({item.worktree}) — resume there"
+        return "no PR and no local worktree — the task was claimed but never begun"
+    if item.pr_commits <= 1:
+        base = (
+            f"PR #{item.pr_number} holds only the starter commit; "
+            "a previous tick was interrupted (stopped, out of context, or crashed) "
+        )
+    else:
+        base = f"PR #{item.pr_number} has {item.pr_commits} commits but no file changes; "
+    if item.worktree:
+        return base + f"and its worktree ({item.worktree}) is clean — restart the work"
+    return base + "and no local worktree survives — restart the work from scratch"
+
+
 def compute_signal(item: Item) -> None:
     labels = set(item.labels)
     n_human = len(item.pending_human)
@@ -619,10 +716,19 @@ def compute_signal(item: Item) -> None:
         item.warnings.append("in review with no needs:*/blocked label — say what it waits for")
     if item.status == "In review" and item.pr_number is None and "needs:input" not in labels:
         item.warnings.append("in review with no PR — is the blocker written on the issue?")
+    if item.local_work:
+        bits = []
+        if item.wt_unpushed:
+            bits.append(f"{item.wt_unpushed} unpushed commit(s)")
+        if item.wt_dirty:
+            bits.append(f"{item.wt_dirty} uncommitted file(s)")
+        item.warnings.append(
+            f"local work not on GitHub: {', '.join(bits)} in {item.worktree} — "
+            "push it (or discard it deliberately) before doing anything else"
+        )
     if item.status == "In progress" and not item.work_started and "tracker" not in labels:
         item.warnings.append(
-            "in progress but nothing has been pushed — "
-            + ("PR has no changed files" if item.pr_number else "no PR exists")
+            "in progress but nothing has been pushed — " + diagnose_empty(item)
         )
 
     if n_human:
@@ -634,6 +740,15 @@ def compute_signal(item: Item) -> None:
     elif "approved:spec" in labels and "needs:spec-approval" in labels:
         reasons.append("owner approved the spec")
         item.signal = "SPEC-APPROVED"
+    elif item.local_work:
+        # Work exists only on this machine — the one state that can lose effort.
+        detail = []
+        if item.wt_unpushed:
+            detail.append(f"{item.wt_unpushed} unpushed commit(s)")
+        if item.wt_dirty:
+            detail.append(f"{item.wt_dirty} uncommitted file(s)")
+        reasons.append("stranded local work: " + ", ".join(detail))
+        item.signal = "UNPUSHED"
     elif item.spec_merged and not item.work_started:
         # The spec cleared days ago and nobody started coding — the exact way a
         # task rots silently once its comments have been acked.
@@ -661,7 +776,7 @@ def compute_signal(item: Item) -> None:
         reasons.append("ready to pick up")
         item.signal = "READY"
     elif item.status == "In progress" and not item.work_started:
-        reasons.append("picked up but nothing pushed — start (or restart) the work")
+        reasons.append(diagnose_empty(item))
         item.signal = "NOT-STARTED"
     elif item.status == "In progress":
         reasons.append("work in flight")
@@ -681,6 +796,7 @@ SIGNAL_ORDER = [
     "HUMAN-INPUT",
     "PR-APPROVED",
     "SPEC-APPROVED",
+    "UNPUSHED",
     "SPEC-MERGED",
     "CI-RED",
     "THREADS",
@@ -729,9 +845,30 @@ def hum_cell(item: Item) -> str:
     return f"{len(pending)}·{age_of(item.oldest_pending_human)}"
 
 
+def work_cell(item: Item) -> str:
+    """What the PR actually contains — an empty PR is the tell-tale."""
+    if not item.pr_number:
+        return "-"
+    if item.pr_changed_files:
+        return f"{item.pr_changed_files}f"
+    return "EMPTY"
+
+
+def local_cell(item: Item) -> str:
+    """Work sitting in the local worktree that GitHub has never seen."""
+    if not item.worktree:
+        return "-"
+    bits = []
+    if item.wt_unpushed:
+        bits.append(f"{item.wt_unpushed}c")
+    if item.wt_dirty:
+        bits.append(f"{item.wt_dirty}f")
+    return "+".join(bits) if bits else "clean"
+
+
 def render_table(items: list[Item]) -> str:
     headers = ["SIGNAL", "TASK", "STATUS", "LOOP", "LABELS", "AGE",
-               "HUM", "BOT", "THR", "PR", "CI", "MRG", "SPEC"]
+               "HUM", "BOT", "THR", "PR", "WORK", "LOCAL", "CI", "MRG", "SPEC"]
     rows = []
     for it in items:
         rows.append(
@@ -746,6 +883,8 @@ def render_table(items: list[Item]) -> str:
                 str(len(it.pending_bot)) if it.pending_bot else "-",
                 str(it.unresolved_threads) if it.unresolved_threads else "-",
                 (f"#{it.pr_number}" + ("d" if it.pr_draft else "")) if it.pr_number else "-",
+                work_cell(it),
+                local_cell(it),
                 ci_cell(it),
                 {"MERGEABLE": "ok", "CONFLICTING": "CONFLICT"}.get(it.pr_mergeable, "?")
                 if it.pr_number
@@ -784,6 +923,17 @@ def render_details(items: list[Item], include_bots: bool, body_limit: int) -> st
         out.append(f"   issue={it.issue_url}")
         out.append(f"   labels: {', '.join(it.labels) if it.labels else '(none)'}")
         out.append(f"   last activity: {age_of(it.last_activity)} ago")
+        if it.worktree:
+            state = []
+            if it.wt_unpushed:
+                state.append(f"{it.wt_unpushed} unpushed commit(s)")
+            if it.wt_dirty:
+                state.append(f"{it.wt_dirty} uncommitted file(s)")
+            if it.wt_stat:
+                state.append(it.wt_stat)
+            out.append(
+                f"   worktree: {it.worktree} — {', '.join(state) if state else 'clean, in sync'}"
+            )
         if it.spec_pr_number:
             bits = [f"spec PR #{it.spec_pr_number} ({it.spec_pr_state.lower()})"]
             if it.spec_unresolved_threads:
@@ -792,6 +942,12 @@ def render_details(items: list[Item], include_bots: bool, body_limit: int) -> st
         if it.pr_number:
             bits = [
                 f"PR #{it.pr_number}{' (draft)' if it.pr_draft else ''}",
+                (
+                    f"{it.pr_changed_files} file(s) +{it.pr_additions}/-{it.pr_deletions}"
+                    f" over {it.pr_commits} commit(s)"
+                    if it.pr_changed_files
+                    else f"EMPTY — {it.pr_commits} commit(s), no file changes"
+                ),
                 f"CI={ci_cell(it)}",
                 f"mergeable={it.pr_mergeable}",
                 f"review={it.pr_review_decision or '-'}",
@@ -859,6 +1015,17 @@ def render_json(items: list[Item]) -> str:
                 "last_activity_age": age_of(it.last_activity),
                 "oldest_pending_human": it.oldest_pending_human or None,
                 "work_started": it.work_started,
+                "pushed_work": it.pushed_work,
+                "local": (
+                    {
+                        "worktree": it.worktree,
+                        "uncommitted_files": it.wt_dirty,
+                        "unpushed_commits": it.wt_unpushed,
+                        "diff_stat": it.wt_stat or None,
+                    }
+                    if it.worktree
+                    else None
+                ),
                 "pr": (
                     {
                         "number": it.pr_number,
@@ -868,6 +1035,9 @@ def render_json(items: list[Item]) -> str:
                         "mergeable": it.pr_mergeable,
                         "review_decision": it.pr_review_decision,
                         "changed_files": it.pr_changed_files,
+                        "additions": it.pr_additions,
+                        "deletions": it.pr_deletions,
+                        "commits": it.pr_commits,
                         "ci_state": it.ci_state,
                         "ci_failing": it.ci_failing,
                         "ci_pending": it.ci_pending,
@@ -921,7 +1091,10 @@ def cmd_tick(args: argparse.Namespace) -> int:
         return 0
     attach_spec_prs(items)
     hydrate(items)
+    projects = args.projects_dir or (workspace_root() / "projects")
     for it in items:
+        if not args.no_local:
+            inspect_worktree(it, projects)
         drop_acked(it)
         compute_signal(it)
     # Most urgent signal first; within a signal, the longest-neglected first.
@@ -1133,6 +1306,8 @@ def main(argv: list[str]) -> int:
     p_tick.add_argument("--status", action="append", help="override the active statuses")
     p_tick.add_argument("--include-bots", action="store_true", help="print bot comment bodies too")
     p_tick.add_argument("--body-limit", type=int, default=1800, help="chars per comment body")
+    p_tick.add_argument("--projects-dir", help="where task worktrees live (default <workspace>/projects)")
+    p_tick.add_argument("--no-local", action="store_true", help="skip the local worktree check")
     p_tick.add_argument("--json", action="store_true", help="machine-readable output")
     p_tick.set_defaults(func=cmd_tick)
 

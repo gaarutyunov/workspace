@@ -76,10 +76,10 @@ Machine comments are classified out, so the digest is signal only.
 The output is a decision table sorted by urgency, then a details block:
 
 ```
-SIGNAL       TASK           STATUS       LOOP  LABELS  AGE  HUM   BOT  THR  PR   CI       MRG  SPEC
-HUMAN-INPUT  site-review#2  In progress  hitl  -       4d   4·5d  1    -    #3   ok       ok   #10:merged
-HUMAN-INPUT  workspace#12   In review    hitl  N:rev   4d   5·5d  4    -    #13  FAIL(1)  ok   #14:merged
-NOT-STARTED  workout#4      In progress  hitl  -       4d   -     -    -    -    -        -    -
+SIGNAL       TASK           STATUS       LOOP  LABELS  AGE  HUM   BOT  THR  PR   WORK   LOCAL  CI       MRG  SPEC
+HUMAN-INPUT  site-review#2  In progress  hitl  -       4d   4·5d  1    -    #3   EMPTY  clean  ok       ok   #10:merged
+UNPUSHED     workout#4      In progress  hitl  -       4d   -     -    -    #5   EMPTY  2c+3f  -        -    -
+NOT-STARTED  boids#7        In progress  hitl  -       4d   -     -    -    -    -      -      -        -    -
 ```
 
 - **`HUM`** — `count·age`: unaddressed owner comments, and how long the oldest
@@ -87,6 +87,11 @@ NOT-STARTED  workout#4      In progress  hitl  -       4d   -     -    -    -   
 - **`AGE`** — time since the last real activity (a comment or a pushed commit).
   Ledger writes deliberately don't count, so acking can't make a rotting task
   look fresh.
+- **`WORK`** — what the PR actually contains: `8f` (8 changed files) or
+  **`EMPTY`** for a PR holding nothing but the starter commit.
+- **`LOCAL`** — work in the task's worktree that GitHub has never seen:
+  `2c+3f` = 2 unpushed commits + 3 uncommitted files. `clean` = worktree exists
+  and is in sync; `-` = no worktree on this machine.
 - **`SPEC`** — the task's spec PR and its state.
 
 Work the table top-down; the signals, in the order the digest sorts them (ties
@@ -97,6 +102,7 @@ broken by who has waited longest):
 | `HUMAN-INPUT` | owner comments you have never acted on | read them, act, then **ack** |
 | `PR-APPROVED` | owner applied `approved:pr` | merge (per the calling skill's gate) |
 | `SPEC-APPROVED` | owner applied `approved:spec` | implement from `tasks.md` |
+| `UNPUSHED` | work exists only in the local worktree | **push it first** — it is the only state that can lose work |
 | `SPEC-MERGED` | spec PR merged but no work pushed | start implementing |
 | `CI-RED` | checks failing, or the PR conflicts | fix |
 | `THREADS` | unresolved review threads | address + resolve |
@@ -110,6 +116,29 @@ broken by who has waited longest):
 Rows also carry `⚠` **hygiene warnings** (a blocked task parked In progress, an
 In-review task with no reason label, an In-progress task with nothing pushed).
 Fix the hygiene problem in the same tick you see it.
+
+### An empty PR is a diagnosis, not a dead end
+
+A PR with no changed files means a previous tick claimed the task and produced
+nothing — but *why* matters, because one of the reasons is recoverable. The
+digest checks the task's local checkout (`projects/<repo>/.worktrees/issue-<N>`,
+and the base clone if it happens to sit on that branch) and tells you which case
+you're in:
+
+| `WORK` | `LOCAL` | What happened | Do |
+|---|---|---|---|
+| `EMPTY` | `2c+3f` | the run was stopped / ran out of context **after** editing | **push the work** — review the diff, commit, push |
+| `EMPTY` | `clean` | interrupted before any edit landed | restart the work |
+| `EMPTY` | `-` | no worktree on this machine either | restart from the issue + spec |
+| `8f` | `2c+3f` | pushed work **plus** newer local edits | push the remainder before anything else |
+
+Anything with local-only work is signalled **`UNPUSHED`** and ranks above CI
+failures and review threads: it is the only state where effort can actually be
+lost. The `⚠` warning names the worktree path and the exact counts.
+
+The check is local and free (no API calls). Skip it with `--no-local`, or point
+it elsewhere with `--projects-dir <path>` — useful when a tick runs on a
+different machine from the one that did the work, where `LOCAL` is meaningless.
 
 ### The spec PR is fetched too
 
@@ -255,8 +284,8 @@ parked In progress.
 
 Take it from the digest, not from a fresh board query. Work the first row whose
 signal is actionable for your loop (`HUMAN-INPUT` → `PR-APPROVED` →
-`SPEC-APPROVED` → `SPEC-MERGED` → `CI-RED` → `THREADS` → `READY` →
-`NOT-STARTED` → `WIP`), skipping `TRACKER`, `WAITING-OWNER` and `BLOCKED`.
+`SPEC-APPROVED` → `UNPUSHED` → `SPEC-MERGED` → `CI-RED` → `THREADS` →
+`READY` → `NOT-STARTED` → `WIP`), skipping `TRACKER`, `WAITING-OWNER` and `BLOCKED`.
 Capture the row's **item id** (printed in the details block), the **issue**
 (repo + number), and the title.
 

@@ -49,10 +49,13 @@ scope changes usually live. Treat them as instructions that outrank the issue's
 original text, and **ack them** once acted on (`loop-common` → *Comments: read →
 act → ack*).
 
+`UNPUSHED` outranks almost everything: work is sitting in the local worktree
+that GitHub has never seen — review and push it before starting anything new.
+
 Two signals mean the task is ready to be coded even without a fresh `Ready`:
 `SPEC-APPROVED` (owner labelled it) and `SPEC-MERGED` (the spec landed but
 nothing has been pushed). `NOT-STARTED` means a previous tick claimed the task
-and left nothing behind — restart it.
+and left nothing behind anywhere — restart it.
 
 Fix any `⚠` hygiene warning on the row in this same tick (e.g. a blocked task
 still sitting In progress → move it to In review).
