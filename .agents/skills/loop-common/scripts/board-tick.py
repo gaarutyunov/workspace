@@ -117,7 +117,7 @@ def gh_graphql(query: str) -> dict:
 
 @dataclass
 class Comment:
-    kind: str  # issue | pr | review
+    kind: str  # issue | pr | review | spec
     cid: int  # databaseId — the id used by the ledger
     author: str
     body: str
@@ -148,8 +148,17 @@ class Item:
     ci_state: str | None = None
     ci_failing: list[str] = field(default_factory=list)
     ci_pending: list[str] = field(default_factory=list)
+    pr_changed_files: int = 0
     comments: list[Comment] = field(default_factory=list)
     unresolved_threads: int = 0
+    # The spec PR lives in the *workspace* repo on `spec/<repo>-issue-<N>`, i.e.
+    # usually a different repo from the issue — it has to be found separately.
+    spec_pr_number: int | None = None
+    spec_pr_url: str | None = None
+    spec_pr_state: str = ""
+    spec_unresolved_threads: int = 0
+    issue_created: str = ""
+    last_activity: str = ""
     has_ledger: bool = False
     ledger: dict = field(default_factory=dict)
     signal: str = ""
@@ -159,6 +168,20 @@ class Item:
     @property
     def slug(self) -> str:
         return f"{self.repo}#{self.number}"
+
+    @property
+    def spec_merged(self) -> bool:
+        return self.spec_pr_state == "MERGED"
+
+    @property
+    def work_started(self) -> bool:
+        """Is there anything to show for this task yet?"""
+        return bool(self.pr_number) and self.pr_changed_files > 0
+
+    @property
+    def oldest_pending_human(self) -> str:
+        stamps = [c.created for c in self.pending_human if c.created]
+        return min(stamps) if stamps else ""
 
     @property
     def pending(self) -> list[Comment]:
@@ -172,6 +195,37 @@ class Item:
     @property
     def pending_bot(self) -> list[Comment]:
         return [c for c in self.comments if c.who == "bot"]
+
+
+# ── Time ────────────────────────────────────────────────────────────────────
+
+
+def parse_ts(stamp: str) -> datetime | None:
+    if not stamp:
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def age_of(stamp: str) -> str:
+    """Compact age: 45m / 5h / 4d / 3w."""
+    when = parse_ts(stamp)
+    if not when:
+        return "-"
+    secs = (datetime.now(timezone.utc) - when).total_seconds()
+    if secs < 3600:
+        return f"{int(secs // 60)}m"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h"
+    days = int(secs // 86400)
+    return f"{days}d" if days < 14 else f"{days // 7}w"
+
+
+def newest(*stamps: str) -> str:
+    real = [s for s in stamps if s]
+    return max(real) if real else ""
 
 
 # ── Board ───────────────────────────────────────────────────────────────────
@@ -221,6 +275,50 @@ def fetch_board(statuses: tuple[str, ...]) -> list[Item]:
     return items
 
 
+SPEC_REPO = "workspace"  # specs are always authored in the workspace repo
+
+
+def attach_spec_prs(items: list[Item]) -> None:
+    """Find each task's spec PR.
+
+    Specs live in the workspace repo on `spec/<repo>-issue-<N>` — a *different*
+    repo from the issue for every project task, so nothing on the issue links to
+    them. One list call covers the whole board.
+    """
+    if not items:
+        return
+    out = gh(
+        "pr",
+        "list",
+        "--repo",
+        f"{OWNER}/{SPEC_REPO}",
+        "--state",
+        "all",
+        "--limit",
+        "200",
+        "--json",
+        "number,headRefName,state,url",
+        check=False,
+    )
+    try:
+        prs = json.loads(out or "[]")
+    except json.JSONDecodeError:
+        return
+    by_branch: dict[str, dict] = {}
+    for pr in prs:
+        branch = pr.get("headRefName", "")
+        if branch.startswith("spec/"):
+            # Later PRs win — a respun spec supersedes an earlier attempt.
+            by_branch[branch] = pr
+    for item in items:
+        pr = by_branch.get(f"spec/{item.repo}-issue-{item.number}")
+        if not pr:
+            continue
+        item.spec_pr_number = pr["number"]
+        item.spec_pr_state = pr.get("state", "")
+        item.spec_pr_url = pr.get("url")
+
+
 def find_pr_by_branch(repo: str, issue: int) -> int | None:
     """Fallback for a PR the board didn't link: the loops' `issue-<N>` branch."""
     out = gh(
@@ -250,7 +348,7 @@ def find_pr_by_branch(repo: str, issue: int) -> int | None:
 
 ISSUE_FRAGMENT = """
 fragment IssueBits on Issue {
-  number url title state
+  number url title state createdAt
   labels(first: 50) { nodes { name } }
   comments(last: 100) {
     nodes { databaseId author { login } body createdAt url }
@@ -258,9 +356,29 @@ fragment IssueBits on Issue {
 }
 """
 
+SPEC_FRAGMENT = """
+fragment SpecBits on PullRequest {
+  number url state mergedAt isDraft
+  comments(last: 50) {
+    nodes { databaseId author { login } body createdAt url }
+  }
+  reviews(last: 20) {
+    nodes { databaseId author { login } body state submittedAt url }
+  }
+  reviewThreads(first: 30) {
+    nodes {
+      isResolved path line
+      comments(first: 5) {
+        nodes { databaseId author { login } body createdAt url }
+      }
+    }
+  }
+}
+"""
+
 PR_FRAGMENT = """
 fragment PrBits on PullRequest {
-  number url isDraft state mergeable reviewDecision headRefName
+  number url isDraft state mergeable reviewDecision headRefName changedFiles
   comments(last: 100) {
     nodes { databaseId author { login } body createdAt url }
   }
@@ -276,7 +394,7 @@ fragment PrBits on PullRequest {
     }
   }
   commits(last: 1) {
-    nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
+    nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes {
       __typename
       ... on CheckRun { name conclusion status detailsUrl }
       ... on StatusContext { context state targetUrl }
@@ -300,7 +418,15 @@ def hydrate(items: list[Item], chunk_size: int = 6) -> None:
                     f'p{idx}: repository(owner: "{OWNER}", name: "{item.repo}") '
                     f"{{ pullRequest(number: {item.pr_number}) {{ ...PrBits }} }}"
                 )
-        query = "query {\n" + "\n".join(parts) + "\n}\n" + ISSUE_FRAGMENT + PR_FRAGMENT
+            if item.spec_pr_number:
+                parts.append(
+                    f's{idx}: repository(owner: "{OWNER}", name: "{SPEC_REPO}") '
+                    f"{{ pullRequest(number: {item.spec_pr_number}) {{ ...SpecBits }} }}"
+                )
+        query = (
+            "query {\n" + "\n".join(parts) + "\n}\n"
+            + ISSUE_FRAGMENT + PR_FRAGMENT + SPEC_FRAGMENT
+        )
         data = gh_graphql(query)
         for idx, item in enumerate(chunk):
             issue = (data.get(f"i{idx}") or {}).get("issue") or {}
@@ -308,6 +434,9 @@ def hydrate(items: list[Item], chunk_size: int = 6) -> None:
             pr = (data.get(f"p{idx}") or {}).get("pullRequest") if item.pr_number else None
             if pr:
                 apply_pr(item, pr)
+            spec = (data.get(f"s{idx}") or {}).get("pullRequest") if item.spec_pr_number else None
+            if spec:
+                apply_spec(item, spec)
 
 
 def classify(login: str, body: str) -> str:
@@ -320,26 +449,61 @@ def classify(login: str, body: str) -> str:
     return "human"  # an outside human is still a human to answer
 
 
+def ingest(item: Item, node: dict, kind: str, **extra) -> Comment | None:
+    """Turn one API comment node into a tracked Comment (ledger comment aside)."""
+    body = node.get("body") or ""
+    if LEDGER_MARKER in body:
+        return None
+    login = (node.get("author") or {}).get("login", "ghost")
+    created = node.get("createdAt") or node.get("submittedAt") or ""
+    comment = Comment(
+        kind=kind,
+        cid=node["databaseId"],
+        author=login,
+        body=body,
+        created=created,
+        url=node.get("url", ""),
+        who=classify(login, body),
+        **extra,
+    )
+    item.comments.append(comment)
+    item.last_activity = newest(item.last_activity, created)
+    return comment
+
+
 def apply_issue(item: Item, issue: dict) -> None:
     item.labels = [n["name"] for n in (issue.get("labels") or {}).get("nodes", [])]
+    item.issue_created = issue.get("createdAt", "")
+    item.last_activity = newest(item.last_activity, item.issue_created)
     for node in (issue.get("comments") or {}).get("nodes", []):
-        body = node.get("body") or ""
-        if LEDGER_MARKER in body:
+        if LEDGER_MARKER in (node.get("body") or ""):
+            # The ledger is our own bookkeeping: it is neither a comment to act
+            # on nor activity — counting it would make every task look fresh.
             item.has_ledger = True
-            item.ledger = parse_ledger(body)
+            item.ledger = parse_ledger(node["body"])
             item.ledger["_comment_id"] = node["databaseId"]
             continue
-        item.comments.append(
-            Comment(
-                kind="issue",
-                cid=node["databaseId"],
-                author=(node.get("author") or {}).get("login", "ghost"),
-                body=body,
-                created=node.get("createdAt", ""),
-                url=node.get("url", ""),
-                who=classify((node.get("author") or {}).get("login", "ghost"), body),
-            )
-        )
+        ingest(item, node, "issue")
+
+
+def apply_spec(item: Item, spec: dict) -> None:
+    item.spec_pr_state = spec.get("state", item.spec_pr_state)
+    item.spec_pr_url = spec.get("url") or item.spec_pr_url
+    for node in (spec.get("comments") or {}).get("nodes", []):
+        ingest(item, node, "spec")
+    for node in (spec.get("reviews") or {}).get("nodes", []):
+        body = (node.get("body") or "").strip()
+        state = node.get("state", "")
+        if not body and state not in ("CHANGES_REQUESTED", "APPROVED"):
+            continue
+        node = {**node, "body": f"[spec review {state}] {body}".strip()}
+        ingest(item, node, "spec")
+    for thread in (spec.get("reviewThreads") or {}).get("nodes", []):
+        if thread.get("isResolved"):
+            continue
+        item.spec_unresolved_threads += 1
+        for node in (thread.get("comments") or {}).get("nodes", []):
+            ingest(item, node, "spec", path=f"{thread.get('path')}:{thread.get('line')}")
 
 
 def apply_pr(item: Item, pr: dict) -> None:
@@ -348,69 +512,37 @@ def apply_pr(item: Item, pr: dict) -> None:
     item.pr_mergeable = pr.get("mergeable", "UNKNOWN")
     item.pr_review_decision = pr.get("reviewDecision")
     item.pr_url = pr.get("url") or item.pr_url
+    item.pr_changed_files = pr.get("changedFiles") or 0
 
     for node in (pr.get("comments") or {}).get("nodes", []):
-        body = node.get("body") or ""
-        if LEDGER_MARKER in body:
-            continue
-        login = (node.get("author") or {}).get("login", "ghost")
-        item.comments.append(
-            Comment(
-                kind="pr",
-                cid=node["databaseId"],
-                author=login,
-                body=body,
-                created=node.get("createdAt", ""),
-                url=node.get("url", ""),
-                who=classify(login, body),
-            )
-        )
+        ingest(item, node, "pr")
 
     for node in (pr.get("reviews") or {}).get("nodes", []):
         body = (node.get("body") or "").strip()
         state = node.get("state", "")
         if not body and state not in ("CHANGES_REQUESTED", "APPROVED"):
             continue
-        login = (node.get("author") or {}).get("login", "ghost")
-        item.comments.append(
-            Comment(
-                kind="pr",
-                cid=node["databaseId"],
-                author=login,
-                body=f"[review {state}] {body}".strip(),
-                created=node.get("submittedAt", ""),
-                url=node.get("url", ""),
-                who=classify(login, body),
-            )
-        )
+        ingest(item, {**node, "body": f"[review {state}] {body}".strip()}, "pr")
 
     for thread in (pr.get("reviewThreads") or {}).get("nodes", []):
         if thread.get("isResolved"):
             continue  # resolving a thread *is* the ack for review comments
         item.unresolved_threads += 1
-        nodes = (thread.get("comments") or {}).get("nodes", [])
-        for node in nodes:
-            body = node.get("body") or ""
+        for node in (thread.get("comments") or {}).get("nodes", []):
             login = (node.get("author") or {}).get("login", "ghost")
-            who = classify(login, body)
-            if who == "agent":
+            if classify(login, node.get("body") or "") == "agent":
                 continue
-            item.comments.append(
-                Comment(
-                    kind="review",
-                    cid=node["databaseId"],
-                    author=login,
-                    body=body,
-                    created=node.get("createdAt", ""),
-                    url=node.get("url", ""),
-                    who=who,
-                    thread_id=thread["id"],
-                    thread_resolved=False,
-                    path=f"{thread.get('path')}:{thread.get('line')}",
-                )
+            ingest(
+                item,
+                node,
+                "review",
+                thread_id=thread["id"],
+                path=f"{thread.get('path')}:{thread.get('line')}",
             )
 
     commits = (pr.get("commits") or {}).get("nodes", [])
+    if commits:
+        item.last_activity = newest(item.last_activity, commits[0]["commit"].get("committedDate", ""))
     rollup = (commits[0]["commit"].get("statusCheckRollup") if commits else None) or {}
     item.ci_state = rollup.get("state")
     for ctx in (rollup.get("contexts") or {}).get("nodes", []):
@@ -487,6 +619,11 @@ def compute_signal(item: Item) -> None:
         item.warnings.append("in review with no needs:*/blocked label — say what it waits for")
     if item.status == "In review" and item.pr_number is None and "needs:input" not in labels:
         item.warnings.append("in review with no PR — is the blocker written on the issue?")
+    if item.status == "In progress" and not item.work_started and "tracker" not in labels:
+        item.warnings.append(
+            "in progress but nothing has been pushed — "
+            + ("PR has no changed files" if item.pr_number else "no PR exists")
+        )
 
     if n_human:
         reasons.append(f"{n_human} unaddressed owner comment(s)")
@@ -497,6 +634,11 @@ def compute_signal(item: Item) -> None:
     elif "approved:spec" in labels and "needs:spec-approval" in labels:
         reasons.append("owner approved the spec")
         item.signal = "SPEC-APPROVED"
+    elif item.spec_merged and not item.work_started:
+        # The spec cleared days ago and nobody started coding — the exact way a
+        # task rots silently once its comments have been acked.
+        reasons.append(f"spec PR #{item.spec_pr_number} is merged but no work is pushed")
+        item.signal = "SPEC-MERGED"
     elif item.ci_failing:
         reasons.append("CI failing: " + ", ".join(item.ci_failing[:4]))
         item.signal = "CI-RED"
@@ -518,11 +660,17 @@ def compute_signal(item: Item) -> None:
     elif item.status == "Ready":
         reasons.append("ready to pick up")
         item.signal = "READY"
+    elif item.status == "In progress" and not item.work_started:
+        reasons.append("picked up but nothing pushed — start (or restart) the work")
+        item.signal = "NOT-STARTED"
     elif item.status == "In progress":
         reasons.append("work in flight")
         item.signal = "WIP"
     else:
         item.signal = "IDLE"
+
+    if item.spec_pr_number and item.spec_pr_state == "OPEN" and item.signal != "HUMAN-INPUT":
+        reasons.append(f"spec PR #{item.spec_pr_number} still open")
 
     if item.ci_pending and item.signal in ("PR-APPROVED", "WAITING-OWNER", "WIP"):
         reasons.append(f"CI pending: {len(item.ci_pending)} check(s)")
@@ -533,9 +681,11 @@ SIGNAL_ORDER = [
     "HUMAN-INPUT",
     "PR-APPROVED",
     "SPEC-APPROVED",
+    "SPEC-MERGED",
     "CI-RED",
     "THREADS",
     "READY",
+    "NOT-STARTED",
     "WIP",
     "TRACKER",
     "WAITING-OWNER",
@@ -564,8 +714,24 @@ def label_cell(item: Item) -> str:
     return ",".join(marks) if marks else "-"
 
 
+def spec_cell(item: Item) -> str:
+    if not item.spec_pr_number:
+        return "-"
+    tag = {"MERGED": "merged", "OPEN": "open", "CLOSED": "closed"}.get(item.spec_pr_state, "?")
+    return f"#{item.spec_pr_number}:{tag}"
+
+
+def hum_cell(item: Item) -> str:
+    """Count of unaddressed owner comments, and how long the oldest has waited."""
+    pending = item.pending_human
+    if not pending:
+        return "-"
+    return f"{len(pending)}·{age_of(item.oldest_pending_human)}"
+
+
 def render_table(items: list[Item]) -> str:
-    headers = ["SIGNAL", "TASK", "STATUS", "LOOP", "LABELS", "HUM", "BOT", "THR", "PR", "CI", "MRG"]
+    headers = ["SIGNAL", "TASK", "STATUS", "LOOP", "LABELS", "AGE",
+               "HUM", "BOT", "THR", "PR", "CI", "MRG", "SPEC"]
     rows = []
     for it in items:
         rows.append(
@@ -575,7 +741,8 @@ def render_table(items: list[Item]) -> str:
                 it.status,
                 it.loop or "-",
                 label_cell(it),
-                str(len(it.pending_human)) if it.pending_human else "-",
+                age_of(it.last_activity),
+                hum_cell(it),
                 str(len(it.pending_bot)) if it.pending_bot else "-",
                 str(it.unresolved_threads) if it.unresolved_threads else "-",
                 (f"#{it.pr_number}" + ("d" if it.pr_draft else "")) if it.pr_number else "-",
@@ -583,6 +750,7 @@ def render_table(items: list[Item]) -> str:
                 {"MERGEABLE": "ok", "CONFLICTING": "CONFLICT"}.get(it.pr_mergeable, "?")
                 if it.pr_number
                 else "-",
+                spec_cell(it),
             ]
         )
     widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
@@ -615,6 +783,12 @@ def render_details(items: list[Item], include_bots: bool, body_limit: int) -> st
         out.append(f"   item={it.item_id}")
         out.append(f"   issue={it.issue_url}")
         out.append(f"   labels: {', '.join(it.labels) if it.labels else '(none)'}")
+        out.append(f"   last activity: {age_of(it.last_activity)} ago")
+        if it.spec_pr_number:
+            bits = [f"spec PR #{it.spec_pr_number} ({it.spec_pr_state.lower()})"]
+            if it.spec_unresolved_threads:
+                bits.append(f"{it.spec_unresolved_threads} unresolved thread(s)")
+            out.append("   " + " · ".join(bits) + f"\n   {it.spec_pr_url}")
         if it.pr_number:
             bits = [
                 f"PR #{it.pr_number}{' (draft)' if it.pr_draft else ''}",
@@ -637,7 +811,7 @@ def render_details(items: list[Item], include_bots: bool, body_limit: int) -> st
                 "read them, then ack what is already handled"
             )
         for c in it.pending_human:
-            head = f"   [OWNER · {c.kind} {c.cid}] @{c.author} {c.created}"
+            head = f"   [OWNER · {c.kind} {c.cid}] @{c.author} {c.created} ({age_of(c.created)} ago)"
             if c.path:
                 head += f" · {c.path}"
             out.append(head)
@@ -681,6 +855,10 @@ def render_json(items: list[Item]) -> str:
                 "reasons": it.reasons,
                 "warnings": it.warnings,
                 "has_ledger": it.has_ledger,
+                "last_activity": it.last_activity,
+                "last_activity_age": age_of(it.last_activity),
+                "oldest_pending_human": it.oldest_pending_human or None,
+                "work_started": it.work_started,
                 "pr": (
                     {
                         "number": it.pr_number,
@@ -689,12 +867,24 @@ def render_json(items: list[Item]) -> str:
                         "state": it.pr_state,
                         "mergeable": it.pr_mergeable,
                         "review_decision": it.pr_review_decision,
+                        "changed_files": it.pr_changed_files,
                         "ci_state": it.ci_state,
                         "ci_failing": it.ci_failing,
                         "ci_pending": it.ci_pending,
                         "unresolved_threads": it.unresolved_threads,
                     }
                     if it.pr_number
+                    else None
+                ),
+                "spec_pr": (
+                    {
+                        "number": it.spec_pr_number,
+                        "repo": SPEC_REPO,
+                        "url": it.spec_pr_url,
+                        "state": it.spec_pr_state,
+                        "unresolved_threads": it.spec_unresolved_threads,
+                    }
+                    if it.spec_pr_number
                     else None
                 ),
                 "pending_comments": [
@@ -729,11 +919,19 @@ def cmd_tick(args: argparse.Namespace) -> int:
     if not items:
         print("No active board items match.")
         return 0
+    attach_spec_prs(items)
     hydrate(items)
     for it in items:
         drop_acked(it)
         compute_signal(it)
-    items.sort(key=lambda i: (SIGNAL_ORDER.index(i.signal) if i.signal in SIGNAL_ORDER else 99, i.slug))
+    # Most urgent signal first; within a signal, the longest-neglected first.
+    items.sort(
+        key=lambda i: (
+            SIGNAL_ORDER.index(i.signal) if i.signal in SIGNAL_ORDER else 99,
+            i.oldest_pending_human or i.last_activity or "9999",
+            i.slug,
+        )
+    )
 
     if args.json:
         print(render_json(items))
@@ -775,9 +973,10 @@ def collect_pending_ids(repo: str, issue: int) -> dict[str, list[int]]:
         item.pr_number = find_pr_by_branch(repo, issue)
         items = [item]
     item = items[0]
+    attach_spec_prs([item])
     hydrate([item])
     drop_acked(item)
-    buckets: dict[str, list[int]] = {"issue": [], "pr": [], "review": []}
+    buckets: dict[str, list[int]] = {"issue": [], "pr": [], "review": [], "spec": []}
     for c in item.pending:
         buckets[c.kind].append(c.cid)
     return buckets
@@ -791,6 +990,7 @@ def cmd_ack(args: argparse.Namespace) -> int:
         buckets = collect_pending_ids(args.repo, args.issue)
     else:
         buckets = {
+            "spec": list(args.spec_comment),
             "issue": list(args.issue_comment),
             "pr": list(args.pr_comment),
             "review": list(args.review_comment),
@@ -943,6 +1143,7 @@ def main(argv: list[str]) -> int:
     p_ack.add_argument("--issue-comment", action="append", type=int, default=[])
     p_ack.add_argument("--pr-comment", action="append", type=int, default=[])
     p_ack.add_argument("--review-comment", action="append", type=int, default=[])
+    p_ack.add_argument("--spec-comment", action="append", type=int, default=[])
     p_ack.add_argument("--note", help="short record of what was done about them")
     p_ack.add_argument("--dry-run", action="store_true")
     p_ack.set_defaults(func=cmd_ack)

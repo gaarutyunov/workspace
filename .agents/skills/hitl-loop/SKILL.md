@@ -42,10 +42,17 @@ and the `approved:pr` merge gate.
 .claude/skills/loop-common/scripts/board-tick.py --loop hitl
 ```
 
-Work the top actionable row, skipping `WAITING-OWNER` and `BLOCKED`. The digest
-already contains every unaddressed owner comment for that task — treat those
-comments as instructions that outrank the issue's original text, and **ack them**
-once acted on (`loop-common` → *Comments: read → act → ack*).
+Work the top actionable row, skipping `TRACKER`, `WAITING-OWNER` and `BLOCKED`.
+The digest already contains every unaddressed owner comment for that task —
+**including comments on its spec PR in the workspace repo**, where approvals and
+scope changes usually live. Treat them as instructions that outrank the issue's
+original text, and **ack them** once acted on (`loop-common` → *Comments: read →
+act → ack*).
+
+Two signals mean the task is ready to be coded even without a fresh `Ready`:
+`SPEC-APPROVED` (owner labelled it) and `SPEC-MERGED` (the spec landed but
+nothing has been pushed). `NOT-STARTED` means a previous tick claimed the task
+and left nothing behind — restart it.
 
 Fix any `⚠` hygiene warning on the row in this same tick (e.g. a blocked task
 still sitting In progress → move it to In review).
