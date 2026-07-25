@@ -1,126 +1,169 @@
 ---
 name: hitl-loop
-description: "Human-in-the-loop delivery loop: pull the next Ready task marked Loop=hitl on the gaarutyunov GitHub Project board (project #6) and take it through the full workflow (in progress → clone/worktree → branch + PR → triage → spec-or-implement → work → in review) with human gates — waits for owner spec approval before coding, and leaves every PR for human review and merge (never auto-merges). Use when asked to work the task board with review gates. Examples: \"work on the next task\", \"pull a task from the board\", \"run the project loop\". For unattended runs that skip the gates and self-merge on green CI, use the auto-loop skill instead."
+description: "Human-in-the-loop delivery loop: run the board-tick digest on the gaarutyunov GitHub Project board (project #6), work the highest-signal task routed to Loop=hitl, and take it through the full workflow (in progress → clone/worktree → branch + PR → triage → spec-or-implement → work → in review) with owner gates expressed as labels — waits for the `approved:spec` label before coding and the `approved:pr` label before merging. All owner interaction happens on GitHub; never ask anything in the Claude Code window. Use when asked to work the task board with review gates. Examples: \"work on the next task\", \"pull a task from the board\", \"run the project loop\". For unattended runs that skip the gates and self-merge on green CI, use the auto-loop skill instead."
 ---
 
 # HITL task loop
 
 Drives tasks on the personal GitHub Project board
 [users/gaarutyunov/projects/6](https://github.com/users/gaarutyunov/projects/6)
-through delivery, one task at a time, **with human review gates** — the owner
-approves specs before implementation, and every PR waits for human review and
-merge. Run it once for a single task, or drive it continuously with the `/loop`
-skill (see **Looping** below). For a fully autonomous variant that skips both
-gates and self-merges once CI is green, use the **auto-loop** skill.
+through delivery, one task at a time, **with owner gates**: the owner approves
+specs and PRs by applying a label, and the loop does everything else. Run it once
+for a single task, or drive it continuously with the `/loop` skill (see
+**Looping**). For a fully autonomous variant that skips both gates and self-merges
+once CI is green, use the **auto-loop** skill.
 
 ## Shared mechanics live in `loop-common`
 
-The board IDs, Ready-task selection, the **always-read-comments** rule,
+The **board-tick digest**, the **label protocol**, the **comment ack ledger**,
+**GitHub-only interaction**, the **blocked → In review** rule, board IDs,
 clone/worktree + gortex tracking, opening a PR early, the OpenSpec `/opsx:*`
-flow, commit/push discipline, moving a task's status, and the
-`coderabbit-prompts.py` helper are all documented **once** in the `loop-common`
-skill — read `.claude/skills/loop-common/SKILL.md`. This file specifies only what
-is **specific to the human-gated path**: `Loop = hitl`, the spec-approval gate,
-and leaving every PR for human review + merge.
+flow, commit/push discipline, status moves, and the `coderabbit-prompts.py`
+helper are documented **once** in the `loop-common` skill — read
+`.claude/skills/loop-common/SKILL.md`. This file specifies only what is
+**specific to the human-gated path**: `Loop = hitl`, the `approved:spec` gate,
+and the `approved:pr` merge gate.
 
-> **Read the comments every time.** Per `loop-common`, before you act on a task
-> in **any** active status (Ready / In progress / In review) — including each
-> time you resume it or come back to its PR — read the issue's and the PR's
-> comments first and treat owner comments as instructions. Only Backlog and Done
-> are exempt.
+## Three rules that override everything else
 
-## Prerequisites
+1. **Start with the digest.** Never query the board or read comments by hand.
+2. **Never ask the owner anything in the Claude Code window.** No
+   `AskUserQuestion`, ever. Questions go on the issue, get `needs:input`, and the
+   task moves to **In review**.
+3. **Anything waiting on the owner lives in In review, with a label saying why.**
+   Nothing blocked, nothing awaiting approval, and nothing awaiting an answer is
+   ever left In progress.
 
-Same as `loop-common`: `gh` authenticated with the `project` scope
-(`gh auth refresh -s project`); OpenSpec initialized in this workspace repo; code
-repos cloned/worktree'd under `projects/`.
+## The workflow (per tick)
 
-## The workflow (per task)
+### 1. Run the digest and choose one task
 
-### 1. Get a task from **Ready** marked **Loop = hitl**, move it to **In progress**
+```bash
+.claude/skills/loop-common/scripts/board-tick.py --loop hitl
+```
 
-Use the `loop-common` **Select a Ready task** query with `LOOP=hitl`. Capture the
-item id, linked issue (repo + number), and title. A Ready issue with no Loop
-value (or `Loop = auto`) is **not** this loop's — leave it untouched. If there is
-no eligible item, stop.
+Work the top actionable row, skipping `WAITING-OWNER` and `BLOCKED`. The digest
+already contains every unaddressed owner comment for that task — treat those
+comments as instructions that outrank the issue's original text, and **ack them**
+once acted on (`loop-common` → *Comments: read → act → ack*).
 
-**Read the comments now** (`loop-common` → *Always read the comments*): pull the
-issue's comments before doing anything, so any owner direction on the task shapes
-what you build. Then move the item to **In progress** (`47fc9ee4`) with the
-status-edit command in `loop-common`.
+Fix any `⚠` hygiene warning on the row in this same tick (e.g. a blocked task
+still sitting In progress → move it to In review).
+
+If the chosen row is `READY`, move it to **In progress** (`47fc9ee4`). If it is
+already in flight, leave the status alone until step 4.
 
 ### 2. Get the code repo ready, open a PR, triage
 
 Follow `loop-common` verbatim: clone once into `projects/<repo>`, add a per-task
-worktree from fresh `origin/<default>`, `gortex track` the base + worktree, open
-the PR early with `--body "Closes #<N>"`, then triage **spec-first vs
+worktree from fresh `origin/<default>`, `gortex track` the base + worktree, run
+`board-tick.py init-labels --repo <repo>` if the loop labels aren't there yet,
+open the PR early with `--body "Closes #<N>"`, then triage **spec-first vs
 implement-directly**.
 
-### 3. Spec-first path — **owner-approval gate**
+### 3. Spec-first path — the `approved:spec` gate
 
 Author the change with `loop-common`'s OpenSpec flow (`/opsx:propose …`) and open
-the spec PR in this workspace repo. **Then wait for the owner to approve and merge
-the spec PR** (apply the review & merge discipline in step 5). Do **not** start
-implementation until it is merged.
+the spec PR in this workspace repo. Then:
 
-When looping, this is a **hard gate** — leave the task in **In progress**, note
-that it's awaiting review, and pick up the next Ready task (or idle) rather than
-blocking the whole loop.
+```bash
+.claude/skills/loop-common/scripts/board-tick.py post --repo <repo> --issue <N> \
+  --body "Spec ready for approval: <spec PR url>. Add the \`approved:spec\` label to this issue to start implementation."
+.claude/skills/loop-common/scripts/board-tick.py label --repo <repo> --issue <N> --add needs:spec-approval
+# then move the item to In review (df73e18b)
+```
 
-Once the spec PR is merged, implement from the change's `tasks.md` with
-`/opsx:apply`, and `/opsx:archive` once the work has shipped. For a direct task,
-skip straight to the work.
+**Do not implement until the owner applies `approved:spec`.** This is a hard
+gate: the task sits in **In review** with `needs:spec-approval`, and the tick
+moves on to the next task rather than blocking the loop. A later digest shows the
+task as `SPEC-APPROVED`; at that point merge the spec PR, drop
+`needs:spec-approval`, move the item back to **In progress**, and implement from
+the change's `tasks.md` with `/opsx:apply` (`/opsx:archive` once it ships).
 
-### 4. Perform the work, commit, push, move to **In review**
+For a direct task, skip straight to the work.
+
+### 4. Perform the work, push, ask for review
 
 Implement in the branch/worktree with tests where the project has them, keeping
 `loop-common`'s commit/push discipline (**never `git add -A`**; stage specific
-paths, inspect `git diff --cached`, ref the issue). Once the work is pushed and
-the PR links the issue (and the merged spec PR, if any), move the item to **In
-review** (`df73e18b`). Never move to **In review** until the work is pushed.
+paths, inspect `git diff --cached`, ref the issue). Then, once the work is
+**pushed** and the PR links the issue:
+
+```bash
+.claude/skills/loop-common/scripts/board-tick.py label --repo <repo> --issue <N> --add needs:review
+# move the item to In review (df73e18b)
+```
+
+Never move to **In review** as "finished work awaiting review" until the work is
+pushed. (Moving there because you're *blocked* or need an answer is different —
+that's step 6, and it happens whenever it happens.)
 
 Report: task title, code PR URL, spec PR URL (if any), and what was done.
 
-### 5. Review & merge discipline — **owner merges**
+### 5. The `approved:pr` merge gate — owner approves, **you** merge
 
-**Never merge a PR/MR with unresolved review threads.** Before merging any PR (a
-code PR, or a spec PR once the owner has approved it), work the threads in this
-order:
+A later digest shows the task as `PR-APPROVED` once the owner adds the
+`approved:pr` label. The owner approves; the loop performs the merge and the
+status move — the owner is never expected to press Merge or move the card.
+Before merging:
 
-1. **Owner (human) comments first.** Re-read the issue and PR comments
-   (`loop-common` → *Always read the comments*) and address every review comment
-   the repo owner wrote. These take priority over any bot.
-2. **Then CodeRabbit comments you find valid.** Pull, verify, and resolve them
-   using `loop-common`'s **CodeRabbit + review threads** section (the
-   `coderabbit-prompts.py` helper + `resolveReviewThread` mutation). If
-   CodeRabbit's review limit is reached, ignore it — there are no bot threads to
-   work.
-3. **Resolve every thread**, then **merge only once all threads are resolved and
-   checks are green**:
+1. **Owner comments first.** The row's `HUM` count must be zero — act on every
+   unaddressed owner comment and ack it.
+2. **Then CodeRabbit findings you judge valid**, via `loop-common`'s *CodeRabbit
+   + review threads* section. If CodeRabbit's review limit is reached, ignore it.
+3. **Resolve every thread** (`THR` must be `-`), and confirm CI is green
+   (`CI=ok`) and the PR is mergeable.
 
-   ```bash
-   gh pr merge <PR#> --repo gaarutyunov/<repo> --squash
-   ```
+Only then:
 
-Unlike `auto-loop`, **this loop does not self-merge** — the owner merges the code
-PR after review. The spec PR is likewise owner-merged (step 3). The same
-"no unresolved threads" rule applies to both.
+```bash
+gh pr merge <PR#> --repo gaarutyunov/<repo> --squash
+```
+
+Then drop `needs:review` / `approved:pr`, move the item to **Done** (`98236657`),
+and `/opsx:archive` the change if there was a spec.
+
+**Never merge without `approved:pr`**, and never merge with unresolved threads or
+red CI — that's the whole difference from `auto-loop`.
+
+### 6. Blocked, or need an answer — surface it and move on
+
+Whenever the task can't proceed — an external dependency, a missing credential,
+an ambiguous requirement, a decision only the owner can make — do **not** park it
+In progress and do **not** ask in the chat:
+
+```bash
+.claude/skills/loop-common/scripts/board-tick.py post --repo <repo> --issue <N> --body "$(cat <<'EOF'
+**Blocked on <what>.**
+
+<what is blocked, what it depends on (link the issue/PR), what unblocks it>
+
+<if it's a question: the options, and which one I'd pick>
+EOF
+)"
+.claude/skills/loop-common/scripts/board-tick.py label --repo <repo> --issue <N> --add blocked
+# or --add needs:input for a question; then move the item to In review (df73e18b)
+```
+
+Push whatever partial work exists first so nothing is lost, then pick up the next
+task in the digest.
 
 ## Looping
 
 Drive continuously with the `/loop` skill (e.g. `/loop /hitl-loop` for
-self-paced, or `/loop 15m …`). Each iteration handles one task end-to-end:
+self-paced, or `/loop 15m …`). Each tick starts with the digest and handles one
+task:
 
-- If there is no **Ready** task marked **Loop = hitl**, do nothing and wait for
-  the next tick. (`auto`-marked and unrouted tasks are not this loop's.)
-- If a task is blocked on **spec approval** (step 3), leave it in **In progress**,
-  note that it's awaiting review, and pick up the next Ready task (or idle if
-  none) rather than blocking the whole loop.
-- Never move a task to **In review** until its work is pushed.
+- Nothing actionable for `Loop = hitl` → do nothing and wait for the next tick.
+- A task waiting on the owner (`WAITING-OWNER`, `BLOCKED`) is **skipped** — never
+  re-worked, never re-commented. The ack ledger keeps it quiet until the owner
+  responds.
+- Never move a task to **In review** as finished work until its work is pushed.
+- Never leave a blocked or owner-waiting task **In progress**.
 
 ## Related skills
 
-- `loop-common` — the shared board/clone/PR/spec/comments mechanics this loop builds on.
+- `loop-common` — the shared digest/label/ack/board mechanics this loop builds on.
 - `auto-loop` — the unattended sibling that self-merges on green CI.
 - `pet-project-metadata` — ensure a new/updated repo has the required metadata.
 - `subdomain-setup` — publish the result at `<name>.garutyunov.com`.
