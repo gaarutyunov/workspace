@@ -131,6 +131,17 @@ async function renderHeroToTempDir({ title, tagline, iconPath }) {
   return { dir, url: pathToFileURL(htmlPath).toString() };
 }
 
+/** Poll until the scroll offset stops changing, so no animation is in flight. */
+async function waitForScrollToSettle(page, tries = 20) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    const y = await page.evaluate(() => window.scrollY);
+    if (y === last) return;
+    last = y;
+    await page.waitForTimeout(50);
+  }
+}
+
 async function capture(page, { selector }) {
   await page.waitForLoadState("networkidle").catch(() => {});
   await page.evaluate(() => document.fonts && document.fonts.ready).catch(() => {});
@@ -148,7 +159,14 @@ async function capture(page, { selector }) {
     // Scroll the hero to the viewport's top-left, then capture the fixed
     // viewport. Aligning by scroll (not a page-coordinate clip) keeps the frame
     // in-bounds even when the hero sits below the fold.
-    await el.evaluate((e) => e.scrollIntoView({ block: "start", inline: "start" }));
+    //
+    // `behavior: "instant"` (plus the context's reduced-motion emulation)
+    // defeats a page-level `scroll-behavior: smooth`, which would otherwise
+    // still be animating when the screenshot is taken and frame the hero wrong.
+    await el.evaluate((e) =>
+      e.scrollIntoView({ block: "start", inline: "start", behavior: "instant" }),
+    );
+    await waitForScrollToSettle(page);
     return page.screenshot({ type: "png" });
   }
   throw new Error(
@@ -173,6 +191,9 @@ async function main() {
     const context = await browser.newContext({
       viewport: { width: OG_WIDTH, height: OG_HEIGHT },
       deviceScaleFactor: 1,
+      // Renders CSS transitions/animations (and smooth scrolling) instantly, so
+      // the capture is deterministic rather than a race with the page.
+      reducedMotion: "reduce",
     });
     const page = await context.newPage();
 
