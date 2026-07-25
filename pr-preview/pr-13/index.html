@@ -28,191 +28,33 @@
     />
     <meta name="twitter:image" content="https://gaarutyunov.github.io/workspace/og-image.png" />
 
-    <style>
-      /* GA ui-kit dark house tokens, inlined so the page is self-contained and
-         renders deterministically offline (mirrors the social-image hero). */
-      :root {
-        --ga-bg: #0a0e14;
-        --ga-bg-elev: #111722;
-        --ga-fg: #cdd9e5;
-        --ga-muted: #8b98a9;
-        --ga-accent: #7fd1ff;
-        --ga-accent-2: #b69bff;
-        --ga-border: rgba(127, 209, 255, 0.28);
-      }
-      * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-      }
-      html {
-        scroll-behavior: smooth;
-      }
-      body {
-        background: var(--ga-bg);
-        color: var(--ga-fg);
-        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-        line-height: 1.5;
-      }
-      a {
-        color: var(--ga-accent);
-      }
+    <!-- Fonts: the house families (Geist / Geist Mono / Fira Mono) the kit's
+         typography tokens ask for. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Fira+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
 
-      /* ---- Hero (also the OG card, screenshotted at 1200x630) ---- */
-      [data-hero] {
-        position: relative;
-        width: 100%;
-        min-height: 630px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        gap: 22px;
-        padding: 72px clamp(28px, 8vw, 96px) 96px;
-        background: radial-gradient(
-            1200px 630px at 82% 12%,
-            rgba(127, 209, 255, 0.12),
-            transparent 60%
-          ),
-          radial-gradient(
-            900px 500px at 8% 96%,
-            rgba(182, 155, 255, 0.1),
-            transparent 60%
-          ),
-          var(--ga-bg);
-        border-bottom: 1px solid var(--ga-border);
-      }
-      .eyebrow {
-        font-size: clamp(16px, 1.6vw, 22px);
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-        color: var(--ga-accent);
-      }
-      .hero-title {
-        font-size: clamp(44px, 6.2vw, 76px);
-        font-weight: 700;
-        letter-spacing: -0.02em;
-        line-height: 1.04;
-        color: #fff;
-        max-width: 15ch;
-      }
-      .hero-tagline {
-        font-size: clamp(19px, 2.4vw, 30px);
-        line-height: 1.4;
-        color: var(--ga-muted);
-        max-width: 46ch;
-      }
-      .chips {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-        margin-top: 8px;
-      }
-      .chip {
-        font-size: clamp(13px, 1.4vw, 17px);
-        padding: 7px 15px;
-        border: 1px solid var(--ga-border);
-        border-radius: 999px;
-        color: var(--ga-fg);
-        background: var(--ga-bg-elev);
-      }
-      .brand {
-        position: absolute;
-        left: clamp(28px, 8vw, 96px);
-        bottom: 56px;
-        font-size: clamp(16px, 1.5vw, 22px);
-        color: var(--ga-accent);
-        letter-spacing: 0.02em;
-      }
-
-      /* ---- Content ---- */
-      main {
-        max-width: 1040px;
-        margin: 0 auto;
-        padding: clamp(48px, 8vw, 96px) clamp(20px, 6vw, 48px) 120px;
-      }
-      section + section {
-        margin-top: 72px;
-      }
-      h2 {
-        font-size: clamp(26px, 3.4vw, 36px);
-        color: #fff;
-        letter-spacing: -0.01em;
-        margin-bottom: 24px;
-      }
-      p.lead {
-        color: var(--ga-muted);
-        max-width: 68ch;
-        margin-bottom: 28px;
-      }
-      .steps {
-        display: grid;
-        gap: 18px;
-      }
-      .step {
-        display: grid;
-        grid-template-columns: 56px 1fr;
-        gap: 20px;
-        align-items: start;
-        padding: 22px 24px;
-        background: var(--ga-bg-elev);
-        border: 1px solid var(--ga-border);
-        border-radius: 16px;
-      }
-      .step .n {
-        font-size: 24px;
-        font-weight: 700;
-        color: var(--ga-accent);
-        border: 1px solid var(--ga-border);
-        border-radius: 12px;
-        width: 56px;
-        height: 56px;
-        display: grid;
-        place-items: center;
-      }
-      .step h3 {
-        color: #fff;
-        font-size: 20px;
-        margin-bottom: 6px;
-      }
-      .step p {
-        color: var(--ga-muted);
-        font-size: 16px;
-      }
-      .grid2 {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-        gap: 18px;
-      }
-      .card {
-        padding: 22px 24px;
-        background: var(--ga-bg-elev);
-        border: 1px solid var(--ga-border);
-        border-radius: 16px;
-      }
-      .card h3 {
-        color: #fff;
-        font-size: 18px;
-        margin-bottom: 8px;
-      }
-      .card p {
-        color: var(--ga-muted);
-        font-size: 15px;
-      }
-      .card code {
-        color: var(--ga-accent);
-      }
-      footer {
-        border-top: 1px solid var(--ga-border);
-        padding: 40px clamp(20px, 6vw, 48px);
-        text-align: center;
-        color: var(--ga-muted);
-        font-size: 15px;
-      }
-    </style>
+    <!-- The GA UI kit: design tokens + self-registering <ga-*> web components.
+         Vendored (see vendor/README.md) so the page is buildless and fetches
+         nothing at runtime. Relative paths => works at any deploy base,
+         including PR previews under /pr-preview/pr-N/. -->
+    <link rel="stylesheet" href="./vendor/ga-ui-kit.css" />
+    <link rel="stylesheet" href="./landing.css" />
+    <script type="module" src="./vendor/ga-ui-kit.min.js"></script>
   </head>
-  <body>
+  <body class="ga-theme">
+    <!-- `static`: not sticky, so it never paints over the hero the OG card is
+         screenshotted from. -->
+    <ga-header static brand="German Arutyunov" href="https://garutyunov.com">
+      <a href="https://github.com/users/gaarutyunov/projects/6">Board</a>
+      <a href="https://github.com/gaarutyunov/workspace">Repo</a>
+    </ga-header>
+
     <header data-hero>
-      <div class="eyebrow">garutyunov.com · workflow</div>
+      <ga-badge color="blue">garutyunov.com · workflow</ga-badge>
       <h1 class="hero-title">Ideas ship as pet projects, on rails.</h1>
       <p class="hero-tagline">
         A GitHub Project board feeds two delivery loops — human-gated and
@@ -220,16 +62,17 @@
         own subdomain.
       </p>
       <div class="chips">
-        <span class="chip">Project board</span>
-        <span class="chip">HITL &amp; auto loops</span>
-        <span class="chip">OpenSpec</span>
-        <span class="chip">Subdomains</span>
-        <span class="chip">Social images</span>
+        <ga-badge>Project board</ga-badge>
+        <ga-badge color="green">hitl loop</ga-badge>
+        <ga-badge color="purple">auto loop</ga-badge>
+        <ga-badge>OpenSpec</ga-badge>
+        <ga-badge>Subdomains</ga-badge>
+        <ga-badge>Social images</ga-badge>
       </div>
-      <div class="brand">garutyunov.com</div>
+      <div class="hero-brand">garutyunov.com</div>
     </header>
 
-    <main>
+    <main class="page">
       <section id="overview">
         <h2>One board, two loops</h2>
         <p class="lead">
@@ -240,69 +83,75 @@
           the only difference is where a human stands in the way.
         </p>
         <div class="grid2">
-          <div class="card">
-            <h3>hitl — human in the loop</h3>
+          <ga-card>
+            <div class="card-title" slot="header">
+              <ga-badge color="green" solid size="sm">hitl</ga-badge>
+              human in the loop
+            </div>
             <p>
               Waits for the owner to approve a spec before any code is written,
               and leaves every PR for human review and merge. Nothing ships
               unattended.
             </p>
-          </div>
-          <div class="card">
-            <h3>auto — unattended</h3>
+          </ga-card>
+          <ga-card>
+            <div class="card-title" slot="header">
+              <ga-badge color="purple" solid size="sm">auto</ga-badge>
+              unattended
+            </div>
             <p>
               Skips both gates: decomposes epics, opens PRs, and self-merges once
               CI is green, then moves the task to Done. For work you trust the
               loop to finish alone.
             </p>
-          </div>
+          </ga-card>
         </div>
       </section>
 
       <section id="flow">
         <h2>The path of a task</h2>
         <div class="steps">
-          <div class="step">
-            <div class="n">1</div>
-            <div>
-              <h3>Pick up a Ready task</h3>
-              <p>
-                The loop reads the board, reads the comments (owner direction
-                wins), and moves the task to <em>In progress</em>.
-              </p>
+          <ga-card>
+            <div class="card-title" slot="header">
+              <ga-badge color="blue" solid size="sm">1</ga-badge>
+              Pick up a Ready task
             </div>
-          </div>
-          <div class="step">
-            <div class="n">2</div>
-            <div>
-              <h3>Branch, worktree, open a PR early</h3>
-              <p>
-                Each task gets its own git worktree off fresh
-                <code>origin/&lt;default&gt;</code>, and a PR opens immediately so
-                CI and review have a home from the start.
-              </p>
+            <p>
+              The loop reads the board, reads the comments (owner direction
+              wins), and moves the task to <em>In progress</em>.
+            </p>
+          </ga-card>
+          <ga-card>
+            <div class="card-title" slot="header">
+              <ga-badge color="blue" solid size="sm">2</ga-badge>
+              Branch, worktree, open a PR early
             </div>
-          </div>
-          <div class="step">
-            <div class="n">3</div>
-            <div>
-              <h3>Spec or implement</h3>
-              <p>
-                Serious work is written up as an OpenSpec change and reviewed
-                before code; contained changes are implemented directly.
-              </p>
+            <p>
+              Each task gets its own git worktree off fresh
+              <code>origin/&lt;default&gt;</code>, and a PR opens immediately so
+              CI and review have a home from the start.
+            </p>
+          </ga-card>
+          <ga-card>
+            <div class="card-title" slot="header">
+              <ga-badge color="blue" solid size="sm">3</ga-badge>
+              Spec or implement
             </div>
-          </div>
-          <div class="step">
-            <div class="n">4</div>
-            <div>
-              <h3>Ship &amp; publish</h3>
-              <p>
-                The work lands, and the project gets the full treatment:
-                metadata, an icon, a subdomain, and a social image.
-              </p>
+            <p>
+              Serious work is written up as an OpenSpec change and reviewed
+              before code; contained changes are implemented directly.
+            </p>
+          </ga-card>
+          <ga-card>
+            <div class="card-title" slot="header">
+              <ga-badge color="blue" solid size="sm">4</ga-badge>
+              Ship &amp; publish
             </div>
-          </div>
+            <p>
+              The work lands, and the project gets the full treatment: metadata,
+              an icon, a subdomain, and a social image.
+            </p>
+          </ga-card>
         </div>
       </section>
 
@@ -313,35 +162,65 @@
           all look and behave like part of one family.
         </p>
         <div class="grid2">
-          <div class="card">
-            <h3>Metadata</h3>
-            <p>Repo description, the <code>pet-project</code> topic, SPEC.md, README, and Pages config.</p>
-          </div>
-          <div class="card">
-            <h3>Icon</h3>
-            <p>A minimalist 3D voxel app icon, white subject on black, generated per project.</p>
-          </div>
-          <div class="card">
-            <h3>Subdomain</h3>
-            <p>Published at <code>&lt;name&gt;.garutyunov.com</code> with Cloudflare DNS + GitHub Pages.</p>
-          </div>
-          <div class="card">
-            <h3>Social image</h3>
-            <p>A deterministic 1200×630 OG card screenshotted from the project's hero — no AI. This page's card was made this way.</p>
-          </div>
-          <div class="card">
-            <h3>UI kit</h3>
-            <p>The shared <code>@gaarutyunov/ui-kit</code> design system for a consistent house style.</p>
-          </div>
-          <div class="card">
-            <h3>Specs</h3>
-            <p>OpenSpec changes capture the intent and acceptance criteria before code.</p>
-          </div>
+          <ga-card>
+            <div class="card-title" slot="header">Metadata</div>
+            <p>
+              Repo description, the <code>pet-project</code> topic, SPEC.md,
+              README, and Pages config.
+            </p>
+          </ga-card>
+          <ga-card>
+            <div class="card-title" slot="header">Icon</div>
+            <p>
+              A minimalist 3D voxel app icon, white subject on black, generated
+              per project.
+            </p>
+          </ga-card>
+          <ga-card>
+            <div class="card-title" slot="header">Subdomain</div>
+            <p>
+              Published at <code>&lt;name&gt;.garutyunov.com</code> with
+              Cloudflare DNS + GitHub Pages.
+            </p>
+          </ga-card>
+          <ga-card>
+            <div class="card-title" slot="header">Social image</div>
+            <p>
+              A deterministic 1200×630 OG card screenshotted from the project's
+              hero — no AI. This page's card was made exactly that way.
+            </p>
+          </ga-card>
+          <ga-card>
+            <div class="card-title" slot="header">UI kit</div>
+            <p>
+              The shared <code>@gaarutyunov/ui-kit</code> web components — the
+              same <code>&lt;ga-*&gt;</code> elements this page is built from.
+            </p>
+          </ga-card>
+          <ga-card>
+            <div class="card-title" slot="header">Specs</div>
+            <p>
+              OpenSpec changes capture the intent and acceptance criteria before
+              code.
+            </p>
+          </ga-card>
         </div>
+        <p class="lead caption">
+          The card at the top of this page was screenshotted from that hero:
+        </p>
+        <ga-code prompt="$">social-image --url site/index.html --selector "[data-hero]"</ga-code>
       </section>
+
+      <ga-note tone="info" title="This page eats its own cooking">
+        It is a buildless static page in the workspace repo: the ui-kit release
+        is vendored under <code>site/vendor</code>, GitHub Actions deploys
+        <code>site/</code> on every push to <code>main</code>, and each pull
+        request gets its own live preview — the same Pages + PR-preview setup
+        the pet projects use.
+      </ga-note>
     </main>
 
-    <footer>
+    <footer class="site-footer">
       Built and driven from the
       <a href="https://github.com/gaarutyunov/workspace">workspace</a> repo ·
       garutyunov.com
