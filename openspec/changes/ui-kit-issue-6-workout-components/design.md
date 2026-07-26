@@ -158,13 +158,22 @@ they bump. Rollback is dropping back to the previous pinned release.
 Once released, workout#2 migrates its `<select>`s, calendar, charts and chat view
 onto the new elements; bikelanes' migration (#7 → bikelanes#4) follows separately.
 
-## Open Questions
+## Resolved (owner, gaarutyunov/workspace#20)
 
-- Should `ga-select`'s multiple mode render selections as removable `ga-badge`
-  chips inside the trigger, or as a summary line ("3 selected")? Chips read
-  better but complicate the trigger's height; leaning summary line with chips as
-  a later `chips` attribute.
-- Does the chart palette need a colour-blind-safe ordering as the default, or is
-  that an opt-in alternate palette (`--ga-chart-*` overridden by the app)?
-- `ga-chat` scroll-follow needs a "jump to latest" affordance when the user has
-  scrolled up — in this change, or left to the app?
+- **Multiple-mode trigger: a summary line.** `ga-select multiple` renders
+  "N selected" in the trigger, not removable chips. The trigger keeps a single
+  line's height at any selection count, which is what made this the leaning.
+  Chips remain possible later behind a `chips` attribute — additive, so it needs
+  no breaking change.
+- **The chart palette is colour-blind-safe by default** (owner's call was mine to
+  make). `--ga-chart-1 … --ga-chart-8` are *ordered* so that the earlier a series
+  is added, the more distinguishable it stays under deuteranopia and protanopia —
+  a two-series chart uses the two most separable hues, and a chart is not required
+  to use all eight. An app can still override the tokens, but it never has to
+  opt in to accessibility. The alternative — shipping a prettier default and an
+  opt-in accessible palette — was rejected: a default nobody changes is the one
+  that ships, so the default is the accessible one.
+- **`ga-chat` owns "jump to latest".** The affordance is part of the element, not
+  the app: every consumer of a transcript needs it, and it depends on scroll state
+  the element already tracks internally, which an app would have to reach into the
+  shadow root to observe.

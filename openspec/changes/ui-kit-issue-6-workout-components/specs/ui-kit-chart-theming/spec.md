@@ -10,6 +10,22 @@ an application's own charting library read as part of the design system.
 - **THEN** consecutive series are visually distinguishable from each other and
   legible against the page background
 
+#### Scenario: The default ordering is colour-blind-safe
+- **WHEN** the palette tokens are used in order and the result is viewed under
+  simulated deuteranopia and protanopia
+- **THEN** the series remain distinguishable from one another, without the
+  application selecting or overriding an alternate palette
+
+#### Scenario: Earlier tokens are the most separable
+- **WHEN** a chart uses only the first few tokens of the palette
+- **THEN** those series are at least as distinguishable under the same simulations
+  as any equally sized selection taken later in the palette
+
+#### Scenario: Colour is not the only channel a legend relies on
+- **WHEN** a series is identified in a legend
+- **THEN** its label accompanies the colour swatch, so the mapping survives for a
+  viewer who cannot separate two hues at all
+
 #### Scenario: Chart chrome tokens
 - **WHEN** an application styles chart axes, gridlines, labels and tooltips
 - **THEN** tokens are available for each of those surfaces, matching the kit's

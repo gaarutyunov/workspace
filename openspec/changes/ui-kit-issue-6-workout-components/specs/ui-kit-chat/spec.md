@@ -58,6 +58,29 @@ messages with optional header and composer areas.
   arrives
 - **THEN** the transcript does not scroll away from what the user is reading
 
+#### Scenario: Jump to latest appears when the reader is behind
+- **WHEN** the user has scrolled up away from the newest message
+- **THEN** `ga-chat` shows a "jump to latest" control, provided by the element
+  itself rather than the application
+
+#### Scenario: Jump to latest returns to following
+- **WHEN** the user activates the jump-to-latest control
+- **THEN** the transcript scrolls to the newest message and resumes following
+  appended messages
+
+#### Scenario: Hidden when there is nothing to jump to
+- **WHEN** the transcript is scrolled to the bottom
+- **THEN** the jump-to-latest control is not shown
+
+#### Scenario: Unread arrivals are signalled
+- **WHEN** messages arrive while the user is scrolled up
+- **THEN** the jump-to-latest control indicates that newer messages are waiting
+
+#### Scenario: Reachable by keyboard
+- **WHEN** the jump-to-latest control is shown and the user navigates by keyboard
+- **THEN** it is focusable and activates with the keyboard, and it is announced by
+  a screen reader
+
 #### Scenario: Empty conversation
 - **WHEN** the transcript contains no messages
 - **THEN** it renders its empty state rather than a blank area

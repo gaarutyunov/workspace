@@ -25,12 +25,14 @@
 
 - [ ] 4.1 Add `--ga-chart-1 … --ga-chart-8`, `--ga-chart-grid`, `--ga-chart-axis`, `--ga-chart-label`, `--ga-chart-tooltip-bg`, `--ga-chart-tooltip-fg` to `src/tokens/tokens.css`, with light-theme overrides in the existing `[data-theme="light"]` block.
 - [ ] 4.2 Check each palette entry for legibility on both `--ga-bg` values and adjacent-pair distinguishability; document the intended series order.
+- [ ] 4.2a Order the palette so it is **colour-blind-safe by default**: verify the series stay separable under simulated deuteranopia and protanopia (a CVD simulation over the rendered swatches), with the earliest tokens the most separable so a two- or three-series chart gets the best pair. Record the check and the resulting order in the docs — there is no opt-in accessible variant, this is the default.
 - [ ] 4.3 Implement `src/components/chart-frame/chart-frame.js`: `title`, `legend` (JSON series metadata) , `loading`, `empty-text`; slotted plot content, responsive height, legend swatches from the palette tokens. It draws no data.
 
 ## 5. `ga-chat` and `ga-chat-message`
 
 - [ ] 5.1 Implement `src/components/chat-message/chat-message.js`: `role` (`user` | `assistant` | `system`), `state` (`sent` | `pending` | `streaming` | `error`), `author`, `time`; slotted body; pending/streaming indicators; error treatment; `role`-appropriate ARIA.
 - [ ] 5.2 Implement `src/components/chat/chat.js`: scrollable transcript with `header` / default / `footer` slots, empty state, and scroll-follow that pins to the newest message only while the user is at the bottom.
+- [ ] 5.2a Add the **jump-to-latest** affordance to `ga-chat` itself: shown only while the user is scrolled away from the newest message, indicating that newer messages are waiting; activating it scrolls to the newest message and resumes following. Focusable, keyboard-activated, and announced — it is a real button in the shadow root, not a decorative overlay.
 - [ ] 5.3 Document the composer recipe (`ga-input` + `ga-button` in the `footer` slot, submit on click and on the keyboard submit gesture) on the docs page.
 
 ## 6. Registration, types, docs

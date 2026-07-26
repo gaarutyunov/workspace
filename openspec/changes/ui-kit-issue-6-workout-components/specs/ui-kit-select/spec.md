@@ -33,6 +33,19 @@ exposing the selection as a list of values.
 - **WHEN** the user activates an already-selected option in multiple mode
 - **THEN** that option is removed from the value
 
+#### Scenario: The trigger summarises the selection
+- **WHEN** more than one option is selected in multiple mode
+- **THEN** the trigger shows a count summary of how many are selected, rather than
+  listing them, and the selected options remain identifiable in the open popup
+
+#### Scenario: The trigger's height does not grow with the selection
+- **WHEN** the number of selected options increases
+- **THEN** the trigger's height is unchanged, matching a single-selection trigger
+
+#### Scenario: One selection reads as itself
+- **WHEN** exactly one option is selected in multiple mode
+- **THEN** the trigger shows that option's label rather than a count
+
 ### Requirement: Filtering long option lists
 
 `ga-select` SHALL let the user narrow the option list by typing when filtering is
