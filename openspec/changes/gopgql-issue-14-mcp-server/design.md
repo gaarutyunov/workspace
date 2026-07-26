@@ -12,10 +12,13 @@ by godog (SPEC.md §10, §7). The issue asks for the MCP server to be tested the
 same way, with a real client and a real server.
 
 `blurrah/mcp-graphql` is the reference point: it exposes `introspect-schema` and
-`query-graphql` over a remote GraphQL endpoint. gopgql's situation differs in two
-ways — there is no GraphQL server, only a compiler plus a database; and the SDL
-is the source of truth, so introspection can read the document rather than
-issuing an introspection query.
+`query-graphql` over a remote GraphQL endpoint. gopgql's situation differs in one
+way — there is no GraphQL server, only a compiler plus a database. The discovery
+surface is nevertheless **standard GraphQL introspection** (`__schema`, `__type`,
+`__typename`): gopgql builds the introspection result from the loaded SDL instead
+of forwarding an introspection query to an upstream server, but what an agent
+sees is the introspection response the GraphQL specification defines, not a
+gopgql-specific dialect.
 
 ## Goals / Non-Goals
 
@@ -40,31 +43,58 @@ issuing an introspection query.
 
 ## Decisions
 
-### D1: Two tools, `schema` and `query` — the issue's shape, not a wider one
+### D1: Two tools, `introspect` and `query` — the issue's shape, not a wider one
 
 An agent's loop is *what can I ask → ask it*. `blurrah/mcp-graphql` proves two
-tools are enough, and extra tools cost context in every conversation. Anything
-diagnostic (the emitted SQL) rides as an optional field on `query`'s result
-rather than as a third tool.
+tools are enough, and extra tools cost context in every conversation. The SQL is
+not part of either tool's result: the server connects to Postgres, executes, and
+returns the data (D2a).
 
-### D2: Progressive introspection, because a real schema does not fit
+Both tool **descriptions** carry the introspection instructions — the meta-fields
+available, and an introspection query the agent can send verbatim. An agent that
+lists the tools therefore knows how to discover the schema without any out-of-band
+documentation, which is the point of preferring introspection to a bespoke
+overview.
 
-`schema` takes an optional `type` argument and an optional `format`:
+### D2: Standard GraphQL introspection, not a bespoke schema report
 
-- **no arguments** → an overview: the queryable root fields, each type's name,
-  its scalar field count and its relationship count. Tens of lines for a schema
+`__schema`, `__type(name:)` and `__typename` are answered from the loaded SDL, and
+`introspect` is a convenience wrapper that issues one of those queries for the
+caller:
+
+- **no arguments** → the `__schema` overview: queryable root fields and the type
+  names, with those types' field definitions omitted. Tens of lines for a schema
   that would be thousands.
-- **`type: "Person"`** → that type's fields with their GraphQL types, which are
-  scalars (and the column they map to, since `@column(name:)` may rename it) and
-  which are relationships, with the target type and direction.
-- **`format: "sdl"`** → the raw SDL document, for when an agent really does want
-  everything.
+- **`type: "Person"`** → that type's `__type` detail: its fields and their type
+  references, so an agent can see which fields lead to another type.
+- **`full: true`** → the complete introspection result; **`format: "sdl"`** → the
+  SDL document, for when an agent really does want everything.
 
+Progressive reading is not a departure from introspection — it *is* introspection,
+which is a query like any other and returns exactly what was selected.
+
+- *Alternative — a gopgql-specific schema report* (the earlier draft: overview with
+  scalar/relationship counts and mapped column names). Rejected: every GraphQL
+  client and agent already knows how to walk an introspection result, and a custom
+  shape has to be learned. It also leaked the mapped column name, which is an
+  implementation detail an agent cannot use — it queries fields, not columns.
 - *Alternative — always return the full SDL:* simplest, and what a naive port of
   mcp-graphql would do. Rejected: the issue calls it out, and a large schema
   would consume the agent's context before it asked anything.
 - *Alternative — a separate `describe-type` tool:* same information, one more
   tool in every prompt. Rejected under D1.
+
+### D2a: `query` returns data; `format` chooses JSON or a markdown table
+
+The result is the JSON response by default. `format: "markdown"` renders a table
+instead — easier for a human reading the agent's transcript, and cheaper in
+tokens.
+
+A table cannot express nesting, so markdown is **refused, before execution**, for
+an operation that selects a relationship, with an error naming the nesting field.
+The alternative — silently falling back to JSON — was rejected: an agent that
+asked for a table and got JSON has no signal that its request was reinterpreted.
+Flat result sets (scalars only) are the only ones a table represents faithfully.
 
 ### D3: `exec` is a package, not code inside `mcp`
 
@@ -109,9 +139,15 @@ too. Mocking the client would test nothing the SDK doesn't already test.
 - **[SDK maturity]** — `modelcontextprotocol/go-sdk` is young; its API may move.
   Mitigation: the tool handlers depend on gopgql types and take plain arguments,
   so an SDK change touches only the thin registration layer.
-- **[Schema overview drifting from the real schema]** — the overview is derived
-  from the same `sdl.Document` the compiler uses, never a hand-written summary,
-  so it cannot describe something the compiler would reject.
+- **[Introspection drifting from the real schema]** — the introspection result is
+  derived from the same `sdl.Document` the compiler uses, never a hand-written
+  summary, so it cannot describe something the compiler would reject.
+- **[Introspection completeness]** — building a spec-shaped introspection result
+  by hand is more surface than a bespoke summary: `__Type`, `__Field`,
+  `__InputValue`, `__EnumValue`, `__Directive` and the `ofType` wrapper chain for
+  non-null/list types all have to be right, or clients that walk the result
+  generically will break. Mitigation: assert against the introspection query that
+  GraphQL clients actually send, not a hand-picked selection.
 - **[An agent sending expensive queries]** — the depth ceiling bounds traversal,
   but nothing bounds result size. A `limit`-style guard is not in this change;
   noted as a follow-up rather than smuggled in.
@@ -126,11 +162,16 @@ changes, and the WASM build is untouched because nothing in the core imports
 
 ## Open Questions
 
-- Should `query` return the emitted SQL by default, or only when asked? Leaning
-  *only when asked* (`includeSql: true`) so the common result stays small.
-- Is `format: "sdl"` on the `schema` tool worth the risk of an agent pulling a
-  huge document into context, or should the full document be a separate,
-  harder-to-reach affordance?
 - Should the server expose the schema as an MCP **resource** as well as a tool?
   Resources are the more idiomatic home for "here is a document", but tool-only
   keeps the first version smaller.
+
+## Resolved (owner, gaarutyunov/workspace#21)
+
+- **Does `query` return the emitted SQL?** No. The server connects to Postgres,
+  executes, and returns the JSON result; SQL is not part of the tool surface
+  (D2a). The earlier `includeSql` argument is gone.
+- **Discovery is standard GraphQL introspection**, not a gopgql-specific schema
+  report, and the **tool descriptions must say how to introspect** (D1, D2).
+- **`format` is a parameter of the `query` tool**: JSON or a markdown table, with
+  the table refused for nested selections because it cannot represent them (D2a).

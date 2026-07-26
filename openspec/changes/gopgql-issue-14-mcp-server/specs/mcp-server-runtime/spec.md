@@ -45,5 +45,5 @@ sufficient for a client to call them correctly.
 
 #### Scenario: Listing tools
 - **WHEN** a client lists tools
-- **THEN** both the schema tool and the query tool are returned, each with a
-  description and a declared input schema
+- **THEN** both the introspection tool and the query tool are returned, each with
+  a description and a declared input schema

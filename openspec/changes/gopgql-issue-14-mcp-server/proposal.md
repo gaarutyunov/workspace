@@ -8,8 +8,10 @@ nothing to call.
 An MCP server closes that gap: it wraps one SDL document and one database and
 exposes the two things an agent actually needs — find out what can be asked, and
 ask it (gaarutyunov/gopgql#14). The design follows `blurrah/mcp-graphql`'s two-tool
-shape, with one deliberate departure: a real schema is far too large to hand back
-whole every time, so introspection is progressive.
+shape, and the discovery half is **standard GraphQL introspection** — the
+`__schema` / `__type` meta-field surface every GraphQL client already knows how to
+walk. Progressive reading falls out of that for free: introspection is a query, so
+an agent asks for root fields first and drills into one type at a time.
 
 ## What Changes
 
@@ -20,14 +22,19 @@ whole every time, so introspection is progressive.
   `compiler` WASM-clean.
 - Add an **`mcp` package** exposing two tools over the official
   `modelcontextprotocol/go-sdk`:
-  - **`schema`** — progressive introspection. With no arguments it returns a
-    compact overview (queryable root fields, type names, field counts). With a
-    type name it returns that type's fields, scalar types and relationships. It
-    never dumps the whole SDL unless explicitly asked.
+  - **`introspect`** — runs a **standard GraphQL introspection query** against the
+    loaded schema and returns its result. With no arguments it returns the root
+    fields and the type names (the `__schema` shape, field definitions omitted);
+    with a type name it returns that type's full `__type` detail. Its tool
+    description tells the agent how to introspect — the meta-fields available and
+    the introspection query to send through `query` for anything this tool does not
+    surface directly.
   - **`query`** — takes a GraphQL operation and optional variables, compiles it,
-    executes it against the connected database, and returns the nested JSON
-    response. Optionally returns the emitted SQL alongside, so an agent can see
-    what ran.
+    executes it against the connected database, and returns the JSON response.
+    Introspection meta-fields (`__schema`, `__type`, `__typename`) are answerable
+    here too, so an agent that already speaks GraphQL needs no second tool. A
+    `format` argument selects the return shape: `json` (default) or a `markdown`
+    table for flat result sets.
 - Add **`cmd/gopgql-mcp`** — the server binary: reads the SDL path and the
   database DSN from flags/environment and serves MCP over stdio.
 - The server **never migrates and never writes**: it exposes no migration tool,
@@ -40,11 +47,13 @@ whole every time, so introspection is progressive.
 
 ### New Capabilities
 
-- `mcp-schema-introspection`: the `schema` tool — an overview an agent can afford
-  to read, drill-down by type, and the full document only on request.
-- `mcp-query-execution`: the `query` tool — GraphQL in, nested JSON out, executed
-  against PostgreSQL with bind parameters, with compile and database errors
-  reported in a form an agent can act on.
+- `mcp-schema-introspection`: standard GraphQL introspection over the loaded
+  schema — the `__schema` / `__type` meta-fields, an overview an agent can afford
+  to read, drill-down by type, and tool descriptions that teach the agent how to
+  introspect.
+- `mcp-query-execution`: the `query` tool — GraphQL in, JSON (or a markdown table)
+  out, executed against PostgreSQL with bind parameters, with compile and database
+  errors reported in a form an agent can act on.
 - `mcp-server-runtime`: how the server is configured, what it connects to, and
   the guarantees it makes — read-only, no migrations, one SDL per process.
 
