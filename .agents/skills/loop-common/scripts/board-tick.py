@@ -352,12 +352,28 @@ def inspect_worktree(item: Item, projects_dir) -> None:
 SPEC_REPO = "workspace"  # specs are always authored in the workspace repo
 
 
+def spec_branch_key(branch: str) -> tuple[str, int] | None:
+    """Parse a spec branch name into (repo, issue number), or None.
+
+    Matched loosely on purpose. Ticks have named these branches both
+    `spec/<repo>-issue-<N>` and `spec-<repo>-<N>`, and an exact-match lookup
+    silently dropped the spec PR for every branch in the second style — which
+    meant its comments (where the owner's spec feedback lives) were never read.
+    A missed owner comment is far worse than a mis-parsed branch name, so accept
+    any `spec`-prefixed branch that ends in the issue number.
+    """
+    m = re.fullmatch(r"spec[/-](?P<repo>.+?)[/-](?:issue[/-])?(?P<num>\d+)", branch)
+    if not m:
+        return None
+    return m.group("repo"), int(m.group("num"))
+
+
 def attach_spec_prs(items: list[Item]) -> None:
     """Find each task's spec PR.
 
-    Specs live in the workspace repo on `spec/<repo>-issue-<N>` — a *different*
-    repo from the issue for every project task, so nothing on the issue links to
-    them. One list call covers the whole board.
+    Specs live in the workspace repo on a `spec…` branch naming the task's repo
+    and issue number — a *different* repo from the issue for every project task,
+    so nothing on the issue links to them. One list call covers the whole board.
     """
     if not items:
         return
@@ -378,14 +394,14 @@ def attach_spec_prs(items: list[Item]) -> None:
         prs = json.loads(out or "[]")
     except json.JSONDecodeError:
         return
-    by_branch: dict[str, dict] = {}
+    by_task: dict[tuple[str, int], dict] = {}
     for pr in prs:
-        branch = pr.get("headRefName", "")
-        if branch.startswith("spec/"):
+        key = spec_branch_key(pr.get("headRefName", ""))
+        if key:
             # Later PRs win — a respun spec supersedes an earlier attempt.
-            by_branch[branch] = pr
+            by_task[key] = pr
     for item in items:
-        pr = by_branch.get(f"spec/{item.repo}-issue-{item.number}")
+        pr = by_task.get((item.repo, item.number))
         if not pr:
             continue
         item.spec_pr_number = pr["number"]
