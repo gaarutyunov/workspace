@@ -90,6 +90,13 @@ task as `SPEC-APPROVED`; at that point merge the spec PR, drop
 `needs:spec-approval`, move the item back to **In progress**, and implement from
 the change's `tasks.md` with `/opsx:apply` (`/opsx:archive` once it ships).
 
+**Approval is a label; rejection is just a comment.** The owner does *not* label a
+spec they are unhappy with — they comment on the spec PR and expect the next tick
+to act on it. A task labelled `needs:spec-approval` that has an unaddressed owner
+comment is therefore **actionable, not waiting**: the digest ranks it
+`HUMAN-INPUT`. Revise the spec, push, reply, ack, and leave it In review for the
+gate. Never skip it as `WAITING-OWNER` because the label is still on.
+
 For a direct task, skip straight to the work.
 
 ### 4. Perform the work, push, ask for review

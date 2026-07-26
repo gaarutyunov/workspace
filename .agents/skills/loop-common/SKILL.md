@@ -157,6 +157,18 @@ which statuses count as active.
 
 ## Comments: read → act → **ack**
 
+**A comment is direction on its own. It needs no label.** The owner signals
+disapproval, a scope change or an answer by *commenting* — labels are only how
+approval arrives (`approved:spec` / `approved:pr`). So an unaddressed owner comment
+makes a task actionable **even when it is labelled `needs:spec-approval` or
+`needs:review`** and would otherwise read as "waiting on the owner". The digest
+ranks such a task `HUMAN-INPUT`, above `WAITING-OWNER`, for exactly this reason —
+never skip it because a waiting label is present.
+
+Read the digest's **DETAILS section**, not just the summary table. The table's
+`HUM` column is a count; the comment text lives below it. Truncating the digest
+output (`| head`, `sed -n '1,20p'`) is how owner comments get missed.
+
 The owner leaves direction as comments, and both the loop and the owner post from
 the *same* GitHub account. Two mechanisms keep them apart:
 
