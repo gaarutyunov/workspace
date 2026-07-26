@@ -34,3 +34,10 @@ Install skills into this repo, never globally.
 - Source of truth lives in `.agents/skills/<name>/`; `.claude/skills/<name>` is a symlink to `../../.agents/skills/<name>`.
 - `skills-lock.json` tracks installed skills.
 - If a skill installs as a real directory under `.claude/skills/`, migrate it: move it to `.agents/skills/<name>/` and replace the original with a symlink.
+
+**Go projects** follow the `go-project-scaffold` skill — the house standard for
+scaffolding a Go service *and* for reviewing or refactoring an existing one:
+code generation over hand-rolling, OpenTelemetry semantic conventions, cobra,
+koanf (never Viper), wire, and the TDD loop with testcontainers. It is derived
+from the worked reference in `gaarutyunov/skill-test` PR #2, which is the
+tie-breaker when the skill and reality disagree.
