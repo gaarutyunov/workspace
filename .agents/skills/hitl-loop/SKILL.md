@@ -24,7 +24,7 @@ helper are documented **once** in the `loop-common` skill — read
 **specific to the human-gated path**: `Loop = hitl`, the `approved:spec` gate,
 and the `approved:pr` merge gate.
 
-## Three rules that override everything else
+## Five rules that override everything else
 
 1. **Start with the digest.** Never query the board or read comments by hand.
 2. **Never ask the owner anything in the Claude Code window.** No
@@ -33,12 +33,17 @@ and the `approved:pr` merge gate.
 3. **Anything waiting on the owner lives in In review, with a label saying why.**
    Nothing blocked, nothing awaiting approval, and nothing awaiting an answer is
    ever left In progress.
-
 4. **Never split an issue into sub-issues.** Each issue is one deliverable, worked
    in place. Track its parts as a **checklist in the issue body** — the issue is
    done only once the whole checklist is implemented — and decompose only at the
    spec level (`loop-common` → *One issue, one deliverable*). Every actionable
    review comment is implemented inside the issue being worked, never deferred.
+
+5. **Never do the work yourself.** Research, implementation, debugging and
+   verification are dispatched to **child agents** with detailed, self-contained
+   instructions (`loop-common` → *The loop delegates*). The loop runs the digest,
+   picks the task, moves the board, talks to the owner and holds the gates —
+   nothing else.
 
 ## The workflow (per tick)
 
@@ -105,12 +110,18 @@ gate. Never skip it as `WAITING-OWNER` because the label is still on.
 
 For a direct task, skip straight to the work.
 
-### 4. Perform the work, push, ask for review
+### 4. Dispatch the work, check it, ask for review
 
-Implement in the branch/worktree with tests where the project has them, keeping
-`loop-common`'s commit/push discipline (**never `git add -A`**; stage specific
-paths, inspect `git diff --cached`, ref the issue). Then, once the work is
-**pushed** and the PR links the issue:
+**The work is done by child agents, not by this loop** (`loop-common` → *The loop
+delegates*). Break the checklist into independently workable pieces, dispatch
+them in parallel in one message, and give each the worktree path, the spec
+sections to read, the non-negotiable constraints (**never `git add -A`**; stage
+named paths, inspect `git diff --cached`, ref the issue; testify; generated
+gomock; no sub-issues), the acceptance commands and what to report back.
+
+Check what comes back rather than believing it — confirm the commits exist and
+hold what was claimed. Then, once the work is **pushed** and the PR links the
+issue:
 
 ```bash
 .claude/skills/loop-common/scripts/board-tick.py label --repo <repo> --issue <N> --add needs:review
