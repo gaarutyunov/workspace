@@ -1,6 +1,6 @@
 ---
 name: loop-common
-description: "Shared mechanics for the auto-loop and hitl-loop delivery skills: the board-tick.py digest that starts every tick, the label protocol for intermediate states, the comment ack ledger, GitHub-only interaction (never AskUserQuestion), the blocked/needs-owner → In review rule, the one-issue-one-deliverable rule (never split an issue into sub-issues), board IDs (gaarutyunov project #6), clone/worktree + gortex tracking, opening a PR early, the OpenSpec /opsx:* spec flow, commit/push discipline, and CodeRabbit + review-thread handling. NOT a standalone loop — it has no merge gate of its own; auto-loop and hitl-loop invoke it and add their own gates. Read it when running or editing either loop."
+description: "Shared mechanics for the auto-loop and hitl-loop delivery skills: the rule that all work is delegated to child agents while the loop only orchestrates, the board-tick.py digest that starts every tick, the label protocol for intermediate states, the comment ack ledger, GitHub-only interaction (never AskUserQuestion), the blocked/needs-owner → In review rule, the one-issue-one-deliverable rule (never split an issue into sub-issues), board IDs (gaarutyunov project #6), clone/worktree + gortex tracking, opening a PR early, the OpenSpec /opsx:* spec flow, commit/push discipline, and CodeRabbit + review-thread handling. NOT a standalone loop — it has no merge gate of its own; auto-loop and hitl-loop invoke it and add their own gates. Read it when running or editing either loop."
 ---
 
 # Loop common mechanics
@@ -274,6 +274,59 @@ When you need the owner — a decision, an approval, a credential, an answer:
 
 The answer arrives as an owner comment and reaches you as `HUMAN-INPUT` on a
 later tick.
+
+## The loop delegates: child agents do the work
+
+**The loop orchestrates; it does not implement.** Every piece of research,
+implementation, debugging and verification in a tick is done by a **child agent**
+via the `Agent` tool. Doing the work in the loop's own context fills it with
+file contents, build output and test logs, and a tick that runs out of context
+loses everything it has not yet pushed.
+
+What the loop keeps for itself, because it is protocol rather than work:
+
+- running the digest and choosing the task
+- board status moves, labels, and the comment ack ledger
+- posting to the issue and the PR
+- the merge gate
+
+Everything else is dispatched.
+
+### Write the instruction as if the agent knows nothing
+
+A child agent starts with an empty context. It cannot see the digest, the issue,
+this skill, or anything an earlier agent found. A one-line prompt produces
+one-line work. Each dispatch names:
+
+- **The task** — the issue number, title, and what "done" means for this piece.
+- **Where** — the absolute worktree path, the branch, and the repo.
+- **What to read first** — the exact `SPEC.md` sections, the issue body, prior
+  decisions on the issue that constrain the answer.
+- **The constraints that are not negotiable** — never `git add -A`; stage named
+  paths and inspect `git diff --cached`; testify for assertions; generated
+  uber-gomock for interface doubles, never hand-rolled; never create sub-issues;
+  implement review feedback in place.
+- **Acceptance** — the commands that must pass (`go test -race ./...`, a build, a
+  named suite), and any spec clause the work is judged against.
+- **What to report back** — the conclusion, the files touched, anything
+  surprising, and any spec-versus-reality conflict found. Not a transcript.
+
+Dispatch independent pieces **in parallel** in one message; they run
+concurrently. Sequence only where one genuinely needs another's result.
+
+### Trust, then verify
+
+An agent's report is a claim, not evidence. "Tests pass" from a subagent is not
+the merge gate — **green CI is** (`auto-loop`), or the owner is (`hitl-loop`).
+Before acting on a report:
+
+- re-run the digest rather than believing the board state it describes;
+- check the pushed commits are what it says they are;
+- treat a claim that something is impossible, blocked, or already done the way
+  you would treat a `blocked` label: re-check it.
+
+**Never paste an agent's output into the tick's report.** Relay the conclusion
+and what it changes.
 
 ## One issue, one deliverable — never split an issue
 

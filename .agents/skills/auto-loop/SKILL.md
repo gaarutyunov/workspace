@@ -30,7 +30,7 @@ flow, commit/push discipline, moving a task's status, and the
 skill — read `.claude/skills/loop-common/SKILL.md`. This file specifies only what
 differs in the **autonomous path**: `Loop = auto` and self-merging on green CI.
 
-## Three rules that override everything else
+## Five rules that override everything else
 
 1. **Start with the digest.** Never query the board or read comments by hand —
    the digest is how an unattended tick sees owner direction at all:
@@ -56,6 +56,12 @@ differs in the **autonomous path**: `Loop = auto` and self-merging on green CI.
 4. **Never split an issue into sub-issues.** Every issue is one deliverable unit
    of work, finished in place — see *One issue, one deliverable* below. This
    rule outranks any instinct to break work down.
+
+5. **Never do the work yourself.** Research, implementation, debugging and
+   verification are dispatched to **child agents** with detailed, self-contained
+   instructions (`loop-common` → *The loop delegates*). The loop runs the digest,
+   picks the task, moves the board, talks to the owner and holds the merge gate —
+   nothing else.
 
 ## Prerequisites
 
@@ -102,7 +108,9 @@ So, when an issue looks large:
   land — a GitHub task list on the issue itself is the tracking record. **The
   issue is done only once the whole checklist is implemented.**
 - **Drive the tick with a session todo list** (`TaskCreate` / `TaskUpdate`)
-  alongside it — never as GitHub issues, and never as new board items.
+  alongside it — never as GitHub issues, and never as new board items. The
+  checklist is also the dispatch plan: each item is a piece a child agent can be
+  given on its own.
 - **Decompose on the spec level if you need structure.** An OpenSpec change's
   `tasks.md` is the only sanctioned place to break work into steps
   (`loop-common` → *OpenSpec `/opsx:*` spec flow*). That is task decomposition,
@@ -147,12 +155,23 @@ Autonomy caveat: without a human approving the spec, be conservative — keep th
 change scoped to exactly what the issue (and any owner comments) ask, and prefer
 the direct path unless a spec genuinely reduces risk.
 
-### 3. Perform the work, commit, push
+### 3. Dispatch the work, then check what came back
 
-Implement in the branch/worktree with tests where the project has them, keeping
-`loop-common`'s commit/push discipline — **never `git add -A`**; stage only the
-specific paths, inspect `git diff --cached`, commit referencing the issue, push.
-Ensure the PR body links the issue (`Closes #<N>`).
+**The work is done by child agents, not by this loop** (`loop-common` → *The loop
+delegates*). Break the checklist into pieces that can be worked independently,
+dispatch them in parallel in one message, and give each one the worktree path,
+the spec sections to read, the non-negotiable constraints, the acceptance
+commands and what to report back.
+
+The constraints every dispatch repeats, because a fresh agent does not know them:
+**never `git add -A`** — stage named paths and inspect `git diff --cached`, commit
+referencing the issue, push; testify for assertions; generated uber-gomock for
+interface doubles; never create sub-issues; implement review feedback in place.
+
+When a report comes back, **check it rather than believing it**: re-run the
+digest, confirm the commits exist and contain what was claimed, and tick the
+issue checklist only for what actually landed. Ensure the PR body links the issue
+(`Closes #<N>`).
 
 ### 4. Merge when CI is green (the only gate)
 
