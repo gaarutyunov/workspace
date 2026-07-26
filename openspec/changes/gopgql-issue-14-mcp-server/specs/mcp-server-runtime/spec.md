@@ -3,16 +3,36 @@
 ### Requirement: Serve one schema against one database
 
 The server SHALL be started with an SDL document and a database connection
-string, and SHALL serve MCP over stdio.
+string, and SHALL serve MCP over a **configurable transport**.
 
 #### Scenario: Startup
 - **WHEN** the server is started with a valid SDL path and connection string
-- **THEN** it serves the MCP protocol over stdio and advertises its tools
+- **THEN** it serves the MCP protocol and advertises its tools
 
 #### Scenario: Configuration from the environment
-- **WHEN** the SDL path or connection string is supplied through the environment
-  instead of a flag
+- **WHEN** the SDL path, connection string or transport is supplied through the
+  environment instead of a flag
 - **THEN** the server starts the same way
+
+#### Scenario: A server the client spawns
+- **WHEN** no transport is chosen
+- **THEN** the server speaks over its standard input and output, so an agent can
+  spawn one process per client
+
+#### Scenario: A server that outlives its clients
+- **WHEN** the network transport is chosen, with a listen address
+- **THEN** the server listens on that address and serves the MCP protocol over
+  HTTP, so several clients can connect to one long-running process
+
+#### Scenario: Readiness without a session
+- **WHEN** the network transport is chosen
+- **THEN** the server answers a health endpoint without opening an MCP session,
+  so a supervisor can tell whether it is ready
+
+#### Scenario: An unknown transport
+- **WHEN** a transport the server does not implement is requested
+- **THEN** it exits with an error naming the supported transports rather than
+  falling back to a default
 
 #### Scenario: Invalid SDL
 - **WHEN** the SDL fails to parse or validate
