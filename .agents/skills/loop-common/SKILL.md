@@ -1,6 +1,6 @@
 ---
 name: loop-common
-description: "Shared mechanics for the auto-loop and hitl-loop delivery skills: the board-tick.py digest that starts every tick, the label protocol for intermediate states, the comment ack ledger, GitHub-only interaction (never AskUserQuestion), the blocked/needs-owner → In review rule, board IDs (gaarutyunov project #6), clone/worktree + gortex tracking, opening a PR early, the OpenSpec /opsx:* spec flow, commit/push discipline, and CodeRabbit + review-thread handling. NOT a standalone loop — it has no merge gate of its own; auto-loop and hitl-loop invoke it and add their own gates. Read it when running or editing either loop."
+description: "Shared mechanics for the auto-loop and hitl-loop delivery skills: the board-tick.py digest that starts every tick, the label protocol for intermediate states, the comment ack ledger, GitHub-only interaction (never AskUserQuestion), the blocked/needs-owner → In review rule, the one-issue-one-deliverable rule (never split an issue into sub-issues), board IDs (gaarutyunov project #6), clone/worktree + gortex tracking, opening a PR early, the OpenSpec /opsx:* spec flow, commit/push discipline, and CodeRabbit + review-thread handling. NOT a standalone loop — it has no merge gate of its own; auto-loop and hitl-loop invoke it and add their own gates. Read it when running or editing either loop."
 ---
 
 # Loop common mechanics
@@ -109,7 +109,7 @@ broken by who has waited longest):
 | `READY` | Ready and routed to this loop | pick it up |
 | `NOT-STARTED` | In progress but nothing pushed | start (or restart) the work |
 | `WIP` | In progress with pushed work, nothing new | continue it |
-| `TRACKER` | an epic whose work lives in sub-issues | **skip** — work the children |
+| `TRACKER` | legacy `tracker` label from before issues stopped being split | work the issue itself and drop the label |
 | `WAITING-OWNER` | needs the owner, nothing new since | **skip** — do not touch |
 | `BLOCKED` | blocked, blocker already written on the issue | **skip** — do not touch |
 
@@ -228,11 +228,15 @@ loop's job, expressed as **labels on the issue**.
 | `needs:review` | loop | code PR ready, waiting on the owner |
 | `needs:input` | loop | a question is posted on the issue, waiting on the owner |
 | `blocked` | loop | blocked by something external; the blocker is written on the issue |
-| `tracker` | loop | an epic decomposed into sub-issues; progress lives in the children |
+| `tracker` | — | **deprecated** — see below |
 
-`tracker` is the one loop label that does **not** mean "waiting on the owner", so
-a tracker may legitimately sit In progress while its sub-issues are worked. Every
-other loop label forces **In review**.
+Every loop label forces **In review**.
+
+`tracker` is no longer set by either loop. It marked an issue that had been split
+into sub-issues, and the loops no longer split issues: an issue is one deliverable
+worked to merged in a single tick (`auto-loop` → *One issue, one deliverable*).
+Existing `tracker` items are legacy — work the issue itself and drop the label
+rather than treating it as a parent to skip.
 
 ```bash
 .claude/skills/loop-common/scripts/board-tick.py label \
@@ -271,6 +275,47 @@ When you need the owner — a decision, an approval, a credential, an answer:
 The answer arrives as an owner comment and reaches you as `HUMAN-INPUT` on a
 later tick.
 
+## One issue, one deliverable — never split an issue
+
+**An issue is a deliverable unit of work.** Both loops take it from Ready to
+merged; neither ever breaks it into sub-issues. This is not a sizing heuristic
+with exceptions — there is no size and no blocker that justifies filing children
+instead of shipping. Doing so is how the loop stops delivering: ticks end with
+more backlog and nothing merged, and the real work vanishes behind labels later
+ticks skip.
+
+- **Never create sub-issues**, and never add new board items to break down work
+  in hand. A big issue means a long tick, not a split.
+- **Track the parts as a checklist in the issue body.** This is the tracking
+  record — a GitHub task list on the issue itself, edited in with
+  `gh issue edit <N> --repo gaarutyunov/<repo> --body-file -`:
+
+  ```markdown
+  ## Checklist
+  - [ ] <part>
+  - [ ] <part>
+  ```
+
+  Tick each box as its part lands, so the issue shows real progress to anyone
+  reading it. **The issue is done only once the whole checklist is
+  implemented** — an unchecked box means the issue is not finished, whatever
+  the PR looks like.
+- **Also keep a session todo list** (`TaskCreate` / `TaskUpdate`) to drive the
+  tick. That is working state; the issue checklist is the durable record.
+- **Spec-level decomposition is the only sanctioned kind.** An OpenSpec change's
+  `tasks.md` breaks work into steps (see *OpenSpec `/opsx:*` spec flow*). That is
+  task decomposition, not issue decomposition.
+- **Implement every actionable review comment inside the issue being worked.**
+  Owner feedback and valid bot findings get fixed in this PR — never deferred to
+  a follow-up issue, unless the owner explicitly asks for it to be split out.
+- **Clear technical blockers in the same PR.** Build the missing piece rather
+  than filing it as foundation work for a later tick. Re-check any `blocked`
+  claim before believing it — the thing it waited on has often merged since.
+
+Only a blocker that genuinely needs the *owner* — a credential, an access grant,
+a product decision nobody else can make — leaves the issue unfinished, and it
+goes to **In review** as below.
+
 ## Anything that needs the owner sits in **In review**
 
 **In review** means "this needs the owner". It is not only for finished code —
@@ -297,7 +342,7 @@ parked In progress.
 Take it from the digest, not from a fresh board query. Work the first row whose
 signal is actionable for your loop (`HUMAN-INPUT` → `PR-APPROVED` →
 `SPEC-APPROVED` → `UNPUSHED` → `SPEC-MERGED` → `CI-RED` → `THREADS` →
-`READY` → `NOT-STARTED` → `WIP`), skipping `TRACKER`, `WAITING-OWNER` and `BLOCKED`.
+`READY` → `NOT-STARTED` → `WIP`), skipping `WAITING-OWNER` and `BLOCKED`.
 Capture the row's **item id** (printed in the details block), the **issue**
 (repo + number), and the title.
 

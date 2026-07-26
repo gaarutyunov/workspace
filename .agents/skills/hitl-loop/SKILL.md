@@ -34,6 +34,12 @@ and the `approved:pr` merge gate.
    Nothing blocked, nothing awaiting approval, and nothing awaiting an answer is
    ever left In progress.
 
+4. **Never split an issue into sub-issues.** Each issue is one deliverable, worked
+   in place. Track its parts as a **checklist in the issue body** — the issue is
+   done only once the whole checklist is implemented — and decompose only at the
+   spec level (`loop-common` → *One issue, one deliverable*). Every actionable
+   review comment is implemented inside the issue being worked, never deferred.
+
 ## The workflow (per tick)
 
 ### 1. Run the digest and choose one task
@@ -42,7 +48,7 @@ and the `approved:pr` merge gate.
 .claude/skills/loop-common/scripts/board-tick.py --loop hitl
 ```
 
-Work the top actionable row, skipping `TRACKER`, `WAITING-OWNER` and `BLOCKED`.
+Work the top actionable row, skipping `WAITING-OWNER` and `BLOCKED`.
 The digest already contains every unaddressed owner comment for that task —
 **including comments on its spec PR in the workspace repo**, where approvals and
 scope changes usually live. Treat them as instructions that outrank the issue's
