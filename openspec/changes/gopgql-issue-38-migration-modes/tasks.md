@@ -1,57 +1,57 @@
-## 1. The mode type and the marker
+## 1. Split the generator
 
-The marker comes first because everything else depends on being able to read a
-directory's mode back (design D2).
+- [ ] 1.1 `generator.TablesDDL(m)` — the vertex and edge table blocks with their indexes, in today's order.
+- [ ] 1.2 `generator.GraphDDL(m)` already exists and is unchanged.
+- [ ] 1.3 `generator.DDL(m)` stays as it is — `TablesDDL` + `GraphDDL` — so the combined path (existing directories, D5) is literally the same code producing byte-identical output.
+- [ ] 1.4 Test: `TablesDDL(m) + "\n\n" + GraphDDL(m)` equals `DDL(m)` exactly.
 
-- [ ] 1.1 `migrate.Mode` with `ModeAll` (default, zero value), `ModeTables`, `ModeGraph`; `ParseMode(string)` returning an error naming the supported modes.
-- [ ] 1.2 Emit `-- gopgql:mode=<mode>` immediately after `-- +goose Up` for any mode other than `all`. `all` emits no marker, so existing output stays byte-identical.
-- [ ] 1.3 `migrate.FoldContent` reads the marker and returns the mode alongside the schema; a migration with no marker is `ModeAll`.
-- [ ] 1.4 Mixed markers within one directory are an error — a directory has one mode.
-- [ ] 1.5 Unit tests: round-trip each mode, a marker-less migration folding as `all`, and the mixed-marker error.
+## 2. Per-concern migrations
 
-## 2. Generation
+- [ ] 2.1 `migrate.InitTables(m)` / `migrate.InitGraph(m)`, each with a down section undoing only its own half (tables in reverse creation order; the graph drop alone).
+- [ ] 2.2 `migrate.DeltaTables(from, to)` — the structural diff only; never touches the graph.
+- [ ] 2.3 `migrate.DeltaGraph(from, to)` — the `GraphDDL` comparison only; never emits a table statement.
+- [ ] 2.4 `migrate.Delta` keeps its current combined behaviour for existing directories.
+- [ ] 2.5 Unit tests: each delta emits nothing when its own half is unchanged, including when the *other* half changed.
 
-- [ ] 2.1 `generator.DDL(m, mode)` — table blocks with their indexes, the graph block, or both. `VertexTableDDL`, `EdgeTableDDL`, `IndexDDL` and `GraphDDL` are untouched; the mode selects between existing pieces.
-- [ ] 2.2 `migrate.downDDL(m, mode)` — the exact inverse of what the same mode emitted: `tables` drops the tables in reverse order and nothing else, `graph` drops only the graph.
-- [ ] 2.3 `migrate.Init(m, mode)` and `WriteInit(dir, m, mode)`.
-- [ ] 2.4 Assert byte-identical output for `ModeAll` against the current generator — the backwards-compatibility claim, tested rather than asserted.
+## 3. Directory layout
 
-## 3. The differ — the part that is easy to get wrong
+- [ ] 3.1 `<dir>/tables/` and `<dir>/graph/`, each an independent goose directory with its own `0001_init.sql` and numbering.
+- [ ] 3.2 Fold is per-directory and needs no change — point it at `<dir>/graph/` and it reconstructs what that directory created (design D1).
+- [ ] 3.3 **Layout detection (D5):** if `<dir>` contains migration files directly, write combined into `<dir>` as today; if it is empty or already contains `tables/` / `graph/`, use the split. One check on directory contents — no marker, no config.
+- [ ] 3.4 Tests: an existing combined directory keeps receiving combined migrations and its files are not moved; an empty directory gets the split.
 
-Design D1: a directory must not keep trying to create the half it does not own.
+## 4. CLI
 
-- [ ] 3.1 `migrate.Delta(from, to, mode)`: `tables` runs the structural diff and **skips** the `GraphDDL(from) != GraphDDL(to)` comparison; `graph` runs the graph comparison and **skips** the structural diff; `all` runs both, as today.
-- [ ] 3.2 `migrate.Generate(dir, desired, name)` reads the directory's mode via Fold and uses it, rather than taking it as an argument that could disagree.
-- [ ] 3.3 A requested mode that disagrees with the folded mode is `migrate.ErrModeMismatch`, wrapped with both modes named (design D2). A **sentinel**, not a formatted string, because the CLI must branch on it (5.3). **This is the safety property of the change** — the mismatch is what would otherwise emit `CREATE TABLE` into a graph-only directory.
-- [ ] 3.4 Unit tests: generating twice against an unchanged schema emits nothing, in each mode; a change confined to the other half emits nothing; the disagreement satisfies `errors.Is(err, migrate.ErrModeMismatch)`; an empty graph-mode directory with no graph declared emits nothing.
+- [ ] 4.1 `--no-tables` and `--no-graph` on `generate` and `migrate`, defaulting to both halves on.
+- [ ] 4.2 Both flags together is an error — that asks for nothing to be generated.
+- [ ] 4.3 Help text states that tables are applied before the graph (design D4).
+- [ ] 4.4 `migrate` applies the half or halves it was asked for, in goose order within each directory.
 
-## 4. Dropping the graph
+## 5. The partial-schema guarantee
 
-- [ ] 4.1 In `graph` mode, a desired schema with no graph against a folded prior that has one emits `DROP PROPERTY GRAPH` and no table statement (design D4).
-- [ ] 4.2 Declaring a graph again afterwards recreates it.
-- [ ] 4.3 Confirm `all` → `tables` does **not** silently drop the graph: it is a mode disagreement (3.3), not a drop.
+The point of the change, per the issue: the SDL as the source of truth for a
+read-only projection of a larger database.
 
-## 5. CLI
-
-- [ ] 5.1 `--mode` on `generate` and `migrate`, default `all`, env `GOPGQL_MODE`.
-- [ ] 5.2 The help text states that tables must be applied before the graph (design D5).
-- [ ] 5.3 A disagreement between `--mode` and the directory exits non-zero with the explanation, not a diff — detected with `errors.Is(err, migrate.ErrModeMismatch)` so it reads differently from a parse or I/O failure.
+- [ ] 5.1 With `--no-tables`, no code path inspects, diffs or emits anything about tables. Assert this rather than assuming it — it is the guarantee people rely on.
+- [ ] 5.2 An SDL describing a subset of a database generates a graph over exactly that subset, with no complaint about what it does not mention.
+- [ ] 5.3 Document the asymmetry plainly: with the tables half **on**, a column absent from the SDL is a column gopgql removes; the partial-description guarantee is about the graph half.
 
 ## 6. Integration suite
 
-Against a real `postgres:19beta2` container, because the ordering constraint and
-the failure mode are both database behaviour.
+Against a real `postgres:19beta2` container.
 
-- [ ] 6.1 Generate into two directories (`tables`, `graph`), apply in order, and assert the resulting schema matches a single combined migration applied to a fresh database.
-- [ ] 6.2 A query compiles and returns the same rows across the split as against a combined migration.
-- [ ] 6.3 Applying the graph directory first fails, and the error names the missing table — the documented failure, asserted rather than assumed.
-- [ ] 6.4 Drop the graph from a seeded database in `graph` mode; assert the graph is gone and every row survives.
-- [ ] 6.5 Re-declare the graph; assert it is recreated over the surviving tables.
-- [ ] 6.6 Regenerating each directory against an unchanged schema emits nothing.
+- [ ] 6.1 Split generation, applied tables-then-graph, produces the same database as a combined migration applied to a fresh database.
+- [ ] 6.2 A query returns the same rows across the split as against a combined migration.
+- [ ] 6.3 Applying the graph directory first fails, and the error names the missing table.
+- [ ] 6.4 **Graph over foreign tables:** create tables by hand (not via gopgql), generate with `--no-tables`, apply, and query successfully.
+- [ ] 6.5 **Partial projection:** a database with extra tables *and* extra columns the SDL never mentions — assert no migration refers to them, and that they still exist after applying.
+- [ ] 6.6 The SDL stops declaring a graph → the graph directory drops it and every row survives.
+- [ ] 6.7 Regenerating against an unchanged schema emits nothing, in both directories.
+- [ ] 6.8 An existing combined directory keeps working: apply `0001`, change the schema, regenerate, and confirm the delta lands in the same directory in combined form.
 
 ## 7. Docs and verification
 
-- [ ] 7.1 `SPEC.md`: the modes, and that a directory's mode is recorded in its migrations and may not be changed in place.
-- [ ] 7.2 `README.md`: the split-migration flow, with the ordering constraint and the "someone else owns the tables" case that motivates it.
-- [ ] 7.3 Playground: show the emitted DDL for each mode from the same SDL.
+- [ ] 7.1 `SPEC.md`: the split default, turning either half off, and the partial-schema guarantee with its asymmetry.
+- [ ] 7.2 `README.md`: the two motivating cases — someone else owns the tables, and the SDL as a read-only projection — with the ordering constraint.
+- [ ] 7.3 Playground: show both migrations generated from one SDL.
 - [ ] 7.4 Full CI green — build, vet, WASM build, the godog suites against containers, `golangci-lint`, `govulncheck`.

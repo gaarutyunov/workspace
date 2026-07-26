@@ -1,153 +1,139 @@
 ## Context
 
-Three functions carry the assumption that gopgql owns everything, and all three
-have to change together.
+A first version of this design introduced a `mode` enum recorded in a header
+comment inside every migration, a fold that read it back, and a sentinel error
+for when a `--mode` flag disagreed with what a directory had been generated
+with. The owner's verdict was that it overcomplicated things, and that the split
+should simply be the default with either half turnable off.
 
-`generator.DDL` (generator.go:243) builds the table blocks with their indexes and
-then appends `GraphDDL(m)` — one string, both halves.
+That is right, and it is worth being precise about *why*, because the machinery
+was solving a problem the simpler design does not have.
 
-`migrate.Init` wraps that in `-- +goose Up` and pairs it with `downDDL`, which
-drops the graph, then the edge tables, then the vertex tables.
+The marker existed to answer "what is this directory responsible for?" when one
+directory might be asked to be different things at different times. If the split
+is structural — `tables/` and `graph/` are separate directories, always — then
+the answer is the path, and it cannot drift, cannot be mistyped, and cannot
+disagree with a flag. **The directory is the mode.** Everything the marker,
+the mismatch check and the sentinel error were protecting against becomes
+unrepresentable.
 
-`migrate.Delta` (diff.go:24) decides whether anything changed with two tests:
-the structural diff, and `generator.GraphDDL(from) != generator.GraphDDL(to)`.
-
-And underneath them, `migrate.Fold` reconstructs prior state by re-parsing the
-directory's own migrations, because gopgql keeps no sidecar state
+The relevant code is unchanged from that analysis: `generator.DDL`
+(generator.go:243) concatenates the table blocks and `GraphDDL`; `migrate.Delta`
+(diff.go:24) decides whether anything changed with a structural diff plus
+`GraphDDL(from) != GraphDDL(to)`; and `migrate.Fold` reconstructs prior state by
+re-parsing a directory's own migrations, because gopgql keeps no sidecar state
 (`SPEC.md` §3, decision 6).
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Emit only the half of the schema a directory is responsible for.
-- Keep the differ correct when it can only see half the history.
-- Make dropping the graph a generated migration rather than a hand-written one.
-- Change nothing for anyone who does not ask for a mode.
+- Split by default, with either half turnable off.
+- Support an SDL that describes only part of a database, as a first-class case.
+- Leave existing single-directory projects alone.
+- Add as little machinery as possible.
 
 **Non-Goals:**
 
+- A mode recorded in migrations. Removed deliberately — see D1.
 - Reconciling with another migration tool's state. gopgql reads its own
-  migrations and nothing else; if Atlas owns the tables, gopgql in `graph` mode
-  simply never looks at them.
-- Splitting anything finer than tables-versus-graph. Per-table directories are
-  not asked for and would multiply the fold problem below by the table count.
-- Managing apply order across directories. That is the operator's, and the docs
-  say so.
+  migrations and nothing else.
+- Managing apply order across directories (D4).
 
 ## Decisions
 
-### D1: The mode partitions responsibility, not just output
+### D1: The directory is the unit of ownership — nothing is recorded in the files
 
-The tempting implementation is a filter on `generator.DDL` — emit the graph
-block or don't. That is half the change, and the missing half is where the bug
-would live.
+`<dir>/tables/` owns the tables and their indexes. `<dir>/graph/` owns the
+property graph. `Fold` is pointed at one of them and reconstructs what that
+directory created; `Delta` runs only the comparison that directory is
+responsible for:
 
-`migrate.Delta` compares a folded prior state against the desired state. In
-`tables` mode the folded prior has **no graph**, because no migration in that
-directory ever created one — so `GraphDDL(from) != GraphDDL(to)` is true on
-every single run, and every delta would try to create a graph the directory does
-not own. Symmetrically, a `graph` directory folds to a schema with no tables, so
-the structural diff would emit `CREATE TABLE` for every table on every run.
+- a `tables/` directory runs the structural diff and never looks at the graph;
+- a `graph/` directory compares the graph and never looks at the tables.
 
-So the mode is carried into the differ:
+No marker is written, no flag needs to match a previous run, and there is no
+disagreement to detect — so there is no mismatch error and no sentinel. A
+directory cannot be re-scoped because its identity is its path.
 
-- `tables` — run the structural diff; **skip the graph comparison entirely**.
-- `graph` — run the graph comparison; **skip the structural diff entirely**.
-- `all` — both, exactly as today.
+- *Rejected — the previous design's `-- gopgql:mode=` marker.* It bought the
+  ability for one directory to be any concern, which nothing needs, and paid for
+  it with a marker that hand-editing could lose, a flag that could contradict
+  the marker, and an error path for the contradiction.
 
-The mode answers "what is this directory responsible for?", and the generator
-filter falls out of that rather than being the point.
+### D2: Splitting is the default; either half is turned off, not turned on
 
-### D2: The mode is recorded in the migration, not passed in every time
+`gopgql generate --dir migrations` writes `migrations/tables/0001_init.sql` and
+`migrations/graph/0001_init.sql`.
 
-A directory generated in `graph` mode and then diffed without `--mode graph`
-would produce nonsense — the differ would see no tables in the prior state and
-emit `CREATE TABLE` for all of them. Relying on the operator to pass a matching
-flag every time makes data loss a typo away.
+- `--no-tables` — do not generate or diff the tables half at all.
+- `--no-graph` — do not generate or diff the graph half at all.
 
-So the emitted migration records its own mode in a header comment that the fold
-reads back:
+Off means **absent, not empty**: with `--no-tables` gopgql never inspects tables,
+so it emits nothing about them and, critically, never concludes anything from
+their absence (D3).
 
-```sql
--- +goose Up
--- gopgql:mode=graph
-CREATE PROPERTY GRAPH …
-```
+Turning off is not a way to delete anything. `--no-graph` stops managing the
+graph; it does not drop one. Dropping the graph is what happens when the graph
+half is *on* and the SDL stops declaring a graph — the ordinary diff of a
+`graph/` directory against a graphless desired state.
 
-`Fold` returns the mode alongside the schema. Rules:
+### D3: The SDL describes a projection, not an inventory
 
-- A directory whose migrations declare a mode uses it; `--mode` may be omitted.
-- `--mode` **disagreeing** with the recorded mode is an **error**, not an
-  override. Silently re-scoping a directory is how the tables get dropped. It is
-  a **named error** (`migrate.ErrModeMismatch`), not just a formatted string,
-  because the CLI has to tell it apart from an ordinary generation failure to
-  report it usefully — the operator's next action is different in each case.
-- A migration with no marker is `all` — every migration generated before this
-  change, which is what keeps existing directories working.
+This is the owner's second point and the more important half of the change: a
+database may hold much more than the SDL mentions, with the SDL acting as the
+source of truth for the read-only slice that is surfaced as a graph.
 
-- *Alternative — a `.gopgql.yaml` beside the migrations.* Rejected: a second
-  file to keep in sync with the directory, and it can be deleted or copied
-  without the migrations noticing. A marker inside the artefact travels with it.
+So **absence in the SDL is not evidence of absence in the database.** A `graph/`
+directory must never emit `DROP TABLE` for a table it does not know about, and
+must not require the SDL to enumerate every table. This falls out of D1 rather
+than needing enforcement — a graph directory has no structural diff — but it is
+stated because it is the guarantee people are relying on when they use gopgql
+this way, and a future change that "helpfully" widened the graph directory's
+diff would silently break it.
 
-### D3: `graph` mode still needs the whole SDL
+It also means a `tables/` directory is only safe to use when the SDL *is* the
+whole story for the tables it describes. That is already true today; the split
+does not change it.
 
-A property graph names its tables and their columns, so the graph half cannot be
-rendered from a "graph-only" model. This is not a problem: the SDL always
-describes the entire schema, and `generator.Build` always produces the whole
-`schema.Schema`. The mode filters what is **emitted** and what is **diffed**,
-never what is parsed.
+### D4: Ordering is the operator's, and is documented rather than enforced
 
-That means a `graph` directory does need an SDL that matches the tables somebody
-else owns. If it drifts, the graph will reference a column that is not there and
-PostgreSQL will reject the migration — which is the right failure, at the right
-moment, and is the case M7's conformance check exists to catch earlier.
+Tables must exist before a graph that references them. gopgql cannot know
+whether the tables are about to be applied by another tool a second later, so it
+applies the directory it is given and the docs and help text state the order. The
+failure when they are applied out of order is PostgreSQL refusing to create a
+graph over a missing table — loud, immediate, and pointing at the cause.
 
-### D4: Dropping the graph is a mode-level transition, and only `graph` mode may do it
+### D5: An existing directory keeps its current shape
 
-"Or even drop the whole graph table setup but keep the data" is a transition
-between desired states within `graph` mode: the SDL no longer wants a graph, the
-folded prior has one, so the delta is `DROP PROPERTY GRAPH` and nothing else.
+A `--dir` that already contains migration files directly is a project that
+predates this change. Writing `tables/` and `graph/` subdirectories into it
+would strand its history: the next `Delta` would fold an empty subdirectory and
+re-emit the entire schema.
 
-Deliberately **not** supported: `all` → `tables` as an implicit drop. A directory
-switching from `all` to `tables` is far more likely to be a mistake than a
-request to drop the graph, and D2 already makes a mode change an error. Someone
-who genuinely wants the graph gone points a `graph`-mode directory at a
-graphless schema, which says so explicitly.
+So: **if `--dir` already contains migrations, gopgql keeps writing to it
+combined**, exactly as today. The split applies to a directory that is empty or
+already split. This is a single check on directory contents — no marker, no
+config, no flag — and it means no existing project has to do anything.
 
-### D5: Ordering between directories is the operator's, and is stated rather than enforced
-
-Tables must exist before the graph that references them. gopgql could try to
-enforce this — refuse to apply a `graph` directory when the tables are absent —
-but it cannot know whether the tables are about to be applied by another tool a
-second later, and a check that is sometimes wrong is worse than a documented
-constraint.
-
-So: `migrate` applies the directory it was given, in goose order, and the docs
-and the `--mode graph` help text state that tables come first. The failure when
-they do not is PostgreSQL refusing to create a graph over a missing table —
-loud, immediate, and pointing at the actual cause.
+- *Rejected — migrating existing directories automatically.* Moving someone's
+  applied migrations into subdirectories rewrites history that goose has already
+  recorded as applied.
 
 ## Risks / Trade-offs
 
-- **[A mismatched flag is the dangerous input]** — running `generate --mode all`
-  against a `graph` directory would emit `CREATE TABLE` for everything. D2 turns
-  that into an error rather than a diff, which is the single most important
-  safety property in this change.
-- **[Split directories can drift from each other]** — the `graph` half's SDL
-  must agree with tables it does not own. Detecting that early is exactly what
-  M7's conformance check does, so the docs point at it rather than duplicating
-  it here.
-- **[The marker is a comment]** — a hand-edited migration could lose it, and the
-  directory would silently become `all`. Mitigated by the mismatch check in D2
-  (a `--mode` that disagrees errors) and by the fact that hand-editing generated
-  migrations is already out of contract (`SPEC.md` §3.1).
-- **[Three modes, three fold behaviours]** — more paths through `Delta`. Kept
-  small by making the mode select which of the two *existing* comparisons run,
-  rather than introducing new diff logic.
-
-## Open Questions
-
-- Should `gopgql conform` (M7, gopgql#9) be mode-aware — checking only the graph
-  when the graph is all gopgql owns? Probably yes, and it is a one-line filter,
-  but M7 is unmerged and this change should not pre-empt its shape.
+- **[The default output layout changes]** — a new project gets two directories
+  where it used to get one, and anything that hard-codes `migrations/0001_init.sql`
+  will not find it. Mitigated by D5 for existing projects and called out in the
+  README and SPEC.
+- **[Two directories, two goose histories]** — each has its own version table
+  scope, so a partial apply can leave tables ahead of the graph. That is
+  inherent to wanting them separately releasable, and it is the reason the
+  ordering is documented (D4).
+- **[A `tables/` directory still assumes the SDL is complete for its tables]** —
+  D3's guarantee is about the graph half. Someone who turns tables *on* against
+  a database with tables the SDL does not mention is in the same position as
+  today, which the docs should say plainly rather than leaving to be discovered.
+- **[Nothing detects a half-applied split]** — gopgql will not warn that the
+  graph directory is ahead of the tables one. Detecting that is what M7's
+  conformance check (gopgql#9) is for, and it should not be duplicated here.
