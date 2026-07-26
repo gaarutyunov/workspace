@@ -35,9 +35,10 @@ and the `approved:pr` merge gate.
    ever left In progress.
 
 4. **Never split an issue into sub-issues.** Each issue is one deliverable, worked
-   in place; sequence its parts with a todo list, and decompose only at the spec
-   level (`loop-common` → *One issue, one deliverable*). Every actionable review
-   comment is implemented inside the issue being worked, never deferred.
+   in place. Track its parts as a **checklist in the issue body** — the issue is
+   done only once the whole checklist is implemented — and decompose only at the
+   spec level (`loop-common` → *One issue, one deliverable*). Every actionable
+   review comment is implemented inside the issue being worked, never deferred.
 
 ## The workflow (per tick)
 

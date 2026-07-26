@@ -98,8 +98,11 @@ labels that later ticks skip.
 So, when an issue looks large:
 
 - **Work it end to end in one PR.** Size is not a reason to split.
-- **Sequence the parts with a todo list**, held in this session (`TaskCreate` /
-  `TaskUpdate`) — not as GitHub issues, and not as new board items.
+- **Write the parts as a checklist in the issue body** and tick them off as they
+  land — a GitHub task list on the issue itself is the tracking record. **The
+  issue is done only once the whole checklist is implemented.**
+- **Drive the tick with a session todo list** (`TaskCreate` / `TaskUpdate`)
+  alongside it — never as GitHub issues, and never as new board items.
 - **Decompose on the spec level if you need structure.** An OpenSpec change's
   `tasks.md` is the only sanctioned place to break work into steps
   (`loop-common` → *OpenSpec `/opsx:*` spec flow*). That is task decomposition,
@@ -186,7 +189,13 @@ Rules:
 
 ### 5. Move the task to **Done**
 
-After the merge lands, drop any loop labels it still carries and close it out:
+**Check the issue's checklist first.** The issue is done only once every box is
+implemented; an unchecked box means the tick is not finished, whatever the PR
+looks like. Tick the boxes the merge just delivered, and if any remain, keep
+working them rather than closing the task out.
+
+Once the checklist is complete, drop any loop labels it still carries and close
+it out:
 
 ```bash
 .claude/skills/loop-common/scripts/board-tick.py label \

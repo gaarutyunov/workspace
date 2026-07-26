@@ -286,8 +286,22 @@ ticks skip.
 
 - **Never create sub-issues**, and never add new board items to break down work
   in hand. A big issue means a long tick, not a split.
-- **Sequence the parts with a todo list** held in the session (`TaskCreate` /
-  `TaskUpdate`), inside the issue you are already working.
+- **Track the parts as a checklist in the issue body.** This is the tracking
+  record — a GitHub task list on the issue itself, edited in with
+  `gh issue edit <N> --repo gaarutyunov/<repo> --body-file -`:
+
+  ```markdown
+  ## Checklist
+  - [ ] <part>
+  - [ ] <part>
+  ```
+
+  Tick each box as its part lands, so the issue shows real progress to anyone
+  reading it. **The issue is done only once the whole checklist is
+  implemented** — an unchecked box means the issue is not finished, whatever
+  the PR looks like.
+- **Also keep a session todo list** (`TaskCreate` / `TaskUpdate`) to drive the
+  tick. That is working state; the issue checklist is the durable record.
 - **Spec-level decomposition is the only sanctioned kind.** An OpenSpec change's
   `tasks.md` breaks work into steps (see *OpenSpec `/opsx:*` spec flow*). That is
   task decomposition, not issue decomposition.
