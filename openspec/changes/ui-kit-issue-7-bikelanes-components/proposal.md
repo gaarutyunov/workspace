@@ -6,20 +6,22 @@ rows, the glyph buttons, the preference slider, the import row, the route/HUD
 tiles, the status line and the floating panels have no `<ga-*>` equivalent
 (gaarutyunov/ui-kit#7). **bikelanes#4 is blocked on this.**
 
-None of the gaps are map-specific. A checkbox, a stat tile, an icon-only button,
-a compact file picker and an inline status line are the vocabulary every dense UI
-reaches for; building them in the kit is what stops each pet project from growing
-its own.
+None of the gaps are map-specific. A checkbox, a metric readout, an icon-only
+button, a compact file picker and an inline status line are the vocabulary every
+dense UI reaches for; building them in the kit is what stops each pet project
+from growing its own.
 
 ## What Changes
 
 - **`ga-checkbox`** — the inline boolean `ga-switch` is too heavy for, and
   semantically different from.
-- **`ga-stat`** — **one metric with the word for it underneath** (`0.0` /
-  "km/h now"), the shape bikelanes hand-writes nine times across its route panel
-  and HUD. Not tabular: no header, no shared columns, mixed units, and one tile
-  deliberately larger than its neighbours — `ga-table` stays the element for
-  actual tables (design D5a).
+- **`ga-quantity` and `ga-metric`** — the physical vocabulary: a *quantity* is a
+  number with its unit (`24.5` `km/h`); a *metric* is a quantity carrying the
+  label naming it ("avg km/h" over `24.5`), built from the quantity rather than
+  re-implementing it. bikelanes hand-writes nine metrics across its route panel
+  and HUD. Not a statistic (that summarises a distribution) and not tabular — no
+  header, no shared columns, mixed units, one readout deliberately larger than
+  its neighbours; `ga-table` stays the element for actual tables (design D5a).
 - **Icon-only buttons** — a square, glyph-centred affordance on `ga-button` with
   an accessible label that is *required*, not optional.
 - **`ga-slider` end labels** — label both ends of the range and suppress the
@@ -43,8 +45,8 @@ its own.
 - `ui-kit-form-controls`: the input-side additions — checkbox, icon-only button
   affordance, slider end labels, input adornments and readonly presentation, the
   compact file button, and the async combobox.
-- `ui-kit-data-display`: the read-only additions — the metric tile and the inline
-  status line.
+- `ui-kit-data-display`: the read-only additions — the quantity and metric
+  readouts and the inline status line.
 - `ui-kit-overlays`: panels and sheets floating above page content, including the
   mobile bottom-sheet form.
 
@@ -56,8 +58,9 @@ its own.
 
 ## Impact
 
-- **`src/components/`**: new `checkbox`, `stat`, `status`, `file-button`,
-  `combobox`; widened `button`, `slider`, `input`, `panel`, `bottom-sheet`.
+- **`src/components/`**: new `checkbox`, `quantity`, `metric`, `status`,
+  `file-button`, `combobox`; widened `button`, `slider`, `input`, `panel`,
+  `bottom-sheet`.
 - **`src/index.js` / `index.d.ts` / `react.d.ts`**: registration and types for the
   new elements; `npm run types` regenerates the per-component declarations.
 - **`site/registry.js`**: a docs page per new component and updated pages for the

@@ -9,8 +9,9 @@
 
 ## 2. Data display
 
-- [ ] 2.1 `ga-stat`: one metric — `value`, `caption`, optional `unit`, `tone` and `primary` (the larger scale a lead readout like a speedometer needs); shared baselines so a group aligns without per-app CSS, and a placeholder that holds the tile's footprint until the first value arrives. **No `ga-stat-row`** — the docs page carries the grid recipe instead (design D5a).
-- [ ] 2.2 `ga-status`: single-line status with `tone` (`neutral` | `ok` | `error`), `role="status"` so changes are announced, and an empty state that occupies its line rather than collapsing the layout.
+- [ ] 2.1 `ga-quantity`: a number with its unit — `value`, optional `unit`; the unit subordinate to the value, no leftover spacing when it is absent, a placeholder when there is no value yet, and inline flow so it works in a sentence or a table cell.
+- [ ] 2.2 `ga-metric`: a labelled quantity — `label`, `value`, optional `unit`, `tone` and `primary` (the larger scale a lead readout like a speedometer needs). Composes `ga-quantity` rather than re-implementing it; shared baselines so a group aligns without per-app CSS, and a placeholder that holds the footprint until the first value arrives. **No row/grid container** — the docs page carries the grid recipe instead (design D5a).
+- [ ] 2.3 `ga-status`: single-line status with `tone` (`neutral` | `ok` | `error`), `role="status"` so changes are announced, and an empty state that occupies its line rather than collapsing the layout.
 
 ## 3. Overlays
 
@@ -23,13 +24,13 @@
 
 - [ ] 4.1 Import the new components in `src/index.js`; add tags to `index.d.ts` and `react.d.ts`.
 - [ ] 4.2 `npm run types`; commit the regenerated declarations.
-- [ ] 4.3 `site/registry.js`: a page per new component, and updated pages for `ga-button`, `ga-slider`, `ga-input`, `ga-panel`, `ga-bottom-sheet`. The `ga-stat` page carries the **grid recipe** for a group of tiles (including one `primary` among subordinate ones) and says when to reach for `ga-table` instead.
+- [ ] 4.3 `site/registry.js`: a page per new component, and updated pages for `ga-button`, `ga-slider`, `ga-input`, `ga-panel`, `ga-bottom-sheet`. The `ga-metric` page carries the **grid recipe** for a group of metrics (including one `primary` among subordinate ones), shows a bare `ga-quantity` inline, and says when to reach for `ga-table` instead.
 - [ ] 4.4 Update the component list in `README.md`.
 
 ## 5. Verify and release
 
 - [ ] 5.1 `npm run build` and `npm run bundle`; exercise every new and widened component in the docs site, including keyboard-only paths.
-- [ ] 5.2 Screen-reader smoke test (VoiceOver): checkbox state (including mixed), icon-button labels, combobox announcements, status-line announcements, and a group of `ga-stat` tiles reading as individual metrics rather than as a table.
+- [ ] 5.2 Screen-reader smoke test (VoiceOver): checkbox state (including mixed), icon-button labels, combobox announcements, status-line announcements, and a group of `ga-metric` readouts announcing as individual values rather than as a table.
 - [ ] 5.3 Check both themes (`data-theme="dark"` / `"light"`).
 - [ ] 5.4 Confirm the additive claims: an existing `ga-slider`, `ga-input` and `ga-panel` usage renders exactly as before.
 - [ ] 5.5 Cut a release and note the version on ui-kit#7 so bikelanes#4 can pin it.

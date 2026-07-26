@@ -19,7 +19,7 @@ tokens and chat; the two issues overlap in exactly one place, the combobox.
 - Every bikelanes control has a `<ga-*>` equivalent, so bikelanes#4 is a markup
   and wiring change rather than a design exercise.
 - Widenings are **additive**: existing usages render unchanged.
-- The additions are general. A checkbox, a stat tile and a status line are not
+- The additions are general. A checkbox, a metric and a status line are not
   map furniture.
 
 **Non-Goals**
@@ -76,13 +76,33 @@ mobile dismissal gestures. A map canvas is the adversary here — the stacking
 value is a documented token so an app can position around it instead of guessing
 z-indexes.
 
-### D5a: `ga-stat` is one metric with its caption — not a table row
+### D5a: A **quantity** is a number with a unit; a labelled quantity is a **metric**
 
-*(Raised by the owner on the spec PR: "I don't understand the stat component at
-all. What is it? If it's a table then no need for a separate component. Just use
-the table component.")*
+*(Owner's vocabulary, from the spec PR: "It's not a stat, it's like in physics a
+quantity: number plus unit. So let's call it quantity. If a quantity has a label,
+let's call it metric. Because stat is more related to statistics — avg, mean and
+other ways to express distribution of values, not one value.")*
 
-`ga-stat` renders **one number with the word for it underneath** — the shape
+The name `ga-stat` was wrong, and for the reason given: a statistic summarises a
+*distribution*. `24.5 km/h` right now is not a statistic — it is one measured
+value. The vocabulary is therefore the physical one, and it gives two elements
+that compose:
+
+- **`ga-quantity`** — a number with its unit: `24.5` `km/h`. The unit is rendered
+  with the value without competing with it for emphasis. This is the primitive.
+- **`ga-metric`** — a quantity that carries a label: "avg km/h" over `24.5`.
+  Built *from* `ga-quantity`, so the primitive has a consumer the day it lands
+  rather than being speculative.
+
+bikelanes' nine readouts are all **metrics** — every one has a caption — so
+`ga-metric` is what the app reaches for. `ga-quantity` is what a table cell or a
+sentence reaches for when the surrounding text already says what the number is.
+
+*(An earlier round of this decision answered a different question from the owner
+— "if it's a table, just use the table component". The answer stands and is the
+rest of this section: it is not tabular.)*
+
+`ga-metric` renders **one number with the word for it underneath** — the shape
 bikelanes writes by hand nine times:
 
 ```html
@@ -106,18 +126,19 @@ counts:
   independent metrics as rows and columns with navigation semantics that do not
   apply.
 
-The alternative — *drop `ga-stat` and let apps keep writing
+The alternative — *drop the element and let apps keep writing
 `<strong>`+`<small>`* — is what bikelanes does today, and is why its readouts
-drift from the kit. The component earns its place by owning three things an app
+drift from the kit. `ga-metric` earns its place by owning three things an app
 otherwise re-derives every time: **shared baselines** so a row of differently
 sized values lines up, a **placeholder that holds the tile's footprint** so the
 layout does not jump when the first value arrives mid-ride, and the
-value/caption type scale coming from tokens rather than from each app's CSS.
+value/unit/label type scale coming from tokens rather than from each app's CSS.
 
-Consequently there is **no `ga-stat-row`**: a set of tiles is laid out by the app
-with a documented CSS grid recipe. The owner's push here is toward *fewer*
+Consequently there is **no metric-row container**: a set of metrics is laid out by
+the app with a documented CSS grid recipe. The owner's push here is toward *fewer*
 components, and a wrapper whose whole job is `display: grid` does not clear that
-bar.
+bar. The two elements here are not a multiplication for the same reason — the
+owner named both concepts, and one is defined in terms of the other.
 
 ### D6: The combobox is `ga-select`'s sibling, and lands after it
 
@@ -154,7 +175,7 @@ Additive. No existing attribute changes meaning, no token is redefined, and
 consumers pin versions. Rollback is the previous pinned release.
 
 Once released, bikelanes#4 migrates its markup; the same components are then
-available to the other pet projects (the stat tile and status line in particular
+available to the other pet projects (metrics and the status line in particular
 recur).
 
 ## Open Questions
@@ -163,11 +184,15 @@ None outstanding — see *Resolved* below.
 
 ## Resolved (owner, gaarutyunov/workspace#22)
 
-- **What is `ga-stat`, and why not `ga-table`?** It is one metric with its
-  caption, not tabular data; the readouts it replaces have no columns, no shared
+- **What is it, and why not `ga-table`?** It is one measured value with the word
+  for it, not tabular data; the readouts it replaces have no columns, no shared
   header, and one deliberately emphasised member. `ga-table` stays for tabular
   data. Full reasoning in D5a.
-- **Does `ga-stat` own a row container?** No. Alignment is the app's job, with a
+- **What should it be called?** Not `ga-stat` — a statistic summarises a
+  distribution, and these are single values. The physical vocabulary instead:
+  **`ga-quantity`** is a number with its unit, and **`ga-metric`** is a quantity
+  that carries a label, built from it. bikelanes' readouts are all metrics.
+- **Does it own a row container?** No. Alignment is the app's job, with a
   documented grid recipe in the docs page — one fewer component, which is the
   direction the owner pushed.
 - **Does `ga-checkbox` need `indeterminate` in v1?** Yes — "select all" is a
