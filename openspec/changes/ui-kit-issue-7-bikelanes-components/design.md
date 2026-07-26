@@ -76,6 +76,49 @@ mobile dismissal gestures. A map canvas is the adversary here — the stacking
 value is a documented token so an app can position around it instead of guessing
 z-indexes.
 
+### D5a: `ga-stat` is one metric with its caption — not a table row
+
+*(Raised by the owner on the spec PR: "I don't understand the stat component at
+all. What is it? If it's a table then no need for a separate component. Just use
+the table component.")*
+
+`ga-stat` renders **one number with the word for it underneath** — the shape
+bikelanes writes by hand nine times:
+
+```html
+<div class="hud-main"><strong id="h-speed">0.0</strong><small>km/h now</small></div>
+<div><strong id="h-avg">0.0</strong><small>avg km/h</small></div>
+<div><strong id="h-eta">–</strong><small>ETA</small></div>
+```
+
+It is **not** tabular data, and `ga-table` is the wrong element for it on three
+counts:
+
+- **There are no columns.** `ga-table` takes a `columns` JSON attribute and
+  slotted rows that share one grid template — a header plus *homogeneous* rows.
+  The HUD is six *heterogeneous* metrics (km/h, a clock time, a distance, an
+  elapsed duration) laid out 3×2. "km/h now" is a caption under a number, not a
+  column header shared by other rows.
+- **One tile is deliberately bigger.** Current speed is the primary readout
+  (`.hud-main`); the other five are subordinate. A table row cannot express that,
+  and shouldn't.
+- **A table announces itself as a table.** A screen reader would read a grid of
+  independent metrics as rows and columns with navigation semantics that do not
+  apply.
+
+The alternative — *drop `ga-stat` and let apps keep writing
+`<strong>`+`<small>`* — is what bikelanes does today, and is why its readouts
+drift from the kit. The component earns its place by owning three things an app
+otherwise re-derives every time: **shared baselines** so a row of differently
+sized values lines up, a **placeholder that holds the tile's footprint** so the
+layout does not jump when the first value arrives mid-ride, and the
+value/caption type scale coming from tokens rather than from each app's CSS.
+
+Consequently there is **no `ga-stat-row`**: a set of tiles is laid out by the app
+with a documented CSS grid recipe. The owner's push here is toward *fewer*
+components, and a wrapper whose whole job is `display: grid` does not clear that
+bar.
+
 ### D6: The combobox is `ga-select`'s sibling, and lands after it
 
 ui-kit#6 proposes `ga-select` with a popup, listbox semantics, keyboard handling
@@ -116,10 +159,22 @@ recur).
 
 ## Open Questions
 
-- Should `ga-stat` own a row/grid container (`ga-stat-row`) so a set aligns
-  without app CSS, or is alignment the app's job? Leaning on the app, with the
-  docs showing a grid recipe.
-- Does `ga-checkbox` need a tri-state (`indeterminate`) in v1? It is in the task
-  list because a "select all" is common, but bikelanes does not need it.
-- Should the panel's overlay mode trap focus? Correct for a modal sheet, wrong
-  for a persistent control panel — possibly an attribute rather than a default.
+None outstanding — see *Resolved* below.
+
+## Resolved (owner, gaarutyunov/workspace#22)
+
+- **What is `ga-stat`, and why not `ga-table`?** It is one metric with its
+  caption, not tabular data; the readouts it replaces have no columns, no shared
+  header, and one deliberately emphasised member. `ga-table` stays for tabular
+  data. Full reasoning in D5a.
+- **Does `ga-stat` own a row container?** No. Alignment is the app's job, with a
+  documented grid recipe in the docs page — one fewer component, which is the
+  direction the owner pushed.
+- **Does `ga-checkbox` need `indeterminate` in v1?** Yes — "select all" is a
+  common scenario, so the tri-state ships in v1 rather than waiting for a
+  consumer to need it. Toggling a mixed checkbox resolves to checked, matching
+  the native control.
+- **Should overlay mode trap focus?** Neither default is right for both a modal
+  sheet and a persistent control panel, so it is a **configurable attribute**:
+  containment is off unless asked for, and the bottom sheet — which is modal —
+  asks for it.

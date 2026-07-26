@@ -19,6 +19,11 @@ from the toggle switch.
 - **THEN** it renders a mixed state and reports that state to assistive
   technology
 
+#### Scenario: Toggling out of the mixed state
+- **WHEN** the user activates a checkbox that is in the mixed state
+- **THEN** it becomes checked — the behaviour a "select all" over a partial
+  selection depends on — and stops reporting the mixed state
+
 #### Scenario: Disabled
 - **WHEN** the checkbox is disabled
 - **THEN** it cannot be toggled and contributes no value to form submission

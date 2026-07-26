@@ -19,6 +19,27 @@ the document flow.
 - **WHEN** a panel is used without overlay mode
 - **THEN** it renders in the flow exactly as before
 
+### Requirement: Focus containment is configurable
+
+Because an overlay may be a modal sheet or a persistent control panel, whether it
+confines keyboard focus SHALL be a configuration of the element rather than a
+fixed behaviour.
+
+#### Scenario: Persistent panel does not confine focus
+- **WHEN** an overlay panel is shown without focus containment configured
+- **THEN** keyboard focus moves out of it into the rest of the page as it would
+  from any in-flow content
+
+#### Scenario: Modal overlay confines focus
+- **WHEN** focus containment is configured on an overlay
+- **THEN** keyboard focus cycles within it while it is open, and returns to
+  whatever opened it when it closes
+
+#### Scenario: The sheet is modal by default
+- **WHEN** the overlay is presented as a bottom sheet
+- **THEN** it confines focus without the application configuring it, because it
+  covers the content beneath it
+
 ### Requirement: Bottom sheet on narrow viewports
 
 The kit SHALL provide the same overlay content as a bottom sheet for narrow

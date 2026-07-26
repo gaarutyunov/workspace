@@ -15,8 +15,11 @@ its own.
 
 - **`ga-checkbox`** — the inline boolean `ga-switch` is too heavy for, and
   semantically different from.
-- **`ga-stat`** — a value/caption tile, the shape behind bikelanes' nine route
-  and HUD readouts.
+- **`ga-stat`** — **one metric with the word for it underneath** (`0.0` /
+  "km/h now"), the shape bikelanes hand-writes nine times across its route panel
+  and HUD. Not tabular: no header, no shared columns, mixed units, and one tile
+  deliberately larger than its neighbours — `ga-table` stays the element for
+  actual tables (design D5a).
 - **Icon-only buttons** — a square, glyph-centred affordance on `ga-button` with
   an accessible label that is *required*, not optional.
 - **`ga-slider` end labels** — label both ends of the range and suppress the
@@ -40,7 +43,7 @@ its own.
 - `ui-kit-form-controls`: the input-side additions — checkbox, icon-only button
   affordance, slider end labels, input adornments and readonly presentation, the
   compact file button, and the async combobox.
-- `ui-kit-data-display`: the read-only additions — the stat tile and the inline
+- `ui-kit-data-display`: the read-only additions — the metric tile and the inline
   status line.
 - `ui-kit-overlays`: panels and sheets floating above page content, including the
   mobile bottom-sheet form.
