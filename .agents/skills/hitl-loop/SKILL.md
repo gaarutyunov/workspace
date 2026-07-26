@@ -1,14 +1,15 @@
 ---
 name: hitl-loop
-description: "Human-in-the-loop delivery loop: run the board-tick digest on the gaarutyunov GitHub Project board (project #6), work the highest-signal task routed to Loop=hitl, and take it through the full workflow (in progress → clone/worktree → branch + PR → triage → spec-or-implement → work → in review) with owner gates expressed as labels — waits for the `approved:spec` label before coding and the `approved:pr` label before merging. All owner interaction happens on GitHub; never ask anything in the Claude Code window. Use when asked to work the task board with review gates. Examples: \"work on the next task\", \"pull a task from the board\", \"run the project loop\". For unattended runs that skip the gates and self-merge on green CI, use the auto-loop skill instead."
+description: "Human-in-the-loop delivery loop: run the board-tick digest on the gaarutyunov GitHub Project board (project #6), work the highest-signal task routed to Loop=hitl, and take it through the full workflow (in progress → clone/worktree → branch + PR → triage → spec-or-implement → work → in review) with owner gates expressed as merges — waits for the owner to merge the spec PR before coding, and the owner merges the code PR to accept the work. All owner interaction happens on GitHub; never ask anything in the Claude Code window. Use when asked to work the task board with review gates. Examples: \"work on the next task\", \"pull a task from the board\", \"run the project loop\". For unattended runs that skip the gates and self-merge on green CI, use the auto-loop skill instead."
 ---
 
 # HITL task loop
 
 Drives tasks on the personal GitHub Project board
 [users/gaarutyunov/projects/6](https://github.com/users/gaarutyunov/projects/6)
-through delivery, one task at a time, **with owner gates**: the owner approves
-specs and PRs by applying a label, and the loop does everything else. Run it once
+through delivery, one task at a time, **with owner gates**: the owner approves a
+spec by merging its spec PR and accepts the work by merging the code PR, and the
+loop does everything else. Run it once
 for a single task, or drive it continuously with the `/loop` skill (see
 **Looping**). For a fully autonomous variant that skips both gates and self-merges
 once CI is green, use the **auto-loop** skill.
@@ -21,8 +22,8 @@ clone/worktree + gortex tracking, opening a PR early, the OpenSpec `/opsx:*`
 flow, commit/push discipline, status moves, and the `coderabbit-prompts.py`
 helper are documented **once** in the `loop-common` skill — read
 `.claude/skills/loop-common/SKILL.md`. This file specifies only what is
-**specific to the human-gated path**: `Loop = hitl`, the `approved:spec` gate,
-and the `approved:pr` merge gate.
+**specific to the human-gated path**: `Loop = hitl`, the spec-merge gate, and the
+owner-merges-the-PR gate.
 
 ## Three rules that override everything else
 
@@ -31,8 +32,11 @@ and the `approved:pr` merge gate.
    `AskUserQuestion`, ever. Questions go on the issue, get `needs:input`, and the
    task moves to **In review**.
 3. **Anything waiting on the owner lives in In review, with a label saying why.**
-   Nothing blocked, nothing awaiting approval, and nothing awaiting an answer is
+   Nothing blocked, nothing awaiting a merge, and nothing awaiting an answer is
    ever left In progress.
+4. **Re-verify a `blocked` task's blocker every tick.** `blocked` is a claim about
+   another issue or PR, and it goes stale silently — check that the blocker is
+   still open before skipping the row, and unblock it the moment it isn't.
 
 ## The workflow (per tick)
 
@@ -52,9 +56,9 @@ act → ack*).
 `UNPUSHED` outranks almost everything: work is sitting in the local worktree
 that GitHub has never seen — review and push it before starting anything new.
 
-Two signals mean the task is ready to be coded even without a fresh `Ready`:
-`SPEC-APPROVED` (owner labelled it) and `SPEC-MERGED` (the spec landed but
-nothing has been pushed). `NOT-STARTED` means a previous tick claimed the task
+`SPEC-MERGED` means the task is ready to be coded even without a fresh `Ready` —
+the owner merged the spec PR and nothing has been pushed yet. (`SPEC-APPROVED`
+survives only for a board that still carries the old `approved:spec` label.) `NOT-STARTED` means a previous tick claimed the task
 and left nothing behind anywhere — restart it.
 
 Fix any `⚠` hygiene warning on the row in this same tick (e.g. a blocked task
@@ -71,26 +75,27 @@ worktree from fresh `origin/<default>`, `gortex track` the base + worktree, run
 open the PR early with `--body "Closes #<N>"`, then triage **spec-first vs
 implement-directly**.
 
-### 3. Spec-first path — the `approved:spec` gate
+### 3. Spec-first path — the spec-merge gate
 
 Author the change with `loop-common`'s OpenSpec flow (`/opsx:propose …`) and open
 the spec PR in this workspace repo. Then:
 
 ```bash
 .claude/skills/loop-common/scripts/board-tick.py post --repo <repo> --issue <N> \
-  --body "Spec ready for approval: <spec PR url>. Add the \`approved:spec\` label to this issue to start implementation."
+  --body "Spec ready for review: <spec PR url>. Merge it to approve, and implementation starts on the next tick; comment there if something should change."
 .claude/skills/loop-common/scripts/board-tick.py label --repo <repo> --issue <N> --add needs:spec-approval
 # then move the item to In review (df73e18b)
 ```
 
-**Do not implement until the owner applies `approved:spec`.** This is a hard
-gate: the task sits in **In review** with `needs:spec-approval`, and the tick
-moves on to the next task rather than blocking the loop. A later digest shows the
-task as `SPEC-APPROVED`; at that point merge the spec PR, drop
+**Do not implement until the owner merges the spec PR.** The merge *is* the
+approval — there is no `approved:spec` label to wait for, and the loop never
+merges the spec PR itself. The task sits in **In review** with
+`needs:spec-approval`, and the tick moves on to the next task rather than blocking
+the loop. A later digest shows the task as `SPEC-MERGED`; at that point drop
 `needs:spec-approval`, move the item back to **In progress**, and implement from
 the change's `tasks.md` with `/opsx:apply` (`/opsx:archive` once it ships).
 
-**Approval is a label; rejection is just a comment.** The owner does *not* label a
+**Approval is a merge; rejection is just a comment.** The owner does *not* label a
 spec they are unhappy with — they comment on the spec PR and expect the next tick
 to act on it. A task labelled `needs:spec-approval` that has an unaddressed owner
 comment is therefore **actionable, not waiting**: the digest ranks it
@@ -117,31 +122,36 @@ that's step 6, and it happens whenever it happens.)
 
 Report: task title, code PR URL, spec PR URL (if any), and what was done.
 
-### 5. The `approved:pr` merge gate — owner approves, **you** merge
+### 5. The merge gate — **the owner merges**; you finish the card
 
-A later digest shows the task as `PR-APPROVED` once the owner adds the
-`approved:pr` label. The owner approves; the loop performs the merge and the
-status move — the owner is never expected to press Merge or move the card.
-Before merging:
+**The loop never merges a code PR in this skill.** The owner reviews on GitHub and
+presses Merge; that merge *is* the approval. There is no `approved:pr` label to
+wait for and none to ask for.
 
-1. **Owner comments first.** The row's `HUM` count must be zero — act on every
-   unaddressed owner comment and ack it.
-2. **Then CodeRabbit findings you judge valid**, via `loop-common`'s *CodeRabbit
-   + review threads* section. If CodeRabbit's review limit is reached, ignore it.
-3. **Resolve every thread** (`THR` must be `-`), and confirm CI is green
-   (`CI=ok`) and the PR is mergeable.
-
-Only then:
+So the task's last step is bookkeeping, triggered by a later digest showing
+`PR-MERGED` (the code PR is merged while the item is not yet Done):
 
 ```bash
-gh pr merge <PR#> --repo gaarutyunov/<repo> --squash
+.claude/skills/loop-common/scripts/board-tick.py label --repo <repo> --issue <N> --remove needs:review
+# move the item to Done (98236657)
 ```
 
-Then drop `needs:review` / `approved:pr`, move the item to **Done** (`98236657`),
-and `/opsx:archive` the change if there was a spec.
+Then `/opsx:archive` the change if there was a spec.
 
-**Never merge without `approved:pr`**, and never merge with unresolved threads or
-red CI — that's the whole difference from `auto-loop`.
+While the PR sits unmerged, keep it **mergeable and worth merging** — that is the
+loop's job, not the owner's:
+
+1. **Owner comments first.** The row's `HUM` count must be zero — act on every
+   unaddressed owner comment and ack it. A comment is direction; it needs no
+   label (`loop-common` → *Comments: read → act → ack*).
+2. **Then CodeRabbit findings you judge valid**, via `loop-common`'s *CodeRabbit
+   + review threads* section. If CodeRabbit's review limit is reached, ignore it.
+3. **Resolve every thread** (`THR` must be `-`), and keep CI green (`CI=ok`) and
+   the PR mergeable — a red or conflicting PR is the loop's problem to fix, and it
+   surfaces as `CI-RED` regardless of any waiting label.
+
+That difference from `auto-loop` still holds — `auto-loop` merges its own PRs;
+here a human does — but the gate is a merge, never a label.
 
 ### 6. Blocked, or need an answer — surface it and move on
 

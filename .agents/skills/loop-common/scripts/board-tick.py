@@ -57,16 +57,21 @@ BOT_LOGINS = {
 }
 
 # ── Label protocol ──────────────────────────────────────────────────────────
-# The owner only ever moves an item to Ready and applies `approved:*` labels.
-# Every other status move, and every `needs:*`/`blocked` label, is the agent's.
+# The owner only ever moves an item to Ready. Every status move and every
+# `needs:*`/`blocked` label is the agent's.
+#
+# Approval is a **merge**, not a label: the owner merges the spec PR to approve a
+# spec, and merges the code PR to accept the work. The `approved:*` labels below
+# are kept only so an older board that still carries them keeps working — the
+# loop must never wait for them.
 OWNER_LABELS = {
-    "approved:spec": ("0e8a16", "Owner approved the spec — agent may implement"),
-    "approved:pr": ("0e8a16", "Owner approved the PR — agent may merge"),
+    "approved:spec": ("0e8a16", "Legacy — approval is merging the spec PR"),
+    "approved:pr": ("0e8a16", "Legacy — approval is merging the PR"),
 }
 # Agent labels that mean "the owner has to do something" — these force In review.
 WAITING_LABELS = {
-    "needs:spec-approval": ("fbca04", "Spec PR open, waiting for owner approval"),
-    "needs:review": ("fbca04", "Code PR ready, waiting for owner review"),
+    "needs:spec-approval": ("fbca04", "Spec PR open, waiting for the owner to merge it"),
+    "needs:review": ("fbca04", "Code PR ready, waiting for the owner to merge it"),
     "needs:input": ("fbca04", "Question posted on the issue, waiting for owner"),
     "blocked": ("b60205", "Blocked — blocker described in the issue"),
 }
@@ -759,6 +764,12 @@ def compute_signal(item: Item) -> None:
     if n_human:
         reasons.append(f"{n_human} unaddressed owner comment(s)")
         item.signal = "HUMAN-INPUT"
+    elif item.pr_state == "MERGED" and item.status != "Done":
+        # The owner merges the PR — that *is* the approval, and it is also the
+        # only signal that the task shipped. Without this the card sits in
+        # In review forever after the merge, because no label ever changes.
+        reasons.append(f"PR #{item.pr_number} is merged but the item is not Done")
+        item.signal = "PR-MERGED"
     elif "approved:pr" in labels:
         reasons.append("owner approved the PR")
         item.signal = "PR-APPROVED"
@@ -819,6 +830,7 @@ def compute_signal(item: Item) -> None:
 # Ordering used to sort the table — what the orchestrator should look at first.
 SIGNAL_ORDER = [
     "HUMAN-INPUT",
+    "PR-MERGED",
     "PR-APPROVED",
     "SPEC-APPROVED",
     "UNPUSHED",
