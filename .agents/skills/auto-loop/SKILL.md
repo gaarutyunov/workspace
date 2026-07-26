@@ -1,6 +1,6 @@
 ---
 name: auto-loop
-description: "Autonomous delivery loop: run the board-tick digest, take the highest-signal task routed to Loop=auto on the gaarutyunov GitHub Project board (project #6), and drive it end-to-end WITHOUT human gates — never waits for owner spec approval or human code review; self-merges each PR once CI is green, then moves the task to Done. Still obeys owner comments surfaced by the digest, uses labels for intermediate states, and never asks anything in the Claude Code window. Use when asked to run the board unattended / fully autonomously. Examples: \"auto-run the board\", \"run the auto loop\", \"work the board without stopping for review\", \"drive the tasks and merge when CI passes\". For the gated, review-first variant, use the hitl-loop skill instead."
+description: "Autonomous delivery loop: run the board-tick digest, take the highest-signal task routed to Loop=auto on the gaarutyunov GitHub Project board (project #6), and drive it end-to-end WITHOUT human gates — never waits for owner spec approval or human code review; self-merges each PR once CI is green, then moves the task to Done. Never splits an issue into sub-issues: each issue is one deliverable, worked to merged in a single tick. Still obeys owner comments surfaced by the digest, uses labels for intermediate states, and never asks anything in the Claude Code window. Use when asked to run the board unattended / fully autonomously. Examples: \"auto-run the board\", \"run the auto loop\", \"work the board without stopping for review\", \"drive the tasks and merge when CI passes\". For the gated, review-first variant, use the hitl-loop skill instead."
 ---
 
 # Auto task loop
@@ -28,8 +28,7 @@ clone/worktree + gortex tracking, opening a PR early, the OpenSpec `/opsx:*`
 flow, commit/push discipline, moving a task's status, and the
 `coderabbit-prompts.py` helper are all documented **once** in the `loop-common`
 skill — read `.claude/skills/loop-common/SKILL.md`. This file specifies only what
-differs in the **autonomous path**: `Loop = auto`, epic/blocked decomposition,
-and self-merging on green CI.
+differs in the **autonomous path**: `Loop = auto` and self-merging on green CI.
 
 ## Three rules that override everything else
 
@@ -52,8 +51,11 @@ and self-merging on green CI.
 
 3. **Never park a task In progress.** *In progress* means actively being worked
    this tick. Anything waiting on the owner goes to **In review** with a label
-   saying why. The one exception is a `tracker` (step 1a) — an epic whose real
-   work is in its sub-issues.
+   saying why.
+
+4. **Never split an issue into sub-issues.** Every issue is one deliverable unit
+   of work, finished in place — see *One issue, one deliverable* below. This
+   rule outranks any instinct to break work down.
 
 ## Prerequisites
 
@@ -85,82 +87,40 @@ Note that `PR-APPROVED` / `SPEC-APPROVED` rows are not gates for this loop — i
 merges on green CI without waiting for either label — but if the owner *has*
 labelled one, that's still a green light, not something to undo.
 
-### 1a. Epic / blocked check — decompose or unblock, never dead-end
+### 1a. One issue, one deliverable — finish it, never split it
 
-Before touching code, judge whether the task can realistically be **implemented
-and merged to Done in a single iteration**. Two conditions divert it from the
-normal path — and **both are resolved the same way: research a path forward and
-decompose into Ready/auto sub-issues. Never silently park a task as "blocked."**
+**Do not decompose an issue into sub-issues. Ever.** An issue is a deliverable
+unit of work: this tick takes it from Ready to merged. Filing children instead of
+shipping is how the loop stops delivering — every tick ends with more backlog and
+nothing merged, and the real work disappears behind `tracker` and `blocked`
+labels that later ticks skip.
 
-- **Epic (too large):** it spans multiple independent subsystems/layers; it would
-  run to thousands of LOC or many separate deliverables; or its body is a
-  multi-part checklist where each box is itself a shippable unit. A ground-up
-  reimplementation, a whole new subsystem, or "implement spec X" where X defines
-  several layers is almost always an epic.
-- **Blocked (can't reach merged-green this iteration):** it depends on something
-  not yet on `main` — an unimplemented or unwired subsystem, unmerged/parked
-  branches, an upstream fix, or an unmade design decision. A blocker is **not** a
-  reason to stop; it is the signal to **research the fix or the decomposition**
-  and turn it into actionable work the loop can grind down.
+So, when an issue looks large:
 
-In either case, **do not force it through in one PR, and do not just comment
-"blocked" and move on.** Research the path forward, then decompose and let the
-loop grind the pieces:
+- **Work it end to end in one PR.** Size is not a reason to split.
+- **Sequence the parts with a todo list**, held in this session (`TaskCreate` /
+  `TaskUpdate`) — not as GitHub issues, and not as new board items.
+- **Decompose on the spec level if you need structure.** An OpenSpec change's
+  `tasks.md` is the only sanctioned place to break work into steps
+  (`loop-common` → *OpenSpec `/opsx:*` spec flow*). That is task decomposition,
+  not issue decomposition.
 
-1. **Research the fix / breakdown.** Understand *why* it is too big or blocked —
-   read the code, the specs, the parked branches, the failing checks — then design
-   the smallest set of **independently deliverable, independently mergeable**
-   sub-issues, ordered so each builds only on already-merged ones (foundation /
-   unblocking layers first). Each sub-issue must be sized to go Ready → merged in
-   one iteration on its own. If a foundation piece is *itself* still an epic or
-   still blocked, that is fine: a later iteration picks it up and decomposes it
-   **again** by this same rule (recursive decomposition — the loop never
-   dead-ends).
-2. **Create a GitHub issue per piece** in the **code repo** (not the workspace
-   repo): `gh issue create --repo gaarutyunov/<repo> --title "…" --body "…" --label auto`.
-   Write a self-contained body (goal, scope, acceptance) and reference the parent
-   (`Part of #<PARENT>`). Create the `auto` label first if missing
-   (`gh label create auto -R gaarutyunov/<repo> --color ededed 2>/dev/null || true`).
-3. **Put each sub-issue on the board as this loop's work.** Add it to project #6
-   and set **Status = Ready** (`61e4505c`) and **Loop = auto** (`ee15c5cc`) so the
-   **next iteration picks it up automatically**:
+And when an issue looks blocked:
 
-   ```bash
-   ITEM=$(gh project item-add 6 --owner gaarutyunov --url <issue-url> --format json | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
-   gh project item-edit --project-id PVT_kwHOAjGWgc4Bcice --id "$ITEM" \
-     --field-id PVTSSF_lAHOAjGWgc4BcicezhXKdRQ --single-select-option-id 61e4505c   # Status=Ready
-   gh project item-edit --project-id PVT_kwHOAjGWgc4Bcice --id "$ITEM" \
-     --field-id PVTSSF_lAHOAjGWgc4BcicezhYRXrw --single-select-option-id ee15c5cc   # Loop=auto
-   ```
-4. **Turn the parent into a tracking checklist.** Edit the parent body to add a
-   `## Sub-issues` checklist linking every child (`- [ ] #<n> — <title>`), so the
-   parent reflects progress as children merge.
-5. **Park the parent as a tracker, don't finish it.** Label it `tracker` and set
-   it to **In progress** (`47fc9ee4`):
+- **Re-check the blocker before believing it.** A `blocked` label is a claim
+  someone made earlier, not a fact; the thing it waited on has often merged
+  since.
+- **If the blocker is technical, clear it inside this issue.** Implement the
+  missing piece in the same PR rather than filing it as foundation work for a
+  later tick.
+- **Only a blocker that genuinely needs the owner** — a credential, an access
+  grant, a product decision nobody else can make — goes back to them: post it on
+  the issue with `board-tick.py post`, add `blocked` (or `needs:input`), move the
+  item to **In review**, and pick up the next task. Never park it In progress.
 
-   ```bash
-   .claude/skills/loop-common/scripts/board-tick.py label \
-     --repo <repo> --issue <PARENT> --add tracker
-   ```
-
-   `tracker` is the only loop label that may sit In progress — it says "the work
-   is in the children", so the digest reports the parent as `TRACKER` and later
-   ticks skip it instead of re-picking it. It moves to **Done** only once **all**
-   its sub-issues are merged (verify every checklist box is checked / every child
-   is Done before moving the parent), dropping the label as you do.
-6. **Continue.** Proceed to work the first sub-issue this iteration (steps 2–4
-   below), or let the next tick pick it up. Never leave the parent itself as the
-   task to "implement".
-
-**If a blocker genuinely can't be decomposed** — it needs the owner (a
-credential, an access grant, a product decision only they can make) — then and
-only then hand it back: post the blocker and your recommended option on the issue
-with `board-tick.py post`, add `blocked` (or `needs:input`), move the item to
-**In review**, and go to the next task. Never park it In progress, and never
-leave a bare "blocked" comment with no follow-up work created.
-
-For a normally-sized, unblocked task (fits one iteration), skip all of this and go
-straight to step 2.
+Review comments follow the same rule: **every actionable review comment is
+implemented inside the issue being worked**, never deferred to a follow-up issue,
+unless the owner explicitly asks for it to be split out.
 
 ### 2. Get the code repo ready, open a PR, triage
 
@@ -215,12 +175,10 @@ Rules:
 - **Owner comments still come first.** If the owner commented on the issue or PR,
   address it before merging — an owner comment overrides "just merge on green".
 - **If CI fails, fix it — do not merge.** Push fixes to the same branch and let
-  checks re-run when the fix is small and local. If it can't be made green because
-  the task depends on missing/unmerged foundations or an upstream fix, treat it as
-  **blocked** and hand it back to the step 1a decomposition — research the
-  unblock, file Ready/auto sub-issues for the foundation work, turn this task into
-  a tracker, and move on. **Never merge red, and never leave a blocker as a bare
-  "blocked" comment with no follow-up work created.**
+  checks re-run. If it is red because the task needs something that isn't on
+  `main` yet, **build that something in this PR** — a missing foundation is part
+  of the deliverable, not a reason to file follow-up work. Only escalate to the
+  owner when the fix genuinely requires them (step 1a). **Never merge red.**
 - **Bots never gate the merge.** You *may* fold in already-posted CodeRabbit
   findings opportunistically (via `loop-common`'s **CodeRabbit + review threads**
   section), but do **not** wait for CodeRabbit or for any human review, and do
@@ -242,20 +200,18 @@ Report: task title, merged PR URL, spec PR URL (if any), and what shipped.
 ## Looping
 
 Drive continuously with `/loop` (e.g. `/loop /auto-loop`, or `/loop 15m …`). Each
-iteration starts with the digest and takes one task from Ready all the way to
-**merged + Done** — except an **epic or a blocked task**, which an iteration
-instead **researches and decomposes** into Ready/auto sub-issues and parks as a
-`tracker` (step 1a); the loop then delivers those sub-issues on subsequent ticks
-(decomposing again if any is itself still an epic or blocked) and closes the
-parent once all its children are merged. Unlike `hitl-loop`, there is **no
-spec-approval hard gate**, so a task is never parked waiting on a human review.
+iteration starts with the digest and takes **one task from Ready all the way to
+merged + Done**. That is the only successful shape of a tick. Unlike `hitl-loop`,
+there is **no spec-approval hard gate**, so a task is never parked waiting on a
+human review.
 
-**The only reason to leave a task In progress is that it has become a
-`tracker`.** A blocker is never a dead end: it is researched and broken into
-foundation sub-issues, and only a blocker that genuinely needs the *owner* goes
-to **In review** with `blocked` / `needs:input`. Never leave a blocked task In
-progress, and never ask in the chat. If nothing is actionable for **Loop = auto**,
-idle until the next tick.
+A tick that ends without something merged has not delivered — and filing
+sub-issues is not delivery. Large means "work a long tick", blocked means "clear
+the blocker in this PR"; neither means "split it up" (step 1a). The only task
+that leaves a tick unmerged is one that genuinely needs the *owner*, and it goes
+to **In review** with `blocked` / `needs:input`. Never leave such a task In
+progress, and never ask in the chat. If nothing is actionable for
+**Loop = auto**, idle until the next tick.
 
 ## Related skills
 
