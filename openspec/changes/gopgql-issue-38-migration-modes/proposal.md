@@ -32,17 +32,18 @@ gopgql assumes what it does not see does not exist.
   gopgql never looks at tables at all — it does not diff them, does not drop
   what it cannot see, and does not require the SDL to describe every table in
   the database. The SDL is the projection, not the inventory.
-- **An existing single-directory setup keeps working.** A `--dir` that already
-  holds migrations directly continues to be written to exactly as today, so no
-  existing project is asked to migrate.
+- **Existing projects are migrated, not accommodated.** gopgql is in active
+  development, so there is no compatibility layer and no detection of an old
+  layout: the split simply *is* the layout. The repo's own artefacts move with
+  it — the three examples and the playground demo ship the two halves together
+  today, and are updated to the split as part of this change.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `gopgql-split-migrations`: the two-directory default, turning either half off,
-  the ordering between them, and how an existing combined directory keeps
-  working.
+- `gopgql-split-migrations`: the two-directory layout, turning either half off,
+  and the ordering between them.
 - `gopgql-partial-schema`: the SDL as a description of part of a database —
   what gopgql may and may not conclude from a table's absence.
 
@@ -67,5 +68,8 @@ gopgql assumes what it does not see does not exist.
 - **`test/`**: an integration suite covering the split, the graph-only flow
   against tables gopgql never created, and a database holding tables the SDL
   does not mention.
-- **Backwards compatibility**: a directory that already contains migrations is
-  written to as before. New directories get the split.
+- **`examples/*`**: `code-graph`, `docs-graph` and `slack-graph` each run one
+  `gopgql migrate` producing a combined migration. Each becomes two steps,
+  tables then graph, so the examples demonstrate the layout they document.
+- **`playground`**: shows one combined DDL output; shows both halves after this.
+- **No compatibility layer.** Deliberately — see design D5.

@@ -30,7 +30,8 @@ re-parsing a directory's own migrations, because gopgql keeps no sidecar state
 
 - Split by default, with either half turnable off.
 - Support an SDL that describes only part of a database, as a first-class case.
-- Leave existing single-directory projects alone.
+- Migrate the repo's own examples and demo to the split, rather than carrying a
+  compatibility branch for the old layout.
 - Add as little machinery as possible.
 
 **Non-Goals:**
@@ -104,28 +105,38 @@ applies the directory it is given and the docs and help text state the order. Th
 failure when they are applied out of order is PostgreSQL refusing to create a
 graph over a missing table — loud, immediate, and pointing at the cause.
 
-### D5: An existing directory keeps its current shape
+### D5: No compatibility layer — the split is the layout, and existing artefacts move
 
-A `--dir` that already contains migration files directly is a project that
-predates this change. Writing `tables/` and `graph/` subdirectories into it
-would strand its history: the next `Delta` would fold an empty subdirectory and
-re-emit the entire schema.
+An earlier draft kept writing combined migrations into any `--dir` that already
+contained them, so that no existing project had to change. The owner's call was
+to drop that: gopgql is in active development, there are no external users whose
+applied history has to be preserved, and a permanent detection branch is a
+permanent cost paid for a temporary problem.
 
-So: **if `--dir` already contains migrations, gopgql keeps writing to it
-combined**, exactly as today. The split applies to a directory that is empty or
-already split. This is a single check on directory contents — no marker, no
-config, no flag — and it means no existing project has to do anything.
+So there is **no detection, no compatibility mode and no flag** for the old
+layout. Generation always splits (unless a half is turned off), and the repo's
+own artefacts are migrated as part of this change rather than grandfathered:
 
-- *Rejected — migrating existing directories automatically.* Moving someone's
-  applied migrations into subdirectories rewrites history that goose has already
-  recorded as applied.
+- `examples/code-graph`, `examples/docs-graph`, `examples/slack-graph` each run a
+  single `gopgql migrate … --dir /tmp/migrations` in their compose file, which
+  applies both halves in one step. Each becomes two steps — tables, then graph —
+  so the examples demonstrate the ordering they describe rather than hiding it.
+- The playground presents one combined DDL output; it presents both halves after
+  this.
+
+This is the reason the change is cheap. Had there been applied histories to
+preserve, splitting them would have meant renaming migrations goose has already
+recorded — which is the thing you cannot safely do, and which is exactly why it
+is worth doing now rather than later.
 
 ## Risks / Trade-offs
 
-- **[The default output layout changes]** — a new project gets two directories
-  where it used to get one, and anything that hard-codes `migrations/0001_init.sql`
-  will not find it. Mitigated by D5 for existing projects and called out in the
-  README and SPEC.
+- **[The output layout changes for everyone]** — two directories where there was
+  one, so anything hard-coding `migrations/0001_init.sql` breaks. This is
+  accepted rather than mitigated (D5): gopgql is pre-1.0 and in active
+  development, and the alternative is a detection branch carried forever. The
+  repo's own examples and playground are updated in this change, and the README
+  and SPEC state the new layout.
 - **[Two directories, two goose histories]** — each has its own version table
   scope, so a partial apply can leave tables ahead of the graph. That is
   inherent to wanting them separately releasable, and it is the reason the

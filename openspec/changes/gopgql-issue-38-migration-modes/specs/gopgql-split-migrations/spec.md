@@ -88,27 +88,26 @@ graph, can use gopgql for the other half alone.
 - **WHEN** that migration is applied to a database holding rows
 - **THEN** the graph is gone and every row remains
 
-### Requirement: Existing single-directory projects are unaffected
+### Requirement: The split is the only layout
 
-A target directory that already contains migrations SHALL continue to be written
-to exactly as before this change, so that no existing project is required to
-reorganise its history.
+Generation SHALL always use the split layout, with no detection of, or fallback
+to, the previous combined one.
 
-#### Scenario: An existing combined directory stays combined
-- **WHEN** a schema is generated into a directory that already holds migrations
-  directly
-- **THEN** the new migration is written there in the combined form, and no
-  subdirectory is created
+#### Scenario: A directory holding old combined migrations still splits
+- **WHEN** a schema is generated into a directory that already contains
+  migrations in the previous combined form
+- **THEN** the split layout is used, exactly as for an empty directory — the
+  previous layout is not detected and not preserved
 
-#### Scenario: History is not moved
-- **WHEN** generating into such a directory
-- **THEN** the migrations already there are left where they are, because they
-  have already been applied and recorded under their current names
+#### Scenario: No flag selects the old layout
+- **WHEN** the command-line options are inspected
+- **THEN** there is no option that produces a single combined migration
+  containing both halves
 
-#### Scenario: An empty or already-split directory uses the split
-- **WHEN** the target directory is empty, or already contains the split
-  subdirectories
-- **THEN** the split layout is used
+#### Scenario: Turning a half off is not the old layout
+- **WHEN** one half is turned off
+- **THEN** the remaining half is still written to its own directory, not to the
+  target directory directly
 
 ### Requirement: The ordering between the halves is documented
 
