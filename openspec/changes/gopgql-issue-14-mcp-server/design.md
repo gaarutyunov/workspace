@@ -119,12 +119,24 @@ as a tool error carrying the compiler's message — those messages already name 
 offending field and the ceiling, which is exactly what an agent needs to correct
 itself. A database error is returned with its SQLSTATE. Neither kills the server.
 
-### D6: stdio transport, configured by flag or environment
+### D6: The transport is configurable — stdio by default, HTTP for a container
 
 `gopgql-mcp --sdl schema.graphql --dsn postgres://…`, with `GOPGQL_SDL` and
 `GOPGQL_DSN` as the environment equivalents (DSN preferred there — an agent's MCP
-config is not a good place for a password). stdio is how agents launch MCP
-servers locally; an HTTP transport can be added later without changing the tools.
+config is not a good place for a password).
+
+`--transport` chooses between the two, and the choice is really about who owns
+the process:
+
+- **stdio** (the default) — the client spawns the server and owns it, one
+  process per client, talking over its stdin/stdout. This is how an agent
+  launches a local server.
+- **http** (`--addr`, `--path`) — the server outlives its clients and several
+  connect to it, over the SDK's streamable HTTP transport. This is what a
+  container in a compose stack is, and it is what the examples run. `/healthz`
+  answers a supervisor's readiness probe without opening a session.
+
+The tool surface is identical either way; the transport is the only difference.
 
 ### D7: The test suite drives a real client against a real server
 
