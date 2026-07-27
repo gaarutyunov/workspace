@@ -36,9 +36,10 @@ The relevant state, verified rather than assumed:
 
 - Widening `ga-chat` into a review thread (D3).
 - Widening `ga-slider` into a segmented scrubber (D4).
-- A split-pane container (D6).
-- Fixing `ga-chat-message`'s `role` attribute collision — real, but its own
-  issue (D3).
+- A split-pane *container* (D6) — the divider alone ships, as `ga-splitter`.
+- Any change to `ga-chat`'s or `ga-chat-message`'s behaviour. The only edit
+  there is the `role` → `from` rename (D3); the components keep their
+  vocabulary and their layout.
 
 ## Decisions
 
@@ -124,9 +125,16 @@ both**, on six specific points:
 What genuinely deserves sharing is one level down — a card surface and an
 author+time meta row — and that is `ga-card` plus a few lines of CSS.
 
-*Recorded for its own issue:* `ga-chat-message` using `role` as a component
-attribute is a latent defect regardless of #10. It wants renaming to `from` or
-`speaker`. Not fixed here — it is merged, shipped, and out of this scope.
+**The rename is folded in here rather than raised separately** (owner's call:
+no additional issue). `ga-chat-message`'s `role` becomes **`from`**, keeping the
+`user | assistant | system` vocabulary. The values do not change; only the
+attribute name does.
+
+This is a **breaking change**: v0.3.0 shipped `role`, so anyone pinning it must
+update. It is still worth doing now — the only consumer is the workout restyle,
+and the collision gets worse the longer the vocabulary lives, since `comment`
+and other real ARIA roles make an accidental claim possible the moment anyone
+extends it.
 
 ### D4: The scrubber is custom-drawn, not a widened `ga-slider`
 
@@ -157,7 +165,7 @@ A wizard-style `ga-steps` and this share a vertical rail and little else. Should
 a turn-by-turn list ever be built, it is a degenerate case of this component
 rather than the other way round.
 
-### D6: Decline the split pane; ship a recipe
+### D6: Ship the divider alone as `ga-splitter`, not a split-pane container
 
 The premise is not real — the app has no split pane and nothing resizable. The
 kit's own precedent is against speculative containers: #7's D5a declined a
@@ -170,10 +178,15 @@ What is left is drag-to-resize — pointer capture, clamping, persistence,
 keyboard resizing, RTL — with one consumer and a high cost, which an app can do
 in ~40 lines of CSS grid.
 
-**If the owner wants it anyway**, the minimum viable version is `ga-splitter`:
-*only* the divider, a keyboard-accessible `role="separator"` that writes a CSS
-custom property, leaving the grid to the app. That owns the part apps get wrong
-and matches how `ga-metric` was scoped.
+**So the decision is: build only the divider**, as `ga-splitter` — a
+keyboard-accessible `role="separator"` that writes a CSS custom property,
+leaving the grid to the app. That owns the part apps get wrong and matches how
+`ga-metric` was scoped: the primitive, not the container.
+
+**On the name**, since it was considered and rejected: `ga-divider` reads
+better until you remember that in most kits a divider is a *static* rule — the
+`<hr>` equivalent — and this one is a drag handle. Taking that name would leave
+nothing sensible for the decorative separator the kit will eventually want.
 
 ## Risks / Trade-offs
 
@@ -194,6 +207,6 @@ and matches how `ga-metric` was scoped.
 
 ## Open Questions
 
-- Does `ga-chat-message`'s `role` attribute get renamed in its own issue? It is
-  a latent ARIA collision independent of this work.
-- Split pane: decline entirely, or ship the `ga-splitter` divider?
+- None outstanding. Both questions this spec originally raised were answered by
+  the owner: the `ga-chat-message` rename is folded in here rather than filed
+  separately, and the split pane ships as the `ga-splitter` divider alone.

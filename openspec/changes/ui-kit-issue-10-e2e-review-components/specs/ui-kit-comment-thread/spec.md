@@ -58,15 +58,39 @@ adding one.
 
 ### Requirement: The chat components are not repurposed
 
-The comment thread SHALL be its own component, and the chat components SHALL be
-left as they are.
+The comment thread SHALL be its own component, and the chat components SHALL
+keep their behaviour and their vocabulary.
 
-#### Scenario: Chat is unchanged
+#### Scenario: Chat behaviour is unchanged
 - **WHEN** the chat components are used after this change
-- **THEN** they behave exactly as before, with their speaker vocabulary
-  untouched
+- **THEN** they behave exactly as before — same layout, same speaker
+  vocabulary, same scroll-follow
 
 #### Scenario: The distinction is documented
 - **WHEN** a developer reads either component's page
 - **THEN** it states that a conversation between two parties uses chat, and a
   review thread uses the comment thread, with the reason given
+
+### Requirement: A chat message's speaker is not an ARIA role
+
+The attribute naming a chat message's speaker SHALL NOT collide with the global
+ARIA `role` attribute.
+
+#### Scenario: The speaker is declared under its own name
+- **WHEN** a chat message declares who spoke
+- **THEN** it does so through an attribute of its own, not through `role`
+
+#### Scenario: The host does not claim an ARIA role by accident
+- **WHEN** a chat message is inspected
+- **THEN** its host element does not carry an ARIA `role` it did not intend —
+  which matters because some speaker names are also real ARIA roles
+
+#### Scenario: The vocabulary is unchanged
+- **WHEN** the speaker is set
+- **THEN** the accepted values are the same as before; only the attribute name
+  differs
+
+#### Scenario: The break is documented
+- **WHEN** the release carrying this change is published
+- **THEN** its notes state that the attribute was renamed, name the old and new
+  spelling, and say which released version carried the old one

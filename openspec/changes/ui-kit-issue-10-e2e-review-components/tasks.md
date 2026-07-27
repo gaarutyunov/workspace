@@ -43,20 +43,31 @@ regression here is a regression in `ga-select`, `ga-date-input` and
 - [ ] 6.3 New `src/components/comment-thread/comment-thread.js` — a **list**, not a live log, and **no scroll-follow** (design D3).
 - [ ] 6.4 A composer above the list: target line, submit control, Cmd/Ctrl+Enter, emitting the text and **not** clearing until the host accepts.
 - [ ] 6.5 Empty state that still offers the composer.
-- [ ] 6.6 **`ga-chat` / `ga-chat-message` are not touched.** Confirm they render exactly as before.
+- [ ] 6.6 **Do not repurpose `ga-chat` / `ga-chat-message` into a review thread.** Their only edit in this change is the attribute rename in 7.4; behaviour and layout stay as they are.
 
-## 7. Registration, types, docs
+## 7. `ga-splitter` and the `ga-chat-message` rename
 
-- [ ] 7.1 Import and export the six new components in `src/index.js`; add tags to `index.d.ts`, `global.d.ts`, `react.d.ts` — **including the `Ga*Attrs` interface bodies**, not only the tag-map entries (the omission that shipped from #6).
-- [ ] 7.2 `npm run types`; commit the regenerated declarations. The `tsconfig.check.json` guard added in #7 must stay green.
-- [ ] 7.3 `site/registry.js`: a page per new component. The dialog page documents inertness; the tooltip page documents why it does not supply an accessible name; the comment-thread and chat pages each say when to reach for the other; the scrubber and slider pages likewise.
-- [ ] 7.4 **The split-pane recipe** (design D6) — a docs page section composing `ga-panel side="left"` with `ga-tabs`, rather than a container component.
-- [ ] 7.5 `README.md` component list.
+Both are owner decisions taken after the first draft: build the divider alone,
+and fold the rename in here rather than filing a separate issue.
 
-## 8. Verify and release
+- [ ] 7.1 New `src/components/splitter/splitter.js` — `role="separator"`, `aria-valuenow/min/max`, drag with pointer capture (so leaving the element mid-drag does not drop it), arrows to step, Home/End to the bounds, clamped to `min`/`max`.
+- [ ] 7.2 It writes its position to a CSS custom property and **owns no layout**. No container component, no slots for the regions — the app writes its own grid.
+- [ ] 7.3 Docs page showing it between two app-owned regions, and pointing at `ga-panel side="left"` + `ga-tabs` for the collapse-on-narrow case rather than building it.
+- [ ] 7.4 **`ga-chat-message`: rename `role` → `from`.** Same `user | assistant | system` values; only the attribute name changes. Update `static observed`, the `:host([role=…])` selectors, the JSDoc, `react.d.ts`, the docs page, and every example that sets it.
+- [ ] 7.5 Confirm `ga-chat`/`ga-chat-message` behaviour is otherwise **identical** — layout, alignment, scroll-follow, live region. The rename must not change rendering.
+- [ ] 7.6 **This is breaking**: v0.3.0 shipped `role`. The release notes must name the old and new spelling and say which version carried the old one.
 
-- [ ] 8.1 `npm run build`, `npm run bundle`, `npm run types`; exercise every new component in the docs site including keyboard-only paths.
-- [ ] 8.2 Screen-reader pass (VoiceOver): dialog modality and inertness, tooltip on focus, step-list positions and statuses, scrubber `aria-valuetext`, comment resolution state.
-- [ ] 8.3 Both themes.
-- [ ] 8.4 Confirm the additive claims: `ga-select`, `ga-date-input`, `ga-combobox`, `ga-slider`, `ga-chat` and `ga-panel`'s drawer all render exactly as before — except `ga-panel`'s corrected modality, which is the one intended behaviour change.
-- [ ] 8.5 Cut a release and note the version on ui-kit#10 so e2e-review#7 can pin it.
+## 8. Registration, types, docs
+
+- [ ] 8.1 Import and export the seven new components in `src/index.js`; add tags to `index.d.ts`, `global.d.ts`, `react.d.ts` — **including the `Ga*Attrs` interface bodies**, not only the tag-map entries (the omission that shipped from #6).
+- [ ] 8.2 `npm run types`; commit the regenerated declarations. The `tsconfig.check.json` guard added in #7 must stay green.
+- [ ] 8.3 `site/registry.js`: a page per new component. The dialog page documents inertness; the tooltip page documents why it does not supply an accessible name; the comment-thread and chat pages each say when to reach for the other; the scrubber and slider pages likewise.
+- [ ] 8.4 `README.md` component list.
+
+## 9. Verify and release
+
+- [ ] 9.1 `npm run build`, `npm run bundle`, `npm run types`; exercise every new component in the docs site including keyboard-only paths.
+- [ ] 9.2 Screen-reader pass (VoiceOver): dialog modality and inertness, tooltip on focus, step-list positions and statuses, scrubber `aria-valuetext`, comment resolution state.
+- [ ] 9.3 Both themes.
+- [ ] 9.4 Confirm the additive claims: `ga-select`, `ga-date-input`, `ga-combobox`, `ga-slider` and `ga-chat` all render exactly as before. Two intended exceptions: `ga-panel`'s corrected modality, and `ga-chat-message`'s renamed attribute (rendering unchanged).
+- [ ] 9.5 Cut a release and note the version on ui-kit#10 so e2e-review#7 can pin it. **Minor bump at least** — it carries a breaking rename (7.6).

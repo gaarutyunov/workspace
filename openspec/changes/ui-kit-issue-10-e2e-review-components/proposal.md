@@ -19,8 +19,10 @@ Saying so first, because two of them change what should be built:
   That item is a **feature request for e2e-review**, not a description of what
   is being restyled.
 
-What remains after that correction is four components worth building, one worth
-building for a different reason than the issue gives, and one worth declining.
+What remains after that correction is six components worth building — one of
+them for a different reason than the issue gives, and one of them reduced to the
+single primitive inside it that is actually hard — plus one rename and one bug
+fix in already-merged code.
 
 ## What Changes
 
@@ -46,8 +48,14 @@ building for a different reason than the issue gives, and one worth declining.
   template while only correcting it for overlay mode, so a plain drawer claims
   modality with no focus trap installed. Whatever ships as `ga-dialog` must fix
   this rather than inherit it.
-- **Declined: the split pane.** A documented layout recipe instead, per the
-  kit's own precedent (#7 declined a `ga-metric-row` on the same grounds).
+- **`ga-splitter`** — the draggable divider *only*, not a split-pane container.
+  It writes a CSS custom property and leaves the grid to the app (design D6).
+  Named `splitter` rather than `divider` deliberately: in most kits a "divider"
+  is a static rule, and this one is an interactive resize handle.
+- **`ga-chat-message`'s `role` attribute is renamed to `from`.** It collides
+  with the ARIA `role` global, which is a latent defect independent of this
+  work. Folded in here rather than raised as its own issue, per the owner.
+  **This is a breaking change** — v0.3.0 shipped `role` (design D3).
 
 ## Capabilities
 
@@ -58,7 +66,9 @@ building for a different reason than the issue gives, and one worth declining.
 - `ui-kit-tooltip`: `ga-tooltip` and the `core/popup.js` widenings it needs.
 - `ui-kit-run-timeline`: `ga-step-list` and `ga-scrubber` — the two components
   that display a run.
-- `ui-kit-comment-thread`: `ga-comment` and `ga-comment-thread`.
+- `ui-kit-comment-thread`: `ga-comment` and `ga-comment-thread`, plus the
+  `ga-chat-message` attribute rename that keeps the two families distinct.
+- `ui-kit-split-layout`: `ga-splitter` — the resize handle, not the layout.
 
 ### Modified Capabilities
 
@@ -77,9 +87,9 @@ building for a different reason than the issue gives, and one worth declining.
 - **`src/components/panel/panel.js`**: the `aria-modal` fix only.
 - **Registration, types, docs**: `src/index.js`, `index.d.ts`, `global.d.ts`,
   `react.d.ts`, `site/registry.js`, `README.md`.
-- **Not touched**: `ga-chat` / `ga-chat-message`. Their `role` attribute is a
-  latent defect (it collides with the ARIA global) but fixing it belongs to its
-  own issue, not here — see design D3.
-- **Backwards compatibility**: everything is additive except the `ga-panel`
-  `aria-modal` fix, which corrects a bug rather than changing an intended
-  behaviour.
+- **`src/components/chat-message/chat-message.js`**: `role` → `from`, plus the
+  docs page and any `ga-chat` example that sets it.
+- **Backwards compatibility**: additive except for two deliberate changes — the
+  `ga-panel` `aria-modal` fix (a bug, not an intended behaviour) and the
+  `ga-chat-message` rename, which **breaks anyone pinning v0.3.0** and needs a
+  migration line in the release notes.
