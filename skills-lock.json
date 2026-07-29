@@ -1,11 +1,29 @@
 {
   "version": 1,
   "skills": {
+    "cobra-viper": {
+      "source": "spf13/go-skills",
+      "sourceType": "github",
+      "skillPath": "cobra-viper/SKILL.md",
+      "computedHash": "904d925297ebc6499917bfe10061f8177801364ae7d7ce89071db5036e477e07"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",
       "skillPath": "skills/find-skills/SKILL.md",
       "computedHash": "781bd6d3f9b19f8c9af6b53d8d0e4876d0183841b565db34ca7092ffa412d111"
+    },
+    "go": {
+      "source": "spf13/go-skills",
+      "sourceType": "github",
+      "skillPath": "go/SKILL.md",
+      "computedHash": "e651ec9fdfa9b241f3636e3ad8513e8b9833b684af1d6b3390f34a1531d8fe45"
+    },
+    "go-spec-reviewer": {
+      "source": "spf13/go-skills",
+      "sourceType": "github",
+      "skillPath": "go-spec-reviewer/SKILL.md",
+      "computedHash": "e7f787b4eafbbe3541ea4c654b1666361325b108ec75d15d27ea3e5673fa049f"
     },
     "golang-pro": {
       "source": "jeffallan/claude-skills",

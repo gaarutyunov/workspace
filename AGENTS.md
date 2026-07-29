@@ -35,9 +35,38 @@ Install skills into this repo, never globally.
 - `skills-lock.json` tracks installed skills.
 - If a skill installs as a real directory under `.claude/skills/`, migrate it: move it to `.agents/skills/<name>/` and replace the original with a symlink.
 
+### Which skill for which work
+
+Skills are only useful if the agent doing the work knows to reach for them.
+
 **Go projects** follow the `go-project-scaffold` skill — the house standard for
 scaffolding a Go service *and* for reviewing or refactoring an existing one:
 code generation over hand-rolling, OpenTelemetry semantic conventions, cobra,
 koanf (never Viper), wire, and the TDD loop with testcontainers. It is derived
 from the worked reference in `gaarutyunov/skill-test` PR #2, which is the
 tie-breaker when the skill and reality disagree.
+
+Underneath that house standard sit the general-purpose Go skills from
+[spf13/go-skills](https://github.com/spf13/go-skills), by the author of Cobra,
+Viper and Hugo:
+
+- **`go`** — idiomatic Go: package design, error handling, interfaces,
+  concurrency, testing, project layout. Use it for *any* Go work in
+  `projects/`, not only new code.
+- **`cobra-viper`** — CLI architecture. Take the **Cobra** half as written.
+  **Do not use Viper: configuration here is [koanf](https://github.com/knadh/koanf).**
+  The skill is left exactly as upstream published it, and the exception —
+  with the translation from each Viper call to its koanf equivalent — lives in
+  [`.claude/rules/go-cli-koanf.md`](./.claude/rules/go-cli-koanf.md), because an
+  edit inside a vendored skill is lost the next time it is reinstalled.
+- **`go-spec-reviewer`** — reviews a design doc, spec or RFC for a Go program
+  *before* implementation. **Run it on the spec of any Go change** — in this
+  repo that means an OpenSpec change under `openspec/changes/` whose target is a
+  Go project, before the spec PR is opened for approval. It is the step that
+  catches over-engineering while the cost of changing course is still a
+  paragraph rather than a branch.
+
+The Go rules in `.claude/rules/` are path-scoped and apply on top of all of
+these: `go-test-assertions.md` (testify, not hand-rolled comparisons),
+`go-test-mocks.md` (generated gomock, never hand-rolled doubles), and
+`go-cli-koanf.md` (Cobra yes, Viper no).
