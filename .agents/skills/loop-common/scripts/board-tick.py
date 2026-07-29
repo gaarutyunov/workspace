@@ -286,6 +286,9 @@ class Item:
     pr_deletions: int = 0
     pr_commits: int = 0
     # Local state — work that exists on this machine but not on GitHub.
+    # `local_checked` False means the local check could not run for this task, so
+    # LOCAL is unknown rather than clean. Absence must never read as reassurance.
+    local_checked: bool = False
     worktree: str | None = None
     wt_dirty: int = 0  # uncommitted files
     wt_unpushed: int = 0  # commits ahead of the remote branch
@@ -443,10 +446,33 @@ def fetch_board(statuses: tuple[str, ...]) -> list[Item]:
 
 
 def workspace_root() -> "Path":
+    """The **main** worktree's root — the only place `projects/` really lives.
+
+    Deliberately not derived from `__file__`. Run from a git worktree (this repo
+    gives every task its own under `.worktrees/<branch>/`), the script's own path
+    yields that *worktree's* root — and because `projects/.gitignore` is tracked,
+    git materialises an otherwise-empty `projects/` there. So the old
+    `parents[4]` found a real directory containing no clones, every `LOCAL` cell
+    read `-` ("no worktree on this machine"), and the `UNPUSHED` signal — the one
+    guard against losing work outright — was silently disabled.
+
+    `--git-common-dir` resolves to the shared `.git` from any worktree, so its
+    parent is the main checkout.
+    """
     from pathlib import Path
 
-    # <root>/.agents/skills/loop-common/scripts/board-tick.py — resolve() so the
-    # .claude/skills symlink lands on the real path.
+    here = Path(__file__).resolve().parent
+    for args in (
+        ("rev-parse", "--path-format=absolute", "--git-common-dir"),  # git ≥ 2.31
+        ("rev-parse", "--git-common-dir"),  # older git: may be relative
+    ):
+        out = git(here, *args)
+        if out:
+            common = Path(out)
+            if not common.is_absolute():
+                common = (here / common).resolve()
+            return common.parent
+    # Not a git checkout at all: <root>/.agents/skills/loop-common/scripts/…
     return Path(__file__).resolve().parents[4]
 
 
@@ -458,8 +484,17 @@ def git(cwd, *args: str) -> str | None:
 
 
 def inspect_worktree(item: Item, projects_dir) -> None:
-    """Look for uncommitted / unpushed work in the task's local checkout."""
+    """Look for uncommitted / unpushed work in the task's local checkout.
+
+    Sets `local_checked` only when this task's clone is actually present. Without
+    the clone there is nothing to look at, and the answer is "unknown" — never
+    "clean". `-` in the LOCAL column has to keep meaning "I looked".
+    """
     from pathlib import Path
+
+    if not (Path(projects_dir) / item.repo).is_dir():
+        return  # local_checked stays False → LOCAL renders `?`, not `-`
+    item.local_checked = True
 
     branch = f"issue-{item.number}"
     candidates = [Path(projects_dir) / item.repo / ".worktrees" / branch]
@@ -1048,9 +1083,12 @@ def drop_acked(item: Item) -> None:
 
 def diagnose_empty(item: Item) -> str:
     """Explain an empty PR: a stopped run, an exhausted one, or a lost worktree."""
+    unknown = " (the local check did not run — verify before restarting)"
     if not item.pr_number:
         if item.worktree:
             return f"no PR exists, but a worktree does ({item.worktree}) — resume there"
+        if not item.local_checked:
+            return "no PR, and the local state is unknown" + unknown
         return "no PR and no local worktree — the task was claimed but never begun"
     if item.pr_commits <= 1:
         base = (
@@ -1061,6 +1099,8 @@ def diagnose_empty(item: Item) -> str:
         base = f"PR #{item.pr_number} has {item.pr_commits} commits but no file changes; "
     if item.worktree:
         return base + f"and its worktree ({item.worktree}) is clean — restart the work"
+    if not item.local_checked:
+        return base + "and the local state is unknown" + unknown
     return base + "and no local worktree survives — restart the work from scratch"
 
 
@@ -1274,8 +1314,40 @@ def work_cell(item: Item) -> str:
     return "EMPTY"
 
 
+def local_check_notice(items: list[Item], projects, no_local: bool) -> str | None:
+    """A run-level ⚠ when the local check saw nothing at all.
+
+    Per-row `?` covers a single missing clone. This covers the systemic case —
+    typically the digest being run from a git worktree, where `projects/` exists
+    (its `.gitignore` is tracked) but holds no clones. Every row then reads `?`,
+    and the `UNPUSHED` signal cannot fire for any task, so the run has to say so
+    rather than let a wall of `?` pass for a quiet board.
+    """
+    if not items or any(i.local_checked for i in items):
+        return None
+    if no_local:
+        return (
+            "LOCAL not checked (--no-local): UNPUSHED cannot fire, so stranded "
+            "uncommitted or unpushed work will NOT be reported by this run."
+        )
+    return (
+        f"LOCAL not checked for ANY task: no task clones under {projects} — "
+        "UNPUSHED cannot fire, so work stranded in a task worktree will NOT be "
+        "reported. This is what running the digest from a git worktree looks "
+        "like (its `projects/` is materialised but empty). Re-run from the main "
+        "checkout, or pass --projects-dir <path> to the directory holding the "
+        "task clones."
+    )
+
+
 def local_cell(item: Item) -> str:
-    """Work sitting in the local worktree that GitHub has never seen."""
+    """Work sitting in the local worktree that GitHub has never seen.
+
+    `?` = not checked (no clone here, or --no-local). `-` = checked, no worktree.
+    The distinction is the whole point: `-` must not double as "didn't look".
+    """
+    if not item.local_checked:
+        return "?"
     if not item.worktree:
         return "-"
     bits = []
@@ -1464,6 +1536,9 @@ def render_json(items: list[Item]) -> str:
                 "oldest_pending_human": it.oldest_pending_human or None,
                 "work_started": it.work_started,
                 "pushed_work": it.pushed_work,
+                # `local_checked` false means `local` is unknown, not empty — a
+                # consumer must not read a null `local` as "nothing stranded".
+                "local_checked": it.local_checked,
                 "local": (
                     {
                         "worktree": it.worktree,
@@ -1602,6 +1677,7 @@ def cmd_tick(args: argparse.Namespace) -> int:
             inspect_worktree(it, projects)
         drop_acked(it)
         compute_signal(it)
+    local_notice = local_check_notice(items, projects, args.no_local)
     # Most urgent signal first; within a signal, the longest-neglected first.
     items.sort(
         key=lambda i: (
@@ -1612,11 +1688,18 @@ def cmd_tick(args: argparse.Namespace) -> int:
     )
 
     if args.json:
+        # On stderr, so stdout stays a plain array for any existing consumer.
+        # Machine callers should read each row's `local_checked` instead.
+        if local_notice:
+            print(f"⚠ {local_notice}", file=sys.stderr)
         print(render_json(items))
         return 0
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    print(f"Board tick · {stamp} · {len(items)} active item(s)\n")
+    print(f"Board tick · {stamp} · {len(items)} active item(s)")
+    if local_notice:
+        print(f"\n⚠ {local_notice}")
+    print()
     print(render_table(items))
     details = render_details(items, args.include_bots, args.body_limit)
     if details.strip():

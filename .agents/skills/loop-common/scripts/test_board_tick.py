@@ -571,6 +571,107 @@ class RateLimitGuard(unittest.TestCase):
             bt.gh_graphql("query {x}", tolerant=True)
 
 
+class LocalCheck(unittest.TestCase):
+    """`LOCAL -` must mean "I looked", never "I could not look".
+
+    LOCAL is what produces `UNPUSHED`, the only signal guarding against work lost
+    outright — so a silently-skipped local check is the most expensive false
+    reassurance the digest can give.
+    """
+
+    def _projects(self, *repos):
+        """A projects dir like a worktree's: real, but holding only .gitignore."""
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        (root / ".gitignore").write_text("*\n")
+        for repo in repos:
+            (root / repo).mkdir()
+        return root
+
+    def test_missing_clone_is_unknown_not_clean(self):
+        item = _item(repo="goga")
+        bt.inspect_worktree(item, self._projects())  # dir exists, no clones
+        self.assertFalse(item.local_checked)
+        self.assertEqual(bt.local_cell(item), "?")
+
+    def test_present_clone_with_no_worktree_is_clean(self):
+        item = _item(repo="goga")
+        bt.inspect_worktree(item, self._projects("goga"))
+        self.assertTrue(item.local_checked)
+        self.assertEqual(bt.local_cell(item), "-")
+
+    def test_run_level_warning_when_nothing_could_be_checked(self):
+        projects = self._projects()
+        items = [_item(repo="goga"), _item(repo="epos")]
+        for it in items:
+            bt.inspect_worktree(it, projects)
+        notice = bt.local_check_notice(items, projects, no_local=False)
+        self.assertIsNotNone(notice)
+        self.assertIn("ANY task", notice)
+        self.assertIn("UNPUSHED cannot fire", notice)
+        self.assertIn("git worktree", notice)
+        self.assertIn(str(projects), notice)
+
+    def test_no_run_level_warning_when_some_clone_was_found(self):
+        projects = self._projects("goga")
+        items = [_item(repo="goga"), _item(repo="epos")]
+        for it in items:
+            bt.inspect_worktree(it, projects)
+        self.assertIsNone(bt.local_check_notice(items, projects, no_local=False))
+        # …but the unchecked row still says so for itself.
+        self.assertEqual(bt.local_cell(items[1]), "?")
+
+    def test_no_local_flag_is_also_unknown(self):
+        items = [_item(repo="goga")]
+        notice = bt.local_check_notice(items, "/anywhere", no_local=True)
+        self.assertIn("--no-local", notice)
+        self.assertIn("will NOT be reported", notice)
+        self.assertEqual(bt.local_cell(items[0]), "?")
+
+    def test_diagnose_empty_does_not_claim_a_missing_worktree(self):
+        unchecked = _item(status="In progress")
+        self.assertIn("local state is unknown", bt.diagnose_empty(unchecked))
+
+        checked = _item(status="In progress")
+        checked.local_checked = True
+        self.assertIn("no local worktree", bt.diagnose_empty(checked))
+
+    def test_workspace_root_resolves_the_main_worktree(self):
+        """The actual bug: from a linked worktree, projects/ lives in the main one."""
+        import subprocess
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        main = root / "main"
+        run = lambda *a, **k: subprocess.run(a, cwd=k.get("cwd", main),
+                                             capture_output=True, check=True)
+        main.mkdir()
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@t.t")
+        run("git", "config", "user.name", "t")
+        (main / "projects").mkdir()
+        # Exactly as the repo has it: everything ignored except the file itself,
+        # which is why git recreates the (empty) directory in every worktree.
+        (main / "projects" / ".gitignore").write_text("*\n!.gitignore\n")
+        (main / "projects" / "somerepo").mkdir()
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = root / "wt"
+        run("git", "worktree", "add", "-q", "-b", "task", str(wt))
+
+        # git materialises projects/ in the worktree from the tracked .gitignore,
+        # but with no clones — the trap an is_dir() check would walk straight into.
+        self.assertTrue((wt / "projects").is_dir())
+        self.assertEqual([p.name for p in (wt / "projects").iterdir() if p.is_dir()], [])
+
+        # The real resolution: --git-common-dir from the worktree → main root.
+        common = bt.git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        self.assertEqual(Path(common).parent.resolve(), main.resolve())
+
+
 class AckBuckets(unittest.TestCase):
     def test_pending_is_a_ledger_bucket(self):
         item = _item()

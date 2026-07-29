@@ -132,7 +132,9 @@ NOT-STARTED  boids#7        In progress  hitl  -       4d   -     -    -    -   
   **`EMPTY`** for a PR holding nothing but the starter commit.
 - **`LOCAL`** — work in the task's worktree that GitHub has never seen:
   `2c+3f` = 2 unpushed commits + 3 uncommitted files. `clean` = worktree exists
-  and is in sync; `-` = no worktree on this machine.
+  and is in sync; `-` = looked, no worktree for this task; **`?` = could not
+  look** (the repo isn't cloned here, or `--no-local`). `?` is not `-`: it means
+  `UNPUSHED` cannot fire for that row, so nothing rules out stranded work.
 - **`SPEC`** — the task's spec PR and its state.
 
 Work the table top-down; the signals, in the order the digest sorts them (ties
@@ -232,6 +234,7 @@ you're in:
 | `EMPTY` | `2c+3f` | the run was stopped / ran out of context **after** editing | **push the work** — review the diff, commit, push |
 | `EMPTY` | `clean` | interrupted before any edit landed | restart the work |
 | `EMPTY` | `-` | no worktree on this machine either | restart from the issue + spec |
+| `EMPTY` | `?` | **the local check could not run** — nothing is ruled out | resolve `?` first (below), then re-read |
 | `8f` | `2c+3f` | pushed work **plus** newer local edits | push the remainder before anything else |
 
 Anything with local-only work is signalled **`UNPUSHED`** and ranks above CI
@@ -241,6 +244,17 @@ lost. The `⚠` warning names the worktree path and the exact counts.
 The check is local and free (no API calls). Skip it with `--no-local`, or point
 it elsewhere with `--projects-dir <path>` — useful when a tick runs on a
 different machine from the one that did the work, where `LOCAL` is meaningless.
+
+> **Run the digest from the main checkout, not from a task worktree.** The
+> projects directory is resolved from the repository's *main* worktree
+> (`git rev-parse --git-common-dir`), so either location now works — but the
+> trap is worth knowing, because it used to fail silently and dangerously.
+> `projects/.gitignore` is tracked, so **git recreates an empty `projects/` in
+> every worktree**; a directory-exists check walks straight past it. The digest
+> therefore decides per row, on whether `projects/<repo>` is actually there, and
+> reports `?` rather than `-` when it isn't. If *no* task clone is found at all,
+> the run prints a `⚠` above the table saying `UNPUSHED` cannot fire for any
+> task — because a wall of `?` must not pass for a quiet board.
 
 ### The spec PR is fetched too
 
