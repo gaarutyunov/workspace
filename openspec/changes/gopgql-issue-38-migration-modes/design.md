@@ -247,11 +247,12 @@ nothing recorded and nothing to drift: the evidence is the SQL in the directory,
 folded the same way generation folds it anyway.
 
 - *Rejected — `--no-graph` suppresses only the `_graph` build and still emits the
-  `_graph_down` teardown.* It makes a flag silently destroy a property graph. This
-  change ruled that out in an earlier round and the principle survives the
-  amendment: dropping the graph is never an implicit consequence of changing what
-  a directory manages, because that is far more likely to be a mistake than a
-  request.
+  `_graph_down` teardown.* It makes a flag silently destroy a property graph. The
+  principle is this change's own, stated in the spec-approval comment on
+  gaarutyunov/gopgql#38 of 2026-07-26 and not objected to — never ratified as an
+  owner ruling, and it survives the amendment on its merits: dropping the graph is
+  never an implicit consequence of changing what a directory manages, because that
+  is far more likely to be a mistake than a request.
 - *Rejected — emit the tables file and let the apply fail.* It trades a gopgql
   error at generate time, before anything is written, for a PostgreSQL error at
   apply time against a live database. Strictly worse, and it leaves a migration on
