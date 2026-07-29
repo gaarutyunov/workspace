@@ -7,7 +7,8 @@ lifecycle and reset strategy are decided once, not per project.
 
 #### Scenario: A dependency is available to a test
 - **WHEN** a test asks for a database
-- **THEN** it receives a running one with its connection details
+- **THEN** it receives the framework's own portable database handle, ready to use,
+  so tests exercise the same instrumented path production does
 
 #### Scenario: State is reset between tests
 - **WHEN** one test has written data and another begins
@@ -22,9 +23,40 @@ lifecycle and reset strategy are decided once, not per project.
 - **WHEN** schema and seed data are both supplied
 - **THEN** the schema is applied first, regardless of file naming
 
+#### Scenario: Schema comes from the project's own migrations
+- **WHEN** a test fixture needs a schema
+- **THEN** it is produced by running the project's migrations through the
+  framework's migration module, so tests and production share one schema path
+
+#### Scenario: Cleanup does not accumulate across a long run
+- **WHEN** many suites run in sequence in one job
+- **THEN** containers are released as their own lifetime ends rather than being
+  held until the whole run finishes — one existing project rejected the
+  library's own cleanup helper for exactly this reason
+
 #### Scenario: The underlying container is reachable
 - **WHEN** a test needs something the fixture does not model
 - **THEN** the container handle is available
+
+### Requirement: Framework surfaces are testable without infrastructure
+
+The test module SHALL provide harnesses for the framework's own surfaces, so a
+project does not build its own.
+
+#### Scenario: A protocol server is testable in-process
+- **WHEN** a test exercises a framework protocol server
+- **THEN** it obtains a connected client over an in-memory transport, with no
+  subprocess and no port
+
+#### Scenario: Emitted telemetry is assertable
+- **WHEN** a test needs to verify that an operation was instrumented
+- **THEN** the harness records the emitted telemetry and lets the test assert on
+  it, so the telemetry invariant is tested rather than trusted
+
+#### Scenario: Test doubles are generated, not hand-written
+- **WHEN** a unit test needs a test double for an interface
+- **THEN** it uses a generated mock, kept current by the project's generation
+  check, rather than a hand-rolled fake
 
 ### Requirement: One behavioural-test harness
 

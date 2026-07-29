@@ -14,6 +14,12 @@ an order the caller can read from the call itself, not infer.
 - **WHEN** the same key is supplied by more than one source
 - **THEN** the later source in the stated order takes effect
 
+#### Scenario: The order does not depend on how the sources were declared
+- **WHEN** a caller declares the sources in a different order from the house one
+- **THEN** the house precedence still applies, because an existing project's flag
+  handling inverts its own apparent precedence today and an order-sensitive API
+  would preserve that hazard
+
 #### Scenario: A missing file is not fatal by default
 - **WHEN** no configuration file is present
 - **THEN** loading succeeds using the remaining sources, unless the caller
@@ -21,8 +27,18 @@ an order the caller can read from the call itself, not infer.
 
 #### Scenario: Environment key mapping is documented
 - **WHEN** an environment variable maps to a nested key
-- **THEN** the separator convention is documented at the call site, because two
-  existing projects chose incompatible conventions
+- **THEN** the separator convention is documented at the call site, because three
+  existing projects chose three incompatible conventions
+
+#### Scenario: Configuration can be reloaded
+- **WHEN** a caller asks to be notified of changes to the configuration file
+- **THEN** it is notified, because one existing project reloads today and would
+  otherwise keep its own watcher
+
+#### Scenario: Loading is observable
+- **WHEN** configuration is loaded
+- **THEN** the load is recorded together with which sources contributed, so a
+  surprising value can be traced to its source
 
 ### Requirement: Both a typed value and the raw handle are returned
 

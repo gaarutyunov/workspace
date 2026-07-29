@@ -39,6 +39,43 @@ CI SHALL detect generated output that has drifted from its source.
 - **WHEN** a project declares multiple generators
 - **THEN** the check covers all of them, not only the first
 
+#### Scenario: It is the enforcement point for the house conventions that generate code
+- **WHEN** dependency-injection wiring, query code, protocol stubs, server
+  interfaces, mocks or telemetry attribute constants are expected to be generated
+- **THEN** this one check is what makes each of them required, so none of them
+  needs its own remembered step or its own review discipline
+
+### Requirement: The house conventions are checked by a linter, not by review
+
+The shared lint action SHALL run the framework's own rules alongside the standard
+ones, so a convention the type system cannot express is still caught before merge.
+
+#### Scenario: Framework rules run in every project
+- **WHEN** a project runs the shared lint action
+- **THEN** the framework's own rules run as part of it, without the project
+  configuring them
+
+#### Scenario: Bypassing a framework surface is reported
+- **WHEN** code reaches a wrapped library directly instead of through the
+  framework's surface for it
+- **THEN** the linter reports the import
+
+#### Scenario: A banned tool is refused by import path
+- **WHEN** code imports a tool the house has ruled against, or an unmaintained
+  variant of one it has ruled for
+- **THEN** the linter refuses that import path — and does so by path rather than
+  by module, since a banned library can legitimately appear as an indirect
+  dependency of a permitted tool
+
+#### Scenario: The framework's own conventions are checked against itself
+- **WHEN** the framework's own repository is linted
+- **THEN** the same rules apply to it, including its layout convention
+
+#### Scenario: One lint version, one invocation
+- **WHEN** several projects lint
+- **THEN** they run the same linter version through the same action, rather than
+  each pinning and invoking it their own way
+
 ### Requirement: Integration tests report their artefacts even on failure
 
 An integration run SHALL publish its results whether it passed or failed, because

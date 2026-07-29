@@ -6,8 +6,9 @@ There SHALL be a single skill for goga, and it SHALL NOT re-teach the wrapped
 tools.
 
 #### Scenario: It routes to an entry point
-- **WHEN** an agent needs configuration, telemetry, a server, a client or a test
-  fixture
+- **WHEN** an agent needs configuration, telemetry, a server, a client, a router,
+  a database, migrations, an MCP server, gRPC, components, dependency injection
+  or a test fixture
 - **THEN** the skill names the goga entry point to use
 
 #### Scenario: It does not re-document the underlying tools
@@ -15,13 +16,43 @@ tools.
 - **THEN** it does not explain how to use the wrapped libraries directly, because
   that is the library's job and duplicating it is how the guidance drifts
 
-#### Scenario: It states what goga does not do
-- **WHEN** an agent needs something goga does not cover
-- **THEN** the skill says so plainly and names the escape hatch
+#### Scenario: Its structure is fixed, not its prose
+- **WHEN** the skill is written
+- **THEN** its section structure and routing table are the parts this change
+  fixes, because the issue asks for the skill as a pseudo-structure rather than
+  as finished text
 
-#### Scenario: It states what goga does not enforce
-- **WHEN** a convention is not enforced by the API
-- **THEN** the skill says which conventions still rest on the reader
+#### Scenario: Escape hatches are named
+- **WHEN** an agent needs something a wrapper does not model
+- **THEN** the skill names that module's accessor for the underlying object,
+  because an escape hatch is a supported route and not a gap
+
+### Requirement: Every house convention is enforced by goga
+
+The skill SHALL carry an enforcement matrix pairing each house convention with
+the mechanism that enforces it, and there SHALL NOT be a set of conventions left
+to the reader's discipline.
+
+#### Scenario: Each convention names its mechanism
+- **WHEN** a house convention appears in the guidance
+- **THEN** it is paired with the mechanism that enforces it — an API shape that
+  makes the alternative uncompilable, a lint rule, or a required CI check
+
+#### Scenario: There is no list of unenforced conventions
+- **WHEN** the skill is read looking for conventions that rest on the reader
+- **THEN** it has none to offer, because a convention without a mechanism is
+  recorded as a defect against goga rather than published as a caveat
+
+#### Scenario: A convention that cannot yet be enforced is tracked as a defect
+- **WHEN** a house convention is identified with no available mechanism
+- **THEN** it is raised as work on goga, and not documented as the reader's
+  responsibility
+
+#### Scenario: The mechanism's strength is stated honestly
+- **WHEN** a convention is enforced by a lint rule or a CI check rather than by
+  the type system
+- **THEN** the matrix says so, so nobody mistakes a red build for an
+  impossibility
 
 ### Requirement: Guidance does not contradict itself
 
