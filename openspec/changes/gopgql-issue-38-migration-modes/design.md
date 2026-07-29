@@ -82,7 +82,8 @@ that runs against a live graph depending on the columns it alters. The owner's
 call was to generalise the fix symmetrically rather than special-case it — a flag
 may not change which halves a directory owns, in either direction (D4a) — and, on
 the second question drafting raised, that a generation carries one slug shared by
-all of its files (D2). Both are settled decisions below, not open questions.
+all of its files (D2). Both are settled below, as decisions — nothing about either
+is left for implementation to choose.
 
 ## Goals / Non-Goals
 
