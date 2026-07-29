@@ -63,6 +63,24 @@ must decide.
 - **WHEN** an agent reads the available Go guidance on package layout
 - **THEN** it finds one position, not two mutually exclusive ones
 
+#### Scenario: Guidance already in force is repaired, not merely flagged
+- **WHEN** two pieces of guidance that are both already published disagree
+- **THEN** one of them is amended, because a disagreement between published
+  documents is a defect in force rather than a risk to be noted
+
+#### Scenario: Guidance does not prescribe a structure the framework contradicts
+- **WHEN** guidance describes how to organise adapters and the interfaces they
+  satisfy
+- **THEN** it matches the structure the framework itself ships, so a project
+  adopting the framework is not told to arrange its own adapters differently from
+  the ones it imports
+
+#### Scenario: A decision the framework leaves open is named as the owner's
+- **WHEN** a structural question the framework deliberately does not decide is
+  reached
+- **THEN** the guidance says whose decision it is and where it will be enforced,
+  rather than answering it twice in two documents
+
 #### Scenario: A superseded document says so
 - **WHEN** guidance is replaced by the library or by another document
 - **THEN** the superseded material states what replaced it rather than remaining

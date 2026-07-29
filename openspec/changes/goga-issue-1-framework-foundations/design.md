@@ -148,8 +148,10 @@ widest sample in the house):
 
 Four positions on layout are live simultaneously: hexagonal (skill-test, the one
 project built under a mandatory `AGENTS.md`), flat (three of five repos), the
-spf13 `go` skill's explicit rejection of layered packages, and the issue's own
-"no `pkg`, no `internal`" for goga itself.
+spf13 `go` skill's rejection of `internal/` as a default home, and the issue's own
+"no `pkg`, no `internal`" for goga itself. Two of those four are merged workspace
+guidance that contradict each other today — see D13, which also says how much of
+the disagreement the widened scope settles and what is left for the owner.
 
 Layout is the most per-project axis in the survey, and `go-project-scaffold`
 already declines to decide it on the owner's behalf. Baking one into the library
@@ -505,17 +507,76 @@ The issue also asks for the skill as *"some pseudo structure kind of like
 pseudocode for skills"*, so the spec fixes the skill's section structure and
 routing table, not its prose.
 
-**Correction to the previous revision, which is now stale.** It said the spf13
-`go` skill was *"sitting in the unmerged PR #31"* and that the contradiction
-*"should be resolved before #31 merges"*. **PR #31 merged.** The skill is on
-`main` at `.agents/skills/go/SKILL.md`, and says (line 120) *"Anti-pattern to
-reject: Clean Architecture / DDD layers (`service/`, `repository/`,
-`controller/`, `domain/`)"* and (line 92) *"no `internal/` nesting, no Clean
-Architecture layers"*, while `go-project-scaffold` and `skill-test`'s `AGENTS.md`
-prescribe `internal/domain`, `internal/port`, `internal/usecase`,
-`internal/adapter`. So the contradiction is not pending — it is **in force**, and
-a model reading both picks one arbitrarily today. Resolving it is a workspace
-task, tracked in `tasks.md`, and D1 keeps goga out of the argument.
+#### The layout contradiction is live in merged guidance
+
+**Present state, verified 2026-07-30.** `.agents/skills/go/SKILL.md` and
+`.agents/skills/go-project-scaffold/SKILL.md` are **both on `main`** — the spf13
+skill landed in `37bd574` (workspace#31). This is no longer a merge to get ahead
+of; it is a defect in guidance that is already in force, and every model reading
+both today picks a side arbitrarily. Two earlier revisions of this design
+described #31 as unmerged and asked for the question to be settled *before* it
+merged; that framing is withdrawn.
+
+**The contradiction, stated precisely** — and it is *not* the one the earlier
+revisions named. `go-project-scaffold` does **not** prescribe hexagonal layers;
+it explicitly declines to (*"Hexagonal … is valuable but optional"*, *"Do not
+decide this on the owner's behalf"*, defaulting to flat `internal/<feature>`), so
+on layers the two skills agree. What they contradict each other about is
+**`internal/` as the default home**:
+
+- `go-project-scaffold` prescribes `internal/app`, `internal/config`,
+  `internal/server`, `internal/<feature>`, plus `pkg/` for importable code.
+- the spf13 `go` skill calls *"relying heavily on an `internal/` folder by
+  default"* an **anti-pattern** (line 65), says *"For Applications: … Using
+  `internal/` here is usually just adding unnecessary path depth"* (line 75), and
+  prescribes top-level domain packages *"one level deep — no `internal/`
+  nesting"* (line 92).
+
+Both apply to the same artefact — a Go service — and are opposed on the default.
+That is the live defect.
+
+Two adjacent findings, recorded because they change who fixes what:
+
+- **`skill-test`'s `AGENTS.md` contradicts itself.** Line 64 asks for *"small,
+  composable interfaces defined at the consumer (port) side"*, while line 70
+  prescribes a single centralised `internal/port` package — which is the opposite
+  of consumer-side. This one is skill-test's to fix, not the workspace's.
+- **`go-project-scaffold` already names the enforcement point:** *"This will
+  eventually be enforced by `sysgo` rather than by judgement; until then, ask on
+  the issue rather than guessing."* It also already pins
+  `github.com/goforj/wire`, which independently corroborates D9.
+
+#### What the widened scope does and does not settle
+
+The owner's widening resolves part of this, and the part it resolves is worth
+saying out loud rather than leaving implicit:
+
+1. **Adapter organisation is settled, against layer-named directories.** D7
+   commits goga to `gocloud.dev`'s shape: the driver interface lives *adjacent to
+   the portable type it serves* (`goga/database` + `goga/database/driver`), and
+   each adapter is its own leaf package named for its technology
+   (`goga/database/pgxdb`, `goga/serve/ginrouter`). Repeated across six
+   adapter-bearing modules by D8, that is a decided position: **ports sit next to
+   what they serve, adapters are technology-named leaves, and there is no `port/`
+   or `adapter/` layer directory.** A project adopting goga inherits that shape
+   for everything it registers into a goga registry, which is a direct answer to
+   the sub-question `internal/port` / `internal/adapter` was trying to answer —
+   and it happens to land on the spf13 skill's side, by concern rather than by
+   layer.
+2. **The enforcement point is settled.** `go-project-scaffold` says layout will
+   eventually be enforced by sysgo; D3 makes sysgo the only Go-code generator and
+   retargets it to emit `goga.*`. So the layout decision belongs in **sysgo's
+   templates** — not in goga (D1), and not in a skill, since a skill is exactly
+   the mechanism D5 says fails on reach.
+3. **What remains genuinely open is the default home for a project's own
+   non-adapter code**: flat top-level domain packages, or `internal/`, or `pkg/`.
+   Nothing in the widened scope touches it. goga ships no directory structure
+   (D1) and its own tree is flat because the *issue* says so — which is a
+   statement about a library, not about a service, and must not be mistaken for
+   the house answer for services.
+
+So: partial resolution, and the remainder is the owner's. It is framed in
+`tasks.md` as a fix to merged guidance rather than as a merge to pre-empt.
 
 ### D14: variadic functional options everywhere; no parameter structs
 
@@ -1631,8 +1692,19 @@ Still open:
   a consumer exists? The design is unaffected either way; only the task
   sequencing is. Recommendation: build the interface and `local` in v1, and the
   `weaver` deployer with its first consumer.
-- **The guidance contradiction is now on `main`** (D13), not pending in PR #31 as
-  previously stated. Someone has to pick a position between the spf13 `go`
-  skill's "no `internal/` nesting, no Clean Architecture layers" and
-  `go-project-scaffold`'s `internal/domain` / `internal/port`. goga stays out of
-  it (D1), but the workspace cannot.
+- **The default home for a service's own non-adapter code** — the surviving half
+  of the layout contradiction (D13), now live in merged guidance on `main` rather
+  than pending in workspace#31. The widened scope settles adapter organisation
+  (ports adjacent to what they serve, technology-named adapter leaves, no layer
+  directories) and settles that sysgo's templates are the enforcement point. It
+  does **not** settle whether a service's domain and use-case code sits in
+  top-level packages, under `internal/`, or under `pkg/` — `go-project-scaffold`
+  prescribes `internal/` plus `pkg/`, the spf13 `go` skill calls `internal/`-by-
+  default an anti-pattern, and both are in force. goga cannot decide it (D1); the
+  owner has to, and then sysgo enforces it. **Recommendation:** adopt the spf13
+  position for services — top-level, concern-named, one level deep — because it is
+  the side the framework's own adapter shape already lands on, and amend
+  `go-project-scaffold` rather than the reverse.
+- *Separately, and not the workspace's to fix:* `skill-test`'s `AGENTS.md`
+  contradicts itself, asking for consumer-side ports while prescribing a
+  centralised `internal/port` (D13).

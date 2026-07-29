@@ -168,8 +168,17 @@ the house rules today.
   behind `goga/components`' deployer registry, so replacing it is an adapter
   swap; whether the `weaver` deployer is built in v1 is an open question in the
   design.
-- **The workspace skills contradict each other today** (design D13): the spf13
-  `go` skill — now **merged** and on `main` — calls `internal/`-layered packages
-  an anti-pattern, while `go-project-scaffold` and `skill-test`'s `AGENTS.md`
-  prescribe `internal/domain`, `internal/port`. This needs resolving
-  independently of goga; D1 keeps goga out of the argument.
+- **The workspace's own Go guidance contradicts itself on `main` right now**
+  (design D13). Both skills are merged — the spf13 `go` skill landed in
+  `37bd574` (workspace#31) — so this is a defect in guidance already in force,
+  not a merge to pre-empt. They disagree over `internal/` **as the default
+  home**: `go-project-scaffold` prescribes `internal/app` / `internal/config` /
+  `internal/server` / `internal/<feature>` plus `pkg/`; the spf13 skill calls
+  relying on `internal/` by default an anti-pattern and prescribes top-level
+  packages one level deep. (Not the hexagonal question —
+  `go-project-scaffold` explicitly declines to decide that.) The widened scope
+  settles two thirds of it: goga's adapter shape decides that ports sit adjacent
+  to what they serve and adapters are technology-named leaves with no layer
+  directories, and `go-project-scaffold` already names sysgo as the enforcement
+  point. What is left for the owner is the default home for a service's own
+  non-adapter code. D1 keeps goga itself out of the argument.
