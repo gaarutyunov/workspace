@@ -69,6 +69,40 @@ comment queries — the digest is the only sanctioned way to see the board.**
 .claude/skills/loop-common/scripts/board-tick.py --loop hitl   # or --loop auto
 ```
 
+### Precondition: the GraphQL budget
+
+A tick is a few dozen GitHub **GraphQL** requests — `gh project item-list`, every
+`gh pr list`, and every hydration query all draw on the same 5000-point/hour
+budget, and that budget is **shared by every agent and tool on the machine**, so
+concurrent runs drain it together.
+
+The digest checks this itself before reading anything, and **refuses to start**
+without headroom (`--min-budget`, default 400 points; `0` disables). If it hits
+the wall mid-tick it aborts rather than printing a partial board, because a
+half-read board is exactly the silent under-reporting the `TRUNCATED` warning
+exists to prevent. Either way you get a banner naming the budget and the reset
+time, and **exit code 75**:
+
+```
+══════════════════════════════════════════════════════════════════
+ GITHUB GRAPHQL RATE LIMIT EXHAUSTED — NOTHING WAS READ
+══════════════════════════════════════════════════════════════════
+ graphql budget: 0/5000 · resets 2026-07-29 23:06 UTC (in 10m)
+```
+
+**A tick that hits this has seen nothing.** Do not pick up, skip, label or close
+any task on the basis of it. Wait for the reset and re-run.
+
+> **Diagnostic trap.** `gh` disguises this failure. A rate-limited
+> `gh project item-list 6 --owner gaarutyunov` prints **`unknown owner type`** —
+> which reads like a permissions or argument bug and is nothing of the kind.
+> Before "fixing" any `gh` error, run `gh api rate_limit`. Never weaken or trim a
+> query to make the error go away.
+>
+> Don't burn the budget on diagnostics either: `board-tick.py`'s logic is covered
+> by `scripts/test_board_tick.py`, which uses fixtures and never calls the
+> network. Verify against that, not by re-running live ticks.
+
 One call (~7s) returns every **active** board item — everything except Backlog
 and Done — with, for each one: its status, Loop routing, labels, the code PR,
 **the spec PR**, CI, mergeability, unresolved review threads, staleness, and

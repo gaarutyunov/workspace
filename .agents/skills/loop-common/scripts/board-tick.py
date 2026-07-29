@@ -95,6 +95,20 @@ LABEL_ABBREV = {
 # ── gh plumbing ─────────────────────────────────────────────────────────────
 
 
+class RateLimited(RuntimeError):
+    """The GitHub GraphQL budget ran out mid-tick.
+
+    Its own type because it demands its own handling: a rate-limited tick has
+    seen *nothing*, and must not be mistaken for a tick that saw a quiet board.
+    """
+
+
+# `gh` does not say "rate limit" in every case. Notably a rate-limited
+# `gh project item-list` prints `unknown owner type`, which reads like a scope or
+# argument bug — so any gh failure is checked against the real budget.
+RATE_LIMIT_TEXT = re.compile(r"rate limit|RATE_LIMITED|secondary rate", re.I)
+
+
 def gh(*args: str, check: bool = True, stdin: str | None = None) -> str:
     proc = subprocess.run(
         ["gh", *args],
@@ -103,8 +117,77 @@ def gh(*args: str, check: bool = True, stdin: str | None = None) -> str:
         input=stdin,
     )
     if check and proc.returncode != 0:
-        raise RuntimeError(f"gh {' '.join(args)} failed:\n{proc.stderr.strip()}")
+        err = proc.stderr.strip()
+        if RATE_LIMIT_TEXT.search(err) or exhausted_budget():
+            raise RateLimited(err)
+        raise RuntimeError(f"gh {' '.join(args)} failed:\n{err}")
     return proc.stdout
+
+
+def graphql_budget() -> tuple[int, int, int] | None:
+    """(remaining, limit, reset epoch) for the GraphQL budget, or None if unknown.
+
+    `GET /rate_limit` is REST and is itself exempt from rate limiting, so this is
+    free to call — including on the failure path.
+    """
+    proc = subprocess.run(
+        ["gh", "api", "rate_limit"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        res = (json.loads(proc.stdout or "{}").get("resources") or {}).get("graphql") or {}
+    except json.JSONDecodeError:
+        return None
+    if "remaining" not in res:
+        return None
+    return int(res["remaining"]), int(res.get("limit", 0)), int(res.get("reset", 0))
+
+
+def exhausted_budget() -> bool:
+    budget = graphql_budget()
+    return budget is not None and budget[0] <= 0
+
+
+def reset_phrase(reset_epoch: int) -> str:
+    when = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
+    mins = max(0, int((when - datetime.now(timezone.utc)).total_seconds() // 60))
+    return f"{when.strftime('%Y-%m-%d %H:%M UTC')} (in {mins}m)"
+
+
+def rate_limit_banner(headline: str, budget: tuple[int, int, int] | None) -> str:
+    """The one thing a tick must never do quietly is fail to see the board."""
+    rule = "═" * 74
+    if budget:
+        remaining, limit, reset = budget
+        line = f" graphql budget: {remaining}/{limit} · resets {reset_phrase(reset)}"
+    else:
+        line = " graphql budget: unknown (could not read gh api rate_limit)"
+    return "\n".join(
+        [
+            rule,
+            f" {headline}",
+            rule,
+            line,
+            "",
+            " This is NOT an empty board and NOT a healthy tick. No board data was",
+            " read, so nothing here can be trusted: do not pick up, skip, label or",
+            " close any task on the basis of this run.",
+            "",
+            " `gh` disguises this failure. The same condition makes",
+            f"   gh project item-list {PROJECT} --owner {OWNER}",
+            " print `unknown owner type`, which reads like a permissions or argument",
+            " bug and is nothing of the kind. Confirm with:  gh api rate_limit",
+            "",
+            " Every `gh pr list` / `gh pr view` and every hydration query draws on",
+            " this same GraphQL budget, and it is shared by every agent and tool on",
+            " the machine — concurrent runs drain it together.",
+            "",
+            " Wait for the reset and re-run. Do NOT weaken or trim queries to make",
+            " the error go away.",
+            rule,
+        ]
+    )
 
 
 def gh_graphql(query: str, tolerant: bool = False) -> dict:
@@ -121,8 +204,15 @@ def gh_graphql(query: str, tolerant: bool = False) -> dict:
         if tolerant:
             return {}
         raise
-    if payload.get("errors") and not tolerant:
-        raise RuntimeError("GraphQL errors: " + json.dumps(payload["errors"], indent=2))
+    errors = payload.get("errors")
+    if errors:
+        blob = json.dumps(errors)
+        if RATE_LIMIT_TEXT.search(blob):
+            # Even a `tolerant` caller must not swallow this: a rate-limited
+            # response is missing data, not reporting absent data.
+            raise RateLimited(blob)
+        if not tolerant:
+            raise RuntimeError("GraphQL errors: " + json.dumps(errors, indent=2))
     return payload.get("data") or {}
 
 
@@ -1453,7 +1543,41 @@ def render_json(items: list[Item]) -> str:
 # ── Commands ────────────────────────────────────────────────────────────────
 
 
+# A tick is a few dozen GraphQL requests (the board list, a spec-PR list, a PR
+# list per unlinked item, the hydration chunks, the blocker lookup), and requests
+# cost points rather than one each. Refuse to start without headroom: a tick that
+# dies halfway has already spent the budget and still tells you nothing.
+MIN_GRAPHQL_BUDGET = 400
+
+
+def preflight(min_budget: int) -> str | None:
+    """Refuse to start a tick the GraphQL budget cannot finish. None = go ahead."""
+    budget = graphql_budget()
+    if budget is None:
+        return None  # can't tell — proceed and let the mid-tick guard catch it
+    remaining, _, _ = budget
+    if remaining >= min_budget:
+        return None
+    headline = (
+        "GITHUB GRAPHQL BUDGET TOO LOW TO RUN A TICK — NOTHING WAS READ"
+        if remaining > 0
+        else "GITHUB GRAPHQL RATE LIMIT EXHAUSTED — NOTHING WAS READ"
+    )
+    extra = (
+        f"\n Refusing to start: {remaining} point(s) left, {min_budget} needed "
+        f"(--min-budget to override)."
+    )
+    return rate_limit_banner(headline, budget) + extra
+
+
 def cmd_tick(args: argparse.Namespace) -> int:
+    # Before anything else: a tick that cannot see the board must say so rather
+    # than half-read it. Checked up front because `gh` reports exhaustion with
+    # misleading errors that read like configuration bugs.
+    refusal = preflight(args.min_budget)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 75  # EX_TEMPFAIL — transient; re-run after the reset
     statuses = tuple(args.status) if args.status else ACTIVE_STATUSES
     items = fetch_board(statuses)
     if args.loop:
@@ -1693,6 +1817,12 @@ def main(argv: list[str]) -> int:
     p_tick.add_argument("--projects-dir", help="where task worktrees live (default <workspace>/projects)")
     p_tick.add_argument("--no-local", action="store_true", help="skip the local worktree check")
     p_tick.add_argument("--json", action="store_true", help="machine-readable output")
+    p_tick.add_argument(
+        "--min-budget",
+        type=int,
+        default=MIN_GRAPHQL_BUDGET,
+        help=f"refuse to start below this many GraphQL points (default {MIN_GRAPHQL_BUDGET}; 0 disables)",
+    )
     p_tick.set_defaults(func=cmd_tick)
 
     p_ack = sub.add_parser("ack", help="mark comments seen/addressed in the issue's ledger")
@@ -1749,6 +1879,18 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
+    except RateLimited:
+        # Deliberately not a partial digest: a half-read board invites exactly the
+        # silent under-reporting the TRUNCATED warning exists to prevent. Whatever
+        # was collected before this point is discarded.
+        print(
+            rate_limit_banner(
+                "GITHUB GRAPHQL RATE LIMIT HIT MID-TICK — THIS TICK IS VOID",
+                graphql_budget(),
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(75)  # EX_TEMPFAIL — transient; re-run after the reset
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

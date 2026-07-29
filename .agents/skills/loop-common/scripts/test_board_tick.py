@@ -7,7 +7,11 @@ No network, no `gh` — everything here is pure parsing / classification.
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import importlib.util
+import io
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -431,6 +435,140 @@ class BlockerSignal(unittest.TestCase):
         finally:
             bt.gh_graphql = original
         self.assertFalse(item.blocker.resolved)
+
+
+class RateLimitGuard(unittest.TestCase):
+    """A tick that cannot see the board must not look like one that saw it empty.
+
+    Every test here stubs the budget — none of them touch the network, which is
+    the point: measuring this against the live API is what exhausted it.
+    """
+
+    def setUp(self):
+        self._budget = bt.graphql_budget
+        self._gh = bt.gh
+        self.addCleanup(lambda: setattr(bt, "graphql_budget", self._budget))
+        self.addCleanup(lambda: setattr(bt, "gh", self._gh))
+
+    def _budget_is(self, remaining, limit=5000, reset_in_s=840):
+        import time
+
+        bt.graphql_budget = lambda: (remaining, limit, int(time.time()) + reset_in_s)
+
+    def test_preflight_passes_with_headroom(self):
+        self._budget_is(5000)
+        self.assertIsNone(bt.preflight(bt.MIN_GRAPHQL_BUDGET))
+
+    def test_preflight_refuses_when_exhausted(self):
+        self._budget_is(0)
+        banner = bt.preflight(bt.MIN_GRAPHQL_BUDGET)
+        self.assertIsNotNone(banner)
+        self.assertIn("EXHAUSTED", banner)
+        self.assertIn("NOTHING WAS READ", banner)
+        self.assertIn("0/5000", banner)
+        self.assertIn("resets", banner)
+        self.assertRegex(banner, r"resets \d{4}-\d\d-\d\d \d\d:\d\d UTC \(in \d+m\)")
+
+    def test_preflight_refuses_when_merely_too_low(self):
+        self._budget_is(50)
+        banner = bt.preflight(bt.MIN_GRAPHQL_BUDGET)
+        self.assertIn("TOO LOW", banner)
+        self.assertIn("50 point(s) left", banner)
+
+    def test_banner_names_the_misleading_gh_error(self):
+        # Anyone debugging this otherwise chases token scopes.
+        self._budget_is(0)
+        banner = bt.preflight(bt.MIN_GRAPHQL_BUDGET)
+        self.assertIn("unknown owner type", banner)
+        self.assertIn("gh api rate_limit", banner)
+
+    def test_preflight_proceeds_when_the_budget_is_unreadable(self):
+        bt.graphql_budget = lambda: None
+        self.assertIsNone(bt.preflight(bt.MIN_GRAPHQL_BUDGET))
+
+    def test_min_budget_zero_disables_the_gate(self):
+        self._budget_is(1)
+        self.assertIsNone(bt.preflight(0))
+
+    def test_cmd_tick_refuses_loudly_and_nonzero(self):
+        self._budget_is(0)
+        calls = []
+        bt.gh = lambda *a, **k: calls.append(a) or ""
+        ns = argparse.Namespace(
+            loop=None, repo=None, status=None, include_bots=False, body_limit=50,
+            projects_dir="/nonexistent", no_local=True, json=True,
+            min_budget=bt.MIN_GRAPHQL_BUDGET,
+        )
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = bt.cmd_tick(ns)
+        self.assertEqual(code, 75)  # EX_TEMPFAIL
+        self.assertEqual(calls, [])  # refused before touching the API
+        self.assertIn("EXHAUSTED", err.getvalue())
+        # Critically: no output on stdout, so --json cannot yield a valid-looking
+        # empty board that a caller would treat as "nothing to do".
+        self.assertEqual(out.getvalue(), "")
+
+    def test_a_rate_limited_gh_failure_raises_RateLimited(self):
+        bt.graphql_budget = self._budget  # unused; stderr alone is decisive
+        self._budget_is(0)
+        original_run = bt.subprocess.run
+
+        class Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: API rate limit already exceeded for user ID 1."
+
+        bt.subprocess.run = lambda *a, **k: Proc()
+        try:
+            with self.assertRaises(bt.RateLimited):
+                bt.gh("api", "graphql", "-f", "query=x")
+        finally:
+            bt.subprocess.run = original_run
+
+    def test_the_misleading_error_is_classified_by_the_real_budget(self):
+        """`unknown owner type` is a rate limit when the budget says so."""
+        self._budget_is(0)
+        original_run = bt.subprocess.run
+
+        class Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "unknown owner type"
+
+        bt.subprocess.run = lambda *a, **k: Proc()
+        try:
+            with self.assertRaises(bt.RateLimited):
+                bt.gh("project", "item-list", "6")
+        finally:
+            bt.subprocess.run = original_run
+
+    def test_a_genuine_error_stays_a_plain_RuntimeError(self):
+        """A real bug must not be excused as a rate limit."""
+        self._budget_is(5000)
+        original_run = bt.subprocess.run
+
+        class Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "unknown owner type"
+
+        bt.subprocess.run = lambda *a, **k: Proc()
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                bt.gh("project", "item-list", "6")
+            self.assertNotIsInstance(ctx.exception, bt.RateLimited)
+        finally:
+            bt.subprocess.run = original_run
+
+    def test_graphql_rate_limit_errors_beat_tolerant_mode(self):
+        """`tolerant` swallows a missing node, never a missing response."""
+        bt.gh = lambda *a, **k: json.dumps(
+            {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}
+        )
+        with self.assertRaises(bt.RateLimited):
+            bt.gh_graphql("query {x}", tolerant=True)
 
 
 class AckBuckets(unittest.TestCase):
