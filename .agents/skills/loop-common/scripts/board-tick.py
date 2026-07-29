@@ -1547,6 +1547,10 @@ def render_json(items: list[Item]) -> str:
 # list per unlinked item, the hydration chunks, the blocker lookup), and requests
 # cost points rather than one each. Refuse to start without headroom: a tick that
 # dies halfway has already spent the budget and still tells you nothing.
+#
+# Measured, not guessed: a 17-item hitl tick cost 228 of the 5000 hourly points
+# (4121 → 3893). The default leaves headroom for a larger board; raise it if the
+# board grows, and note that ~20 ticks per hour is the ceiling either way.
 MIN_GRAPHQL_BUDGET = 400
 
 

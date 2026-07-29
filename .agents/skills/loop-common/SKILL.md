@@ -76,6 +76,10 @@ A tick is a few dozen GitHub **GraphQL** requests — `gh project item-list`, ev
 budget, and that budget is **shared by every agent and tool on the machine**, so
 concurrent runs drain it together.
 
+**A 17-item tick costs ~230 points** (measured: 4121 → 3893), so the practical
+ceiling is roughly **20 ticks per hour across all agents**. Ticking in a tight
+loop, or re-running the digest to debug it, will exhaust the hour.
+
 The digest checks this itself before reading anything, and **refuses to start**
 without headroom (`--min-budget`, default 400 points; `0` disables). If it hits
 the wall mid-tick it aborts rather than printing a partial board, because a
