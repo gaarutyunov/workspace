@@ -24,7 +24,7 @@ that is the plain inverse of its own up section (D2).
 
 - [ ] 3.1 Generation returns the ordered sequence of migrations for one edit of the SDL rather than a single file: graph-down, tables, graph — the graph-down omitted when the folded history has no graph, and each of the other two omitted when it has nothing to say or its half is off (D2's table).
 - [ ] 3.2 Versions are consecutive integers assigned in emission order, each above the highest already in the directory. No gaps within a generation, no timestamps.
-- [ ] 3.3 File names are `NNNN_<slug>_graph_down.sql`, `NNNN_<slug>_tables.sql`, `NNNN_<slug>_graph.sql`. The suffix is for humans — nothing reads it back (D1). Settle the slug question in design.md — **Open Questions** — and be consistent.
+- [ ] 3.3 File names are `NNNN_<slug>_graph_down.sql`, `NNNN_<slug>_tables.sql`, `NNNN_<slug>_graph.sql`, with **one slug per generation** shared by all of its files (D2). The suffix is for humans — nothing reads it back (D1).
 - [ ] 3.4 Everything is written into `--dir` itself. **No subdirectories** — and delete the per-half directory constants, the shared generation counter (`NextVersion`), the fold-up-to-version (`FoldUpTo`), the version listing (`Versions`) and the per-half version table (`VersionTable`). Deleting them is the task; each exists only to enforce an order that is now structural.
 - [ ] 3.5 **No layout detection (D7).** Generation always emits the sequence; there is no branch for the combined layout or for the two-directory one, and no flag that restores either.
 - [ ] 3.6 Test: generating into a directory that holds old combined migrations, or old `tables/` + `graph/` subdirectories, still produces the sequence, with no special-casing.
@@ -42,7 +42,9 @@ that is the plain inverse of its own up section (D2).
 - [ ] 5.2 Both flags together is an error — that asks for nothing to be generated.
 - [ ] 5.3 The flags scope generation only. `migrate`'s apply step is `goose up` over the whole directory against the default `goose_db_version` table — no `SetTableName`, no version walk, no per-half apply. Delete the lockstep applier.
 - [ ] 5.4 Help text states that a generation emits consecutive single-purpose migrations into one directory, applied in that order (D3).
-- [ ] 5.5 Settle `--no-graph` against a history that already creates a graph — see design.md **Open Questions** — before implementing the flag, and cover the chosen behaviour with an integration test. Left as-is, the table DDL runs against a live graph that may depend on the columns it alters.
+- [ ] 5.5 Implement the flags-versus-history check (D4a): a flag contradicting the folded history is a sentinel error at generate time, in both directions — `--no-graph` against a history containing a `CREATE PROPERTY GRAPH`, and `--no-tables` against a history that created tables. Nothing is written when it fires.
+- [ ] 5.6 The error message names the deliberate path for the legitimate case: to drop the graph, generate from a desired schema that declares no graph, which emits the `_graph_down` teardown and no rebuild. Test the message, not only the error.
+- [ ] 5.7 Test the agreeing case in both directions — a directory whose first generation turned a half off keeps generating with that half off, because the flag and the history agree.
 
 ## 6. The partial-schema guarantee
 

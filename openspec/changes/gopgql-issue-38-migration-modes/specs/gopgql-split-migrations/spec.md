@@ -136,6 +136,10 @@ that a project whose tables are managed elsewhere, or which does not yet want a
 graph, can use gopgql for the other half alone. Switching a half off SHALL affect
 what is generated and never what is applied.
 
+The halves a directory owns SHALL be fixed by its first generation: the flags
+scope a directory's first generation, after which the directory's own history
+decides, and a flag that contradicts that history SHALL be an error.
+
 #### Scenario: Tables off
 - **WHEN** the tables half is turned off
 - **THEN** no migration about any table or index is emitted, and no statement
@@ -150,6 +154,24 @@ what is generated and never what is applied.
 - **WHEN** both halves are turned off
 - **THEN** the command fails with an error, rather than generating nothing
   silently
+
+#### Scenario: Turning the graph half off against a graph-bearing history is refused
+- **WHEN** the graph half is turned off and the directory's history contains a
+  property-graph creation
+- **THEN** generation fails with a distinguishable error, writes no migration, and
+  the message states that dropping the graph is done by generating from a schema
+  that declares no graph
+
+#### Scenario: Turning the tables half off against a tables-bearing history is refused
+- **WHEN** the tables half is turned off and the directory's history created tables
+- **THEN** generation fails with a distinguishable error and writes no migration,
+  rather than silently omitting table DDL the graph half will later depend on
+
+#### Scenario: A directory that never owned a half keeps working
+- **WHEN** the tables half was off for the directory's first generation and is off
+  again
+- **THEN** generation succeeds — the flag agrees with the history, which created no
+  tables
 
 #### Scenario: Turning a half off does not skip applied history
 - **WHEN** migrations are applied with a half turned off

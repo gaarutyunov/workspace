@@ -44,7 +44,9 @@ emitting consecutive migrations that each do one thing. See
 - **Either half can be turned off**: `--no-tables` (someone else owns them) or
   `--no-graph` (gopgql manages the tables and the graph comes later, or not at
   all). The flags scope what is **generated**; what is **applied** is always the
-  whole directory in version order.
+  whole directory in version order. And they scope a directory's **first**
+  generation: after that the directory's own history decides what it owns, and a
+  flag contradicting it is an error rather than a silent re-scoping (design D4a).
 - **The tables half is genuinely optional, not degraded.** With `--no-tables`,
   gopgql never looks at tables at all — it does not diff them, does not drop
   what it cannot see, and does not require the SDL to describe every table in
@@ -89,8 +91,9 @@ emitting consecutive migrations that each do one thing. See
   against. Both are first-class now (design D6). Fold must also replay
   `DROP PROPERTY GRAPH` as clearing the graph, because the history now contains
   drops between the creates.
-- **`cmd/gopgql`**: `--no-tables` / `--no-graph` on `generate` and `migrate`;
-  `migrate`'s apply step is `goose up` on the one directory.
+- **`cmd/gopgql`**: `--no-tables` / `--no-graph` on `generate` and `migrate`, with
+  a sentinel error when a flag contradicts the folded history (D4a); `migrate`'s
+  apply step is `goose up` on the one directory.
 - **Deleted relative to the merged design**: the per-half version tables
   (`goose_db_version_tables` / `goose_db_version_graph`), the shared generation
   counter that kept the two halves' numbering aligned, folding a directory only

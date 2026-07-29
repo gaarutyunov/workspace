@@ -75,6 +75,15 @@ partial-schema guarantee (D5); the two `Fold` defects implementation uncovered
 and their fixes (D6); and `DROP PROPERTY GRAPH IF EXISTS` wherever the graph is
 dropped.
 
+**Two gaps this amendment opened, and how the owner closed them.** Drafting it
+turned up a hole the merged design also had: with the flags scoping generation, a
+`--no-graph` run against a history that already creates a graph emits table DDL
+that runs against a live graph depending on the columns it alters. The owner's
+call was to generalise the fix symmetrically rather than special-case it — a flag
+may not change which halves a directory owns, in either direction (D4a) — and, on
+the second question drafting raised, that a generation carries one slug shared by
+all of its files (D2). Both are settled decisions below, not open questions.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -104,10 +113,10 @@ subdirectories, one `goose_db_version` table, and the apply step is goose's
 ordinary `up` over that directory. gopgql contributes nothing to how migrations
 are applied — only to what is written, and to the order it is numbered in.
 
-Nothing is recorded inside the files: no mode marker, no half marker, no flag
-that has to match a previous run. A file's suffix (`_tables`, `_graph`,
-`_graph_down`) is a human-readable name, not data that anything reads back. What
-a migration does is what its SQL does.
+Nothing is recorded inside the files: no mode marker, no half marker, no sidecar
+state. A file's suffix (`_tables`, `_graph`, `_graph_down`) is a human-readable
+name, not data that anything reads back. What a migration does is what its SQL
+does — and that is also the only thing a flag is ever checked against (D4).
 
 - *Rejected — the first design's `-- gopgql:mode=` marker.* It bought the ability
   for one directory to be any concern, which nothing needs, and paid for it with
@@ -143,6 +152,16 @@ Each file's `Down` is the inverse of its own `Up`, and nothing else:
 So `goose down` three times walks a generation back out in exactly reverse order
 — new graph dropped, tables reverted, previous graph restored — which the merged
 design's two independent directories could not do at all.
+
+**One slug per generation, shared by all of its files**: `0003_add_email_graph_down.sql`,
+`0004_add_email_tables.sql`, `0005_add_email_graph.sql`. The generation is the
+readable unit, and `0003` reads correctly as "the graph-teardown step of the
+`add_email` generation".
+
+- *Rejected — a slug derived per file from what that file does.* The teardown and
+  the rebuild make no schema change of their own, so per-file slugs would have to
+  invent names for them, and the run would stop reading as one unit in a directory
+  listing.
 
 - *Rejected — folding a graph-only change into one drop-and-create file.* It would
   not mix concerns either, and it would be one file instead of two. But then a
@@ -193,6 +212,49 @@ Turning a half off is not a way to delete anything. `--no-graph` stops managing
 the graph; it does not drop one. Dropping the graph is what happens when the graph
 half is *on* and the SDL stops declaring one: that generation emits a
 `_graph_down` file and no `_graph` file.
+
+### D4a: The flags scope a directory's first generation; after that its history decides
+
+**The rule, in the sentence the docs should carry: the flags scope a directory's
+first generation; after that the directory's own history decides, and a flag that
+contradicts it is an error.**
+
+Which halves a directory owns is fixed by its first generation. Thereafter a flag
+contradicting the folded history is a **sentinel error at generate time** —
+sentinel because the CLI branches on it to print the guidance below:
+
+- `--no-graph` against a history that contains a `CREATE PROPERTY GRAPH` → error.
+  The alternative is table DDL running against a live graph that may depend on the
+  columns it alters.
+- `--no-tables` against a history that created tables → error, for the same
+  reason read the other way round: subsequent table DDL would silently not be
+  emitted, and the graph half would eventually name a column nothing creates. The
+  case that *is* safe — a graph over tables gopgql does not own — is a directory
+  that never owned tables in the first place, which is exactly what this rule
+  pins down.
+
+The error message must name the deliberate path for the one legitimate reason to
+want `--no-graph` on a graph-bearing directory: **to drop the graph, run an
+ordinary generation whose desired schema declares no graph.** That emits the
+`_graph_down` teardown and no rebuild — a graph transition the operator asked for,
+recorded in the history, and reviewable in the diff.
+
+This is **not** the mode-mismatch error of the first design returning (D1). That
+one compared a flag against a marker written inside the files, so the marker could
+be lost or hand-edited into disagreeing with the SQL beside it. Here there is
+nothing recorded and nothing to drift: the evidence is the SQL in the directory,
+folded the same way generation folds it anyway.
+
+- *Rejected — `--no-graph` suppresses only the `_graph` build and still emits the
+  `_graph_down` teardown.* It makes a flag silently destroy a property graph. This
+  change ruled that out in an earlier round and the principle survives the
+  amendment: dropping the graph is never an implicit consequence of changing what
+  a directory manages, because that is far more likely to be a mistake than a
+  request.
+- *Rejected — emit the tables file and let the apply fail.* It trades a gopgql
+  error at generate time, before anything is written, for a PostgreSQL error at
+  apply time against a live database. Strictly worse, and it leaves a migration on
+  disk that can never be applied.
 
 ### D5: The SDL describes a projection, not an inventory
 
@@ -295,26 +357,3 @@ why it is worth doing now rather than later.
   writes into the directory afterwards. A graph migration renumbered below the
   tables it depends on fails at apply time, not at generation time.
 
-## Open Questions
-
-- **What does `--no-graph` do when the history already creates a graph?** The
-  flags scope generation (D4), so no `_graph_down` file is emitted — and the table
-  DDL then runs against a live property graph that may depend on the very columns
-  it is altering, which PostgreSQL will refuse. Three readings: (a) `--no-graph`
-  suppresses only the `_graph` build and still emits the `_graph_down` teardown
-  when the history has a graph, leaving the database graph-less until the graph
-  half is turned back on; (b) it is refused as an error when the history creates a
-  graph, on the grounds that the graph is already gopgql's to manage; (c) it emits
-  the tables file and lets the apply fail. (a) is the most defensible and (c) is
-  the worst; the requirement "Graph off" in the delta spec is satisfied by any of
-  them, so this needs deciding rather than discovering. The mirror case —
-  `--no-tables` with an SDL whose tables have changed — is not a gap: those tables
-  belong to whoever owns them, and the graph fails loudly if they have not caught
-  up.
-- **Is the slug per generation or per file?** This design assumes one slug for a
-  whole generation (`0007_add_salary_graph_down`, `0008_add_salary_tables`,
-  `0009_add_salary_graph`) so the run reads as a unit — which does mean the
-  `_graph_down` file's slug names a change it does not itself make. Deriving each
-  slug from what its own file does is the alternative. Either is compatible with
-  every requirement in this change; implementation should pick one and be
-  consistent.
