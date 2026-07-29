@@ -3,10 +3,13 @@
 
 Fetches every *active* item on the gaarutyunov project board (everything except
 Backlog and Done), and for each one pulls the issue, its labels, its comments,
-the linked PR's comments, review threads and CI status. Comments are classified
-(human / agent / bot) and filtered against a per-issue **ack ledger** stored as a
-machine-managed comment on the issue itself, so comments that were already seen
-and addressed never come back.
+the linked PR's comments, review threads and CI status — including the inline
+comments of reviews the owner *started but never submitted*, which no ordinary
+comment endpoint returns.
+
+Comments are classified (human / agent / bot) and filtered against a per-issue
+**ack ledger** stored as a machine-managed comment on the issue itself, so
+comments that were already seen and addressed never come back.
 
 The output is a decision table for the orchestrator plus a details block holding
 the full text of everything still unaddressed.
@@ -117,7 +120,7 @@ def gh_graphql(query: str) -> dict:
 
 @dataclass
 class Comment:
-    kind: str  # issue | pr | review | spec
+    kind: str  # issue | pr | review | spec | pending
     cid: int  # databaseId — the id used by the ledger
     author: str
     body: str
@@ -127,6 +130,9 @@ class Comment:
     thread_id: str | None = None
     thread_resolved: bool = False
     path: str | None = None
+    # Set for comments belonging to a review the owner started but never
+    # submitted. Nobody but us can see these, so the digest has to say so.
+    draft_on: str | None = None  # e.g. "PR #40" / "spec PR #36"
 
 
 @dataclass
@@ -158,9 +164,11 @@ class Item:
     wt_unpushed: int = 0  # commits ahead of the remote branch
     wt_stat: str = ""
     comments: list[Comment] = field(default_factory=list)
+    seen_cids: set[int] = field(default_factory=set)
     unresolved_threads: int = 0
-    # The spec PR lives in the *workspace* repo on `spec/<repo>-issue-<N>`, i.e.
-    # usually a different repo from the issue — it has to be found separately.
+    # The spec PR lives in the *workspace* repo on a `spec…` branch naming this
+    # repo and issue (see spec_branch_key), i.e. usually a different repo from the
+    # issue — nothing links it, so it has to be found separately.
     spec_pr_number: int | None = None
     spec_pr_url: str | None = None
     spec_pr_state: str = ""
@@ -212,6 +220,11 @@ class Item:
     @property
     def pending_bot(self) -> list[Comment]:
         return [c for c in self.comments if c.who == "bot"]
+
+    @property
+    def pending_draft(self) -> list[Comment]:
+        """Unaddressed comments the owner left in a review they never submitted."""
+        return [c for c in self.comments if c.draft_on and c.who != "agent"]
 
 
 # ── Time ────────────────────────────────────────────────────────────────────
@@ -355,14 +368,25 @@ SPEC_REPO = "workspace"  # specs are always authored in the workspace repo
 def spec_branch_key(branch: str) -> tuple[str, int] | None:
     """Parse a spec branch name into (repo, issue number), or None.
 
-    Matched loosely on purpose. Ticks have named these branches both
-    `spec/<repo>-issue-<N>` and `spec-<repo>-<N>`, and an exact-match lookup
-    silently dropped the spec PR for every branch in the second style — which
-    meant its comments (where the owner's spec feedback lives) were never read.
-    A missed owner comment is far worse than a mis-parsed branch name, so accept
-    any `spec`-prefixed branch that ends in the issue number.
+    Matched loosely on purpose. Ticks have named these branches every which way —
+    `spec/<repo>-issue-<N>`, `spec-<repo>-<N>`, and (most often, because the spec
+    flow names the branch after the change) `spec/<repo>-<N>-<slug>` — and an
+    exact-match lookup silently dropped the spec PR for every style but the first,
+    which meant its comments (where the owner's spec feedback lives) were never
+    read. A missed owner comment is far worse than a mis-parsed branch name, so
+    accept any `spec`-prefixed branch carrying the issue number, with or without
+    a trailing descriptive slug.
+
+    The `repo` group is non-greedy so that the *first* `-<digits>-` run is taken
+    as the issue number: `spec/ui-kit-6-workout-components` is (ui-kit, 6), not
+    (ui-kit-6, …) — a slug that itself starts with digits cannot steal the match.
+    The trailing slug must be separated by `/` or `-`, so `spec/goga-1abc` stays
+    unmatched rather than silently reading as issue 1.
     """
-    m = re.fullmatch(r"spec[/-](?P<repo>.+?)[/-](?:issue[/-])?(?P<num>\d+)", branch)
+    m = re.fullmatch(
+        r"spec[/-](?P<repo>.+?)[/-](?:issue[/-])?(?P<num>\d+)(?:[/-].*)?",
+        branch,
+    )
     if not m:
         return None
     return m.group("repo"), int(m.group("num"))
@@ -453,7 +477,12 @@ fragment SpecBits on PullRequest {
     nodes { databaseId author { login } body createdAt url }
   }
   reviews(last: 20) {
-    nodes { databaseId author { login } body state submittedAt url }
+    nodes {
+      databaseId author { login } body state submittedAt url
+      comments(first: 50) {
+        nodes { databaseId author { login } body createdAt url path line }
+      }
+    }
   }
   reviewThreads(first: 30) {
     nodes {
@@ -474,7 +503,12 @@ fragment PrBits on PullRequest {
     nodes { databaseId author { login } body createdAt url }
   }
   reviews(last: 30) {
-    nodes { databaseId author { login } body state submittedAt url }
+    nodes {
+      databaseId author { login } body state submittedAt url
+      comments(first: 50) {
+        nodes { databaseId author { login } body createdAt url path line }
+      }
+    }
   }
   reviewThreads(first: 60) {
     nodes {
@@ -553,11 +587,18 @@ def ingest(item: Item, node: dict, kind: str, **extra) -> Comment | None:
     body = node.get("body") or ""
     if LEDGER_MARKER in body:
         return None
+    # A draft-review comment is reachable two ways — through its review and
+    # through its (unresolved) review thread. Whichever arrives first wins, so
+    # the draft pass runs before the thread pass and keeps its `draft_on` mark.
+    cid = node["databaseId"]
+    if cid in item.seen_cids:
+        return None
+    item.seen_cids.add(cid)
     login = (node.get("author") or {}).get("login", "ghost")
     created = node.get("createdAt") or node.get("submittedAt") or ""
     comment = Comment(
         kind=kind,
-        cid=node["databaseId"],
+        cid=cid,
         author=login,
         body=body,
         created=created,
@@ -568,6 +609,37 @@ def ingest(item: Item, node: dict, kind: str, **extra) -> Comment | None:
     item.comments.append(comment)
     item.last_activity = newest(item.last_activity, created)
     return comment
+
+
+def ingest_pending_review(item: Item, review: dict, label: str) -> int:
+    """Fold an *unsubmitted* review's inline comments into the pending pool.
+
+    A review the owner starts and never submits stays `PENDING` with a null
+    `submittedAt`, and its inline comments are invisible to the ordinary comment
+    endpoints — `GET /pulls/{n}/comments` omits them, and so does
+    `gh pr view --json comments,reviews`. They are nonetheless real owner
+    direction, and because the loop and the owner share one GitHub account the
+    API hands us the drafts. Ignoring them is exactly how five owner comments on
+    a spec PR stayed hidden for over an hour.
+
+    They ride in on the `reviews` connection the digest already queries, so this
+    adds no API call. Comments are tagged `pending` (their own ack bucket) and
+    carry `draft_on` so the renderer can flag the state — the owner may well not
+    realise an unsubmitted review is invisible to everyone else.
+    """
+    count = 0
+    for node in (review.get("comments") or {}).get("nodes", []):
+        line = node.get("line")
+        got = ingest(
+            item,
+            node,
+            "pending",
+            draft_on=label,
+            path=f"{node.get('path')}:{line}" if node.get("path") else None,
+        )
+        if got:
+            count += 1
+    return count
 
 
 def apply_issue(item: Item, issue: dict) -> None:
@@ -590,9 +662,14 @@ def apply_spec(item: Item, spec: dict) -> None:
     item.spec_pr_url = spec.get("url") or item.spec_pr_url
     for node in (spec.get("comments") or {}).get("nodes", []):
         ingest(item, node, "spec")
+    label = f"spec PR #{item.spec_pr_number}"
     for node in (spec.get("reviews") or {}).get("nodes", []):
-        body = (node.get("body") or "").strip()
         state = node.get("state", "")
+        if state == "PENDING":
+            # Runs before the thread pass below so the draft mark survives dedupe.
+            ingest_pending_review(item, node, label)
+            continue
+        body = (node.get("body") or "").strip()
         if not body and state not in ("CHANGES_REQUESTED", "APPROVED"):
             continue
         node = {**node, "body": f"[spec review {state}] {body}".strip()}
@@ -620,8 +697,12 @@ def apply_pr(item: Item, pr: dict) -> None:
         ingest(item, node, "pr")
 
     for node in (pr.get("reviews") or {}).get("nodes", []):
-        body = (node.get("body") or "").strip()
         state = node.get("state", "")
+        if state == "PENDING":
+            # Runs before the thread pass below so the draft mark survives dedupe.
+            ingest_pending_review(item, node, f"PR #{item.pr_number}")
+            continue
+        body = (node.get("body") or "").strip()
         if not body and state not in ("CHANGES_REQUESTED", "APPROVED"):
             continue
         ingest(item, {**node, "body": f"[review {state}] {body}".strip()}, "pr")
@@ -757,7 +838,11 @@ def compute_signal(item: Item) -> None:
         )
 
     if n_human:
-        reasons.append(f"{n_human} unaddressed owner comment(s)")
+        note = f"{n_human} unaddressed owner comment(s)"
+        n_draft = len(item.pending_draft)
+        if n_draft:
+            note += f" ({n_draft} in an unsubmitted review)"
+        reasons.append(note)
         item.signal = "HUMAN-INPUT"
     elif "approved:pr" in labels:
         reasons.append("owner approved the PR")
@@ -863,11 +948,16 @@ def spec_cell(item: Item) -> str:
 
 
 def hum_cell(item: Item) -> str:
-    """Count of unaddressed owner comments, and how long the oldest has waited."""
+    """Count of unaddressed owner comments, and how long the oldest has waited.
+
+    A trailing `+N✎` says N of them come from a review the owner never submitted.
+    """
     pending = item.pending_human
     if not pending:
         return "-"
-    return f"{len(pending)}·{age_of(item.oldest_pending_human)}"
+    cell = f"{len(pending)}·{age_of(item.oldest_pending_human)}"
+    drafts = len(item.pending_draft)
+    return f"{cell}+{drafts}✎" if drafts else cell
 
 
 def work_cell(item: Item) -> str:
@@ -991,8 +1081,18 @@ def render_details(items: list[Item], include_bots: bool, body_limit: int) -> st
                 "   ⚠ no ack ledger yet — comments below may include pre-marker agent output; "
                 "read them, then ack what is already handled"
             )
+        drafts = it.pending_draft
+        if drafts:
+            where = ", ".join(sorted({c.draft_on for c in drafts if c.draft_on}))
+            out.append(
+                f"   ⚠ {len(drafts)} of the owner comments below sit in an UNSUBMITTED "
+                f"(pending) review on {where} — visible only because the loop shares the "
+                "owner's account, invisible to everyone else. Treat them as direction; "
+                "when you reply, say the review was never submitted."
+            )
         for c in it.pending_human:
-            head = f"   [OWNER · {c.kind} {c.cid}] @{c.author} {c.created} ({age_of(c.created)} ago)"
+            tag = "OWNER · DRAFT REVIEW" if c.draft_on else "OWNER"
+            head = f"   [{tag} · {c.kind} {c.cid}] @{c.author} {c.created} ({age_of(c.created)} ago)"
             if c.path:
                 head += f" · {c.path}"
             out.append(head)
@@ -1092,6 +1192,7 @@ def render_json(items: list[Item]) -> str:
                         "url": c.url,
                         "path": c.path,
                         "thread_id": c.thread_id,
+                        "draft_review_on": c.draft_on,
                         "body": c.body,
                     }
                     for c in it.pending
@@ -1174,9 +1275,15 @@ def collect_pending_ids(repo: str, issue: int) -> dict[str, list[int]]:
     attach_spec_prs([item])
     hydrate([item])
     drop_acked(item)
-    buckets: dict[str, list[int]] = {"issue": [], "pr": [], "review": [], "spec": []}
+    buckets: dict[str, list[int]] = {
+        "issue": [],
+        "pr": [],
+        "review": [],
+        "spec": [],
+        "pending": [],
+    }
     for c in item.pending:
-        buckets[c.kind].append(c.cid)
+        buckets.setdefault(c.kind, []).append(c.cid)
     return buckets
 
 
@@ -1192,6 +1299,7 @@ def cmd_ack(args: argparse.Namespace) -> int:
             "issue": list(args.issue_comment),
             "pr": list(args.pr_comment),
             "review": list(args.review_comment),
+            "pending": list(args.pending_comment),
         }
     total = sum(len(v) for v in buckets.values())
     if not total:
@@ -1344,6 +1452,13 @@ def main(argv: list[str]) -> int:
     p_ack.add_argument("--pr-comment", action="append", type=int, default=[])
     p_ack.add_argument("--review-comment", action="append", type=int, default=[])
     p_ack.add_argument("--spec-comment", action="append", type=int, default=[])
+    p_ack.add_argument(
+        "--pending-comment",
+        action="append",
+        type=int,
+        default=[],
+        help="ack a comment from an unsubmitted (pending) review",
+    )
     p_ack.add_argument("--note", help="short record of what was done about them")
     p_ack.add_argument("--dry-run", action="store_true")
     p_ack.set_defaults(func=cmd_ack)

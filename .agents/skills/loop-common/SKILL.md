@@ -28,7 +28,9 @@ this file apply and layers its own gates on top.
 - `.claude/skills/loop-common/scripts/board-tick.py` — the digest/ack/label tool
   every tick runs through. Python 3 stdlib only; shells out to `gh`. Run
   `board-tick.py init-labels --repo <repo>` once per repo the loops touch so the
-  loop label set exists there.
+  loop label set exists there. Its parsing/classification logic is covered by
+  `scripts/test_board_tick.py` — `cd` into `scripts/` and run
+  `python3 -m unittest` after editing it.
 
 ## Board IDs (project #6 "growth")
 
@@ -83,7 +85,8 @@ NOT-STARTED  boids#7        In progress  hitl  -       4d   -     -    -    -   
 ```
 
 - **`HUM`** — `count·age`: unaddressed owner comments, and how long the oldest
-  has been waiting. The column that matters most.
+  has been waiting. The column that matters most. A trailing **`+N✎`** means N of
+  them come from a review the owner never submitted (see *Unsubmitted reviews*).
 - **`AGE`** — time since the last real activity (a comment or a pushed commit).
   Ledger writes deliberately don't count, so acking can't make a rotting task
   look fresh.
@@ -142,14 +145,59 @@ different machine from the one that did the work, where `LOCAL` is meaningless.
 
 ### The spec PR is fetched too
 
-A task's spec lives in the **workspace** repo on `spec/<repo>-issue-<N>` — for
-every project task that is a *different repo* from the issue, so nothing on the
-issue links to it. The digest resolves it by branch name and pulls its comments,
-reviews and unresolved threads into the same pool, tagged `spec`.
+A task's spec lives in the **workspace** repo on a `spec…` branch naming the
+task's repo and issue number — for every project task that is a *different repo*
+from the issue, so nothing on the issue links to it. The digest resolves it by
+branch name and pulls its comments, reviews and unresolved threads into the same
+pool, tagged `spec`.
 
 This matters: owner approvals and scope changes are routinely written on the
 spec PR, and before this was wired the loop simply never saw them. Ack them like
 any other comment (`--spec-comment <id>`, or `--all`).
+
+**Branch matching is deliberately loose**, because a spec PR the digest fails to
+recognise is a spec PR whose owner feedback is never read. All of these resolve:
+
+| Branch | → |
+|---|---|
+| `spec/goga-1-framework-foundations` | goga#1 |
+| `spec/ui-kit-6-workout-components` | ui-kit#6 |
+| `spec/gopgql-issue-38` | gopgql#38 |
+| `spec/gopgql-issue-9-m7-full-sdl-conformance` | gopgql#9 |
+| `spec-ui-kit-6` | ui-kit#6 |
+
+So: a `/` or `-` separator either way, an optional `issue` segment, and an
+optional trailing slug after the number. The number is the **first** `-<digits>-`
+run, so a slug that itself starts with digits can't steal the match. A number
+that isn't separated from what follows it (`spec/goga-1abc`) stays unmatched
+rather than being guessed at. `spec_branch_key` is covered by
+`scripts/test_board_tick.py` — add a case there when a new naming style appears,
+and run `python3 -m unittest` from `scripts/`.
+
+### Unsubmitted reviews are read too
+
+GitHub lets a reviewer write inline comments, never click **Submit review**, and
+leave the review `PENDING` — its comments then appear in **no** ordinary
+endpoint: not `GET /pulls/{n}/comments`, not `gh pr view --json comments,reviews`.
+The owner usually has no idea the comments are invisible; from their side they
+look written.
+
+Because the loop and the owner post from the same GitHub account, the API *does*
+hand us those drafts, so the digest fetches them (off the `reviews` connection it
+already queries — no extra API call) for both the code PR and the spec PR. They
+are folded into the same unaddressed-owner-comment pool as everything else: they
+count in `HUM` (with the `+N✎` suffix), they rank the task `HUMAN-INPUT`, and they
+print in DETAILS tagged **`[OWNER · DRAFT REVIEW · pending <id>]`** under a `⚠`
+line naming the PR.
+
+**Treat them as direction — they are real owner intent.** Ack them like any other
+comment (`--pending-comment <id>`, or `--all`). When you reply, *say* the review
+was never submitted, so the owner learns that their comments were invisible to
+everyone else and can submit next time.
+
+> A draft comment also shows up as an unresolved review thread. The digest counts
+> the thread once and the comment once, and the draft tag wins — so `THR` and
+> `HUM` don't double-report the same feedback.
 
 Useful flags: `--repo <name>` to narrow, `--include-bots` to expand suppressed
 machine comments, `--json` for the structured form, `--status <s>` to override
@@ -195,9 +243,11 @@ the *same* GitHub account. Two mechanisms keep them apart:
    ```
 
    `--all` acks everything the digest currently shows for that task, across the
-   issue, the code PR **and the spec PR**. To ack selectively, pass
+   issue, the code PR, the spec PR **and any unsubmitted review**. To ack
+   selectively, pass
    `--issue-comment <id>` / `--pr-comment <id>` / `--review-comment <id>` /
-   `--spec-comment <id>` (the ids are printed in the details block). Add
+   `--spec-comment <id>` / `--pending-comment <id>` (the ids are printed in the
+   details block, after the `·` in each comment's header). Add
    `--dry-run` to see the ledger without writing it.
 
 **An owner comment is never "read and skipped".** Either act on it and ack it,
