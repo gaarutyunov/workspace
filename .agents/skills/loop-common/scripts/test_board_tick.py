@@ -228,6 +228,211 @@ class NoPrWarning(unittest.TestCase):
         self.assertFalse(self._warns(labels=["needs:review"], pr_number=40))
 
 
+class Truncation(unittest.TestCase):
+    """A cap that bites must never be silent."""
+
+    def test_warns_naming_the_connection_and_both_numbers(self):
+        item = _item()
+        nodes = bt.note_truncation(
+            item, {"totalCount": 47, "nodes": [{"databaseId": i} for i in range(30)]},
+            "spec PR #36 review threads",
+        )
+        self.assertEqual(len(nodes), 30)  # still returns what it got
+        self.assertEqual(len(item.warnings), 1)
+        warning = item.warnings[0]
+        self.assertIn("TRUNCATED", warning)
+        self.assertIn("spec PR #36 review threads", warning)
+        self.assertIn("30 of 47", warning)
+        self.assertIn("17 not seen", warning)
+
+    def test_silent_when_nothing_was_dropped(self):
+        item = _item()
+        bt.note_truncation(item, {"totalCount": 4, "nodes": [1, 2, 3, 4]}, "x")
+        bt.note_truncation(item, {"totalCount": 0, "nodes": []}, "x")
+        bt.note_truncation(item, None, "x")
+        bt.note_truncation(item, {"nodes": [1]}, "x")  # totalCount not selected
+        self.assertEqual(item.warnings, [])
+
+    def test_truncation_forces_an_otherwise_quiet_row_into_details(self):
+        item = _item(status="In review", labels=["needs:review"])
+        bt.note_truncation(item, {"totalCount": 9, "nodes": [1]}, "PR #40 comments")
+        bt.compute_signal(item)
+        self.assertEqual(item.signal, "WAITING-OWNER")  # a normally-skipped row
+        self.assertIn("TRUNCATED", bt.render_details([item], False, 200))
+
+
+class BlockerParsing(unittest.TestCase):
+    """`blocked` is a claim; the blocker it names has to be machine-readable."""
+
+    # The real blocker comment from bikelanes#4. It cites three references: the
+    # blocker, its spec PR and its code PR — and the spec PR is MERGED, so a
+    # parser that grabs the wrong one reports "cleared" on a live blocker.
+    REAL = (
+        "**Blocked on gaarutyunov/ui-kit#7**, which is waiting on spec approval "
+        "(spec PR: gaarutyunov/workspace#22, code PR: gaarutyunov/ui-kit#9)."
+    )
+
+    def test_takes_the_reference_after_the_blocker_phrase(self):
+        b = bt.parse_blocker([{"databaseId": 1, "body": self.REAL}])
+        self.assertEqual((b.owner, b.repo, b.number), ("gaarutyunov", "ui-kit", 7))
+        self.assertEqual(b.ref, "gaarutyunov/ui-kit#7")
+        self.assertEqual(b.source_cid, 1)
+
+    def test_accepts_the_url_form_and_other_phrasings(self):
+        for body, want in [
+            ("Blocked by https://github.com/gaarutyunov/gopgql/issues/9 for now", 9),
+            ("This is gating on gaarutyunov/postgres-pglite#6.", 6),
+            ("Waiting on gaarutyunov/ui-kit#12 to cut a release", 12),
+            ("Depends on gaarutyunov/epos#3", 3),
+            ("Blocker: gaarutyunov/sysgo#67", 67),
+            ("blocked on gaarutyunov/workspace/pull/22", 22),
+        ]:
+            with self.subTest(body=body):
+                b = bt.parse_blocker([{"databaseId": 1, "body": body}])
+                self.assertIsNotNone(b, body)
+                self.assertEqual(b.number, want)
+
+    def test_most_recent_blocker_comment_wins(self):
+        nodes = [
+            {"databaseId": 1, "body": "Blocked on gaarutyunov/ui-kit#7"},
+            {"databaseId": 2, "body": "Now blocked on gaarutyunov/gopgql#9 instead"},
+        ]
+        self.assertEqual(bt.parse_blocker(nodes).ref, "gaarutyunov/gopgql#9")
+
+    def test_no_reference_without_a_blocker_phrase(self):
+        # A bare mention is not a blocker — every issue body cites numbers.
+        self.assertIsNone(
+            bt.parse_blocker([{"databaseId": 1, "body": "See gaarutyunov/ui-kit#7 for context"}])
+        )
+
+    def test_bare_hash_number_is_not_a_blocker(self):
+        self.assertIsNone(bt.parse_blocker([{"databaseId": 1, "body": "Blocked on #7"}]))
+
+    def test_ignores_the_ledger_comment(self):
+        self.assertIsNone(
+            bt.parse_blocker([{"databaseId": 1, "body": bt.LEDGER_MARKER + " blocked on a/b#1"}])
+        )
+
+    def test_parsed_only_for_blocked_rows(self):
+        payload = {
+            "labels": {"nodes": []},
+            "createdAt": "2026-07-01T00:00:00Z",
+            "comments": {"totalCount": 1, "nodes": [{"databaseId": 1, "body": self.REAL,
+                                                     "author": {"login": bt.OWNER},
+                                                     "createdAt": "2026-07-01T00:00:00Z"}]},
+        }
+        item = _item()
+        bt.apply_issue(item, payload)
+        self.assertIsNone(item.blocker)  # no `blocked` label → nothing to re-check
+
+        blocked = _item()
+        payload["labels"] = {"nodes": [{"name": "blocked"}]}
+        bt.apply_issue(blocked, payload)
+        self.assertEqual(blocked.blocker.ref, "gaarutyunov/ui-kit#7")
+
+
+class BlockerSignal(unittest.TestCase):
+    def _blocked(self, blocker):
+        item = _item(status="In review", labels=["blocked"])
+        item.blocker = blocker
+        bt.compute_signal(item)
+        return item
+
+    def _resolved(self, state, kind="Issue"):
+        return bt.Blocker(
+            owner="gaarutyunov", repo="ui-kit", number=7, resolved=True, kind=kind,
+            state=state, title="Some blocker", url="https://example.test/7",
+            created_at="2026-07-25T18:39:33Z", closed_at="2026-07-26T19:54:22Z",
+        )
+
+    def test_cleared_blocker_becomes_actionable(self):
+        for state, kind in (("CLOSED", "Issue"), ("MERGED", "PullRequest")):
+            with self.subTest(state=state):
+                item = self._blocked(self._resolved(state, kind))
+                self.assertEqual(item.signal, "UNBLOCKED")
+                self.assertTrue(any("CLEARED" in w for w in item.warnings))
+                # Ranked above the signals a rotting task would otherwise hide under.
+                self.assertLess(
+                    bt.SIGNAL_ORDER.index("UNBLOCKED"), bt.SIGNAL_ORDER.index("BLOCKED")
+                )
+                self.assertLess(
+                    bt.SIGNAL_ORDER.index("UNBLOCKED"), bt.SIGNAL_ORDER.index("READY")
+                )
+
+    def test_open_blocker_stays_blocked_but_renders(self):
+        item = self._blocked(self._resolved("OPEN"))
+        self.assertEqual(item.signal, "BLOCKED")
+        self.assertFalse(any("CLEARED" in w for w in item.warnings))
+        details = bt.render_details([item], False, 200)
+        self.assertIn("blocker: gaarutyunov/ui-kit#7 — still open", details)
+
+    def test_unparseable_blocker_is_a_warning(self):
+        item = self._blocked(None)
+        self.assertEqual(item.signal, "BLOCKED")
+        self.assertTrue(any("no comment names a blocker" in w for w in item.warnings))
+
+    def test_unresolvable_blocker_is_a_warning(self):
+        item = self._blocked(bt.Blocker(owner="gaarutyunov", repo="gone", number=1))
+        self.assertTrue(any("could not be resolved" in w for w in item.warnings))
+
+    def test_a_blocked_row_is_never_a_bare_table_line(self):
+        """The regression this exists to prevent: nothing left to re-examine."""
+        item = self._blocked(self._resolved("OPEN"))
+        self.assertEqual(item.pending, [])
+        self.assertEqual(item.warnings, [])  # open blocker warrants no ⚠ …
+        self.assertIn("blocker:", bt.render_details([item], False, 200))  # … but still renders
+
+    def test_resolve_blockers_is_skipped_when_nothing_is_blocked(self):
+        called = []
+        original = bt.gh_graphql
+        bt.gh_graphql = lambda *a, **k: called.append(a) or {}
+        try:
+            bt.resolve_blockers([_item(), _item(labels=["needs:review"])])
+        finally:
+            bt.gh_graphql = original
+        self.assertEqual(called, [])
+
+    def test_resolve_blockers_dedupes_into_one_call(self):
+        """N rows blocked on the same thing must cost one alias, not N calls."""
+        items = [_item(number=n, labels=["blocked"]) for n in (1, 2, 3)]
+        for it in items:
+            it.blocker = bt.Blocker(owner="gaarutyunov", repo="ui-kit", number=7)
+        queries = []
+
+        def fake(query, tolerant=False):
+            queries.append(query)
+            return {"b0": {"issueOrPullRequest": {
+                "__typename": "Issue", "title": "t", "url": "u",
+                "state": "CLOSED", "createdAt": "2026-07-01T00:00:00Z",
+                "closedAt": "2026-07-28T00:00:00Z"}}}
+
+        original = bt.gh_graphql
+        bt.gh_graphql = fake
+        try:
+            bt.resolve_blockers(items)
+        finally:
+            bt.gh_graphql = original
+
+        self.assertEqual(len(queries), 1)
+        self.assertEqual(queries[0].count("issueOrPullRequest"), 1)
+        self.assertTrue(all(i.blocker.cleared for i in items))
+
+    def test_a_failed_lookup_never_breaks_the_tick(self):
+        item = _item(labels=["blocked"])
+        item.blocker = bt.Blocker(owner="gaarutyunov", repo="ui-kit", number=7)
+        original = bt.gh_graphql
+
+        def boom(*a, **k):
+            raise RuntimeError("GraphQL exploded")
+
+        bt.gh_graphql = boom
+        try:
+            bt.resolve_blockers([item])  # must not raise
+        finally:
+            bt.gh_graphql = original
+        self.assertFalse(item.blocker.resolved)
+
+
 class AckBuckets(unittest.TestCase):
     def test_pending_is_a_ledger_bucket(self):
         item = _item()

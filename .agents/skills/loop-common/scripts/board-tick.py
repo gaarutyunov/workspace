@@ -107,12 +107,23 @@ def gh(*args: str, check: bool = True, stdin: str | None = None) -> str:
     return proc.stdout
 
 
-def gh_graphql(query: str) -> dict:
-    out = gh("api", "graphql", "-f", f"query={query}")
-    payload = json.loads(out)
-    if payload.get("errors"):
+def gh_graphql(query: str, tolerant: bool = False) -> dict:
+    """Run a GraphQL query. `tolerant` keeps partial data when some alias errors.
+
+    A batched query over many aliases (blocker lookups) can have one alias fail —
+    a deleted or private issue — while the rest are fine. GitHub returns the good
+    data *and* an errors array; tolerant callers want the data.
+    """
+    out = gh("api", "graphql", "-f", f"query={query}", check=not tolerant)
+    try:
+        payload = json.loads(out or "{}")
+    except json.JSONDecodeError:
+        if tolerant:
+            return {}
+        raise
+    if payload.get("errors") and not tolerant:
         raise RuntimeError("GraphQL errors: " + json.dumps(payload["errors"], indent=2))
-    return payload["data"]
+    return payload.get("data") or {}
 
 
 # ── Data model ──────────────────────────────────────────────────────────────
@@ -133,6 +144,32 @@ class Comment:
     # Set for comments belonging to a review the owner started but never
     # submitted. Nobody but us can see these, so the digest has to say so.
     draft_on: str | None = None  # e.g. "PR #40" / "spec PR #36"
+
+
+@dataclass
+class Blocker:
+    """The issue/PR a `blocked` task names as the thing it is waiting on."""
+
+    owner: str
+    repo: str
+    number: int
+    source_cid: int | None = None  # the comment it was parsed from
+    resolved: bool = False  # did the state lookup succeed?
+    kind: str = ""  # Issue | PullRequest
+    state: str = ""  # OPEN | CLOSED | MERGED
+    title: str = ""
+    url: str = ""
+    created_at: str = ""
+    closed_at: str = ""
+
+    @property
+    def ref(self) -> str:
+        return f"{self.owner}/{self.repo}#{self.number}"
+
+    @property
+    def cleared(self) -> bool:
+        """Has the thing this task waits on finished?"""
+        return self.state in ("CLOSED", "MERGED")
 
 
 @dataclass
@@ -173,6 +210,9 @@ class Item:
     spec_pr_url: str | None = None
     spec_pr_state: str = ""
     spec_unresolved_threads: int = 0
+    # What a `blocked` row is waiting on, parsed from its blocker comment and
+    # resolved so a cleared blocker cannot sit unnoticed.
+    blocker: "Blocker | None" = None
     issue_created: str = ""
     last_activity: str = ""
     has_ledger: bool = False
@@ -433,6 +473,94 @@ def attach_spec_prs(items: list[Item]) -> None:
         item.spec_pr_url = pr.get("url")
 
 
+# ── Blockers ────────────────────────────────────────────────────────────────
+# `blocked` is a *claim*, and claims go stale: the blocker merges and nobody
+# notices, so the row keeps ranking BLOCKED and every tick keeps skipping it.
+# Two rows were sitting on already-closed blockers when this was written.
+
+# Phrases the loops actually use to name a blocker. The reference is taken from
+# *after* one of these, never from anywhere in the comment: a real blocker
+# comment also cites the blocker's own spec and code PRs, and those are usually
+# merged — picking the wrong reference would report "cleared" on a live blocker.
+BLOCKER_MARKER = re.compile(
+    r"block(?:ed|er|ing)\s*(?:on|by|:)|wait(?:ing|s)\s+on|depends?\s+on|gat(?:ed|ing)\s+on",
+    re.I,
+)
+# `owner/repo#N`, or the equivalent issue/PR URL. Deliberately no bare `#N`:
+# every issue body mentions numbers, and a wrong blocker is worse than none.
+BLOCKER_REF = re.compile(
+    r"(?:https?://github\.com/)?"
+    r"(?P<owner>[A-Za-z0-9][\w.-]*)/(?P<repo>[A-Za-z0-9][\w.-]*)"
+    r"(?:/(?:issues|pull)/|#)"
+    r"(?P<num>\d+)"
+)
+
+
+def parse_blocker(comment_nodes: list[dict]) -> Blocker | None:
+    """Find what a `blocked` task is waiting on, from its blocker comment.
+
+    Scans comments newest-first and returns the first reference that follows a
+    blocker phrase, so the most recent statement of the blocker wins.
+    """
+    for node in reversed(comment_nodes or []):
+        body = node.get("body") or ""
+        if LEDGER_MARKER in body:
+            continue
+        marker = BLOCKER_MARKER.search(body)
+        if not marker:
+            continue
+        ref = BLOCKER_REF.search(body, marker.end())
+        if not ref:
+            continue
+        return Blocker(
+            owner=ref.group("owner"),
+            repo=ref.group("repo"),
+            number=int(ref.group("num")),
+            source_cid=node.get("databaseId"),
+        )
+    return None
+
+
+def resolve_blockers(items: list[Item]) -> None:
+    """Look up every named blocker's state — one batched call for the whole board.
+
+    Deduplicated by (owner, repo, number), so N rows blocked on the same thing
+    cost one alias, and skipped entirely when no row is blocked. Failures are
+    swallowed on purpose: an unresolvable blocker is reported as a warning on its
+    row (see compute_signal) and must never take the whole tick down.
+    """
+    blockers = [i.blocker for i in items if i.blocker]
+    if not blockers:
+        return
+    groups: dict[tuple[str, str, int], list[Blocker]] = {}
+    for b in blockers:
+        groups.setdefault((b.owner, b.repo, b.number), []).append(b)
+    keys = list(groups)
+    parts = [
+        f'b{idx}: repository(owner: "{owner}", name: "{repo}") '
+        f"{{ issueOrPullRequest(number: {num}) {{ __typename "
+        "... on Issue { title url state createdAt closedAt } "
+        "... on PullRequest { title url state createdAt closedAt mergedAt } } }"
+        for idx, (owner, repo, num) in enumerate(keys)
+    ]
+    try:
+        data = gh_graphql("query {\n" + "\n".join(parts) + "\n}", tolerant=True)
+    except RuntimeError:
+        return
+    for idx, key in enumerate(keys):
+        node = (data.get(f"b{idx}") or {}).get("issueOrPullRequest") or {}
+        if not node:
+            continue  # deleted, private, or wrong number — flagged on the row
+        for b in groups[key]:
+            b.resolved = True
+            b.kind = node.get("__typename", "")
+            b.state = node.get("state", "")
+            b.title = node.get("title", "")
+            b.url = node.get("url", "")
+            b.created_at = node.get("createdAt", "")
+            b.closed_at = node.get("mergedAt") or node.get("closedAt") or ""
+
+
 def find_pr_by_branch(repo: str, issue: int) -> int | None:
     """Fallback for a PR the board didn't link: the loops' `issue-<N>` branch."""
     out = gh(
@@ -460,11 +588,16 @@ def find_pr_by_branch(repo: str, issue: int) -> int | None:
 
 # ── GraphQL hydration ───────────────────────────────────────────────────────
 
+# Every capped connection selects `totalCount` next to its `nodes`. A cap that
+# silently returns fewer rows than exist is indistinguishable from "there was
+# nothing more" — the exact failure that hid this PR's owner comments for a day —
+# so `note_truncation` turns every such gap into a row-level ⚠.
 ISSUE_FRAGMENT = """
 fragment IssueBits on Issue {
   number url title state createdAt
   labels(first: 50) { nodes { name } }
   comments(last: 100) {
+    totalCount
     nodes { databaseId author { login } body createdAt url }
   }
 }
@@ -474,20 +607,25 @@ SPEC_FRAGMENT = """
 fragment SpecBits on PullRequest {
   number url state mergedAt isDraft
   comments(last: 50) {
+    totalCount
     nodes { databaseId author { login } body createdAt url }
   }
   reviews(last: 20) {
+    totalCount
     nodes {
       databaseId author { login } body state submittedAt url
       comments(first: 50) {
+        totalCount
         nodes { databaseId author { login } body createdAt url path line }
       }
     }
   }
   reviewThreads(first: 30) {
+    totalCount
     nodes {
       isResolved path line
       comments(first: 5) {
+        totalCount
         nodes { databaseId author { login } body createdAt url }
       }
     }
@@ -500,27 +638,34 @@ fragment PrBits on PullRequest {
   number url isDraft state mergeable reviewDecision headRefName
   changedFiles additions deletions
   comments(last: 100) {
+    totalCount
     nodes { databaseId author { login } body createdAt url }
   }
   reviews(last: 30) {
+    totalCount
     nodes {
       databaseId author { login } body state submittedAt url
       comments(first: 50) {
+        totalCount
         nodes { databaseId author { login } body createdAt url path line }
       }
     }
   }
   reviewThreads(first: 60) {
+    totalCount
     nodes {
       id isResolved isOutdated path line
       comments(first: 10) {
+        totalCount
         nodes { databaseId author { login } body createdAt url }
       }
     }
   }
   commits(last: 1) {
     totalCount
-    nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes {
+    nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) {
+      totalCount
+      nodes {
       __typename
       ... on CheckRun { name conclusion status detailsUrl }
       ... on StatusContext { context state targetUrl }
@@ -611,6 +756,31 @@ def ingest(item: Item, node: dict, kind: str, **extra) -> Comment | None:
     return comment
 
 
+def note_truncation(item: Item, conn: dict | None, what: str) -> list:
+    """Warn when a capped connection returned fewer rows than actually exist.
+
+    Every `first:`/`last:` in the fragments above is a cap, and GraphQL reports no
+    error when it bites — it just returns fewer nodes. That makes an
+    under-reporting tick indistinguishable from a quiet one, which is how this
+    tool lost five owner comments for a day. So the caller pairs every capped
+    connection with `totalCount` and routes it through here: any shortfall
+    becomes a row-level ⚠ naming the connection and both numbers, so a tick can
+    never silently under-report.
+
+    Returns the connection's nodes, so call sites can use it inline.
+    """
+    conn = conn or {}
+    nodes = conn.get("nodes") or []
+    total = conn.get("totalCount")
+    if isinstance(total, int) and total > len(nodes):
+        item.warnings.append(
+            f"TRUNCATED: {what} returned {len(nodes)} of {total} — "
+            f"{total - len(nodes)} not seen by this tick; raise the cap in the "
+            "GraphQL fragment before trusting this row"
+        )
+    return nodes
+
+
 def ingest_pending_review(item: Item, review: dict, label: str) -> int:
     """Fold an *unsubmitted* review's inline comments into the pending pool.
 
@@ -628,7 +798,7 @@ def ingest_pending_review(item: Item, review: dict, label: str) -> int:
     realise an unsubmitted review is invisible to everyone else.
     """
     count = 0
-    for node in (review.get("comments") or {}).get("nodes", []):
+    for node in note_truncation(item, review.get("comments"), f"{label} draft-review comments"):
         line = node.get("line")
         got = ingest(
             item,
@@ -646,7 +816,8 @@ def apply_issue(item: Item, issue: dict) -> None:
     item.labels = [n["name"] for n in (issue.get("labels") or {}).get("nodes", [])]
     item.issue_created = issue.get("createdAt", "")
     item.last_activity = newest(item.last_activity, item.issue_created)
-    for node in (issue.get("comments") or {}).get("nodes", []):
+    nodes = note_truncation(item, issue.get("comments"), "issue comments")
+    for node in nodes:
         if LEDGER_MARKER in (node.get("body") or ""):
             # The ledger is our own bookkeeping: it is neither a comment to act
             # on nor activity — counting it would make every task look fresh.
@@ -655,15 +826,17 @@ def apply_issue(item: Item, issue: dict) -> None:
             item.ledger["_comment_id"] = node["databaseId"]
             continue
         ingest(item, node, "issue")
+    if "blocked" in item.labels:
+        item.blocker = parse_blocker(nodes)
 
 
 def apply_spec(item: Item, spec: dict) -> None:
     item.spec_pr_state = spec.get("state", item.spec_pr_state)
     item.spec_pr_url = spec.get("url") or item.spec_pr_url
-    for node in (spec.get("comments") or {}).get("nodes", []):
-        ingest(item, node, "spec")
     label = f"spec PR #{item.spec_pr_number}"
-    for node in (spec.get("reviews") or {}).get("nodes", []):
+    for node in note_truncation(item, spec.get("comments"), f"{label} comments"):
+        ingest(item, node, "spec")
+    for node in note_truncation(item, spec.get("reviews"), f"{label} reviews"):
         state = node.get("state", "")
         if state == "PENDING":
             # Runs before the thread pass below so the draft mark survives dedupe.
@@ -674,12 +847,13 @@ def apply_spec(item: Item, spec: dict) -> None:
             continue
         node = {**node, "body": f"[spec review {state}] {body}".strip()}
         ingest(item, node, "spec")
-    for thread in (spec.get("reviewThreads") or {}).get("nodes", []):
+    for thread in note_truncation(item, spec.get("reviewThreads"), f"{label} review threads"):
         if thread.get("isResolved"):
             continue
         item.spec_unresolved_threads += 1
-        for node in (thread.get("comments") or {}).get("nodes", []):
-            ingest(item, node, "spec", path=f"{thread.get('path')}:{thread.get('line')}")
+        where = f"{thread.get('path')}:{thread.get('line')}"
+        for node in note_truncation(item, thread.get("comments"), f"{label} thread {where}"):
+            ingest(item, node, "spec", path=where)
 
 
 def apply_pr(item: Item, pr: dict) -> None:
@@ -693,42 +867,38 @@ def apply_pr(item: Item, pr: dict) -> None:
     item.pr_deletions = pr.get("deletions") or 0
     item.pr_commits = ((pr.get("commits") or {}).get("totalCount")) or 0
 
-    for node in (pr.get("comments") or {}).get("nodes", []):
+    label = f"PR #{item.pr_number}"
+    for node in note_truncation(item, pr.get("comments"), f"{label} comments"):
         ingest(item, node, "pr")
 
-    for node in (pr.get("reviews") or {}).get("nodes", []):
+    for node in note_truncation(item, pr.get("reviews"), f"{label} reviews"):
         state = node.get("state", "")
         if state == "PENDING":
             # Runs before the thread pass below so the draft mark survives dedupe.
-            ingest_pending_review(item, node, f"PR #{item.pr_number}")
+            ingest_pending_review(item, node, label)
             continue
         body = (node.get("body") or "").strip()
         if not body and state not in ("CHANGES_REQUESTED", "APPROVED"):
             continue
         ingest(item, {**node, "body": f"[review {state}] {body}".strip()}, "pr")
 
-    for thread in (pr.get("reviewThreads") or {}).get("nodes", []):
+    for thread in note_truncation(item, pr.get("reviewThreads"), f"{label} review threads"):
         if thread.get("isResolved"):
             continue  # resolving a thread *is* the ack for review comments
         item.unresolved_threads += 1
-        for node in (thread.get("comments") or {}).get("nodes", []):
+        where = f"{thread.get('path')}:{thread.get('line')}"
+        for node in note_truncation(item, thread.get("comments"), f"{label} thread {where}"):
             login = (node.get("author") or {}).get("login", "ghost")
             if classify(login, node.get("body") or "") == "agent":
                 continue
-            ingest(
-                item,
-                node,
-                "review",
-                thread_id=thread["id"],
-                path=f"{thread.get('path')}:{thread.get('line')}",
-            )
+            ingest(item, node, "review", thread_id=thread["id"], path=where)
 
     commits = (pr.get("commits") or {}).get("nodes", [])
     if commits:
         item.last_activity = newest(item.last_activity, commits[0]["commit"].get("committedDate", ""))
     rollup = (commits[0]["commit"].get("statusCheckRollup") if commits else None) or {}
     item.ci_state = rollup.get("state")
-    for ctx in (rollup.get("contexts") or {}).get("nodes", []):
+    for ctx in note_truncation(item, rollup.get("contexts"), f"{label} CI checks"):
         if ctx.get("__typename") == "CheckRun":
             name = ctx.get("name", "?")
             if ctx.get("status") != "COMPLETED":
@@ -833,6 +1003,29 @@ def compute_signal(item: Item) -> None:
         )
         if not (spec_gate_pending or labels & {"needs:input", "blocked"}):
             item.warnings.append("in review with no PR — is the blocker written on the issue?")
+    if "blocked" in labels:
+        # A `blocked` row used to be the quietest thing on the board: bottom of
+        # the sort, "skip — do not touch", and (before this) not even rendered in
+        # DETAILS. So the claim has to be re-checked mechanically every tick.
+        blocker = item.blocker
+        if blocker is None:
+            item.warnings.append(
+                "carries `blocked` but no comment names a blocker as "
+                "`owner/repo#N` — nothing to re-check, so this can never "
+                "un-block itself; state the blocker or drop the label"
+            )
+        elif not blocker.resolved:
+            item.warnings.append(
+                f"blocker {blocker.ref} could not be resolved (deleted, private, "
+                "or a bad reference) — check it by hand"
+            )
+        elif blocker.cleared:
+            item.warnings.append(
+                f"blocker {blocker.ref} has CLEARED "
+                f"({blocker.state.lower()} {blocker.closed_at[:10]}, "
+                f"{age_of(blocker.closed_at)} ago) — the `blocked` label is stale; "
+                "remove it and pick this up"
+            )
     if item.local_work:
         bits = []
         if item.wt_unpushed:
@@ -875,6 +1068,16 @@ def compute_signal(item: Item) -> None:
         # task rots silently once its comments have been acked.
         reasons.append(f"spec PR #{item.spec_pr_number} is merged but no work is pushed")
         item.signal = "SPEC-MERGED"
+    elif item.blocker and item.blocker.cleared:
+        # Same rot as SPEC-MERGED — a gate cleared and nobody noticed. Ranked as
+        # actionable rather than BLOCKED because the task is pickable *now*, and
+        # BLOCKED means "skip, do not touch": leaving it there is what let two
+        # rows sit on already-closed blockers.
+        reasons.append(
+            f"blocker {item.blocker.ref} cleared {age_of(item.blocker.closed_at)} ago "
+            "— pickable now; drop the `blocked` label"
+        )
+        item.signal = "UNBLOCKED"
     elif item.ci_failing:
         reasons.append("CI failing: " + ", ".join(item.ci_failing[:4]))
         item.signal = "CI-RED"
@@ -919,6 +1122,7 @@ SIGNAL_ORDER = [
     "SPEC-APPROVED",
     "UNPUSHED",
     "SPEC-MERGED",
+    "UNBLOCKED",
     "CI-RED",
     "THREADS",
     "READY",
@@ -1040,7 +1244,9 @@ def render_details(items: list[Item], include_bots: bool, body_limit: int) -> st
     out = []
     for it in items:
         quiet = ("IDLE", "TRACKER", "WAITING-OWNER", "BLOCKED")
-        if it.signal in quiet and not it.pending and not it.warnings:
+        # A blocked row always renders: its blocker is a claim that has to be
+        # re-checkable, and a single table line gives nothing to re-check.
+        if it.signal in quiet and not it.pending and not it.warnings and not it.blocker:
             continue  # nothing to do and nothing new — keep the digest lean
         out.append("")
         out.append(f"── {it.slug} · {it.status} · loop={it.loop or '-'} · {it.signal}")
@@ -1060,6 +1266,22 @@ def render_details(items: list[Item], include_bots: bool, body_limit: int) -> st
             out.append(
                 f"   worktree: {it.worktree} — {', '.join(state) if state else 'clean, in sync'}"
             )
+        if it.blocker:
+            b = it.blocker
+            if not b.resolved:
+                out.append(f"   blocker: {b.ref} — unresolvable")
+            elif b.cleared:
+                out.append(
+                    f"   blocker: {b.ref} — {b.state.lower()} "
+                    f"{b.closed_at[:10]} ({age_of(b.closed_at)} ago) · {b.title}\n"
+                    f"   {b.url}"
+                )
+            else:
+                # Quiet line: still blocked, but now visible and re-checkable.
+                out.append(
+                    f"   blocker: {b.ref} — still {b.state.lower()}, opened "
+                    f"{age_of(b.created_at)} ago · {b.title}\n   {b.url}"
+                )
         if it.spec_pr_number:
             bits = [f"spec PR #{it.spec_pr_number} ({it.spec_pr_state.lower()})"]
             if it.spec_unresolved_threads:
@@ -1182,6 +1404,21 @@ def render_json(items: list[Item]) -> str:
                     if it.pr_number
                     else None
                 ),
+                "blocker": (
+                    {
+                        "ref": it.blocker.ref,
+                        "kind": it.blocker.kind,
+                        "state": it.blocker.state,
+                        "cleared": it.blocker.cleared,
+                        "resolved": it.blocker.resolved,
+                        "title": it.blocker.title,
+                        "url": it.blocker.url,
+                        "closed_at": it.blocker.closed_at or None,
+                        "from_comment": it.blocker.source_cid,
+                    }
+                    if it.blocker
+                    else None
+                ),
                 "spec_pr": (
                     {
                         "number": it.spec_pr_number,
@@ -1228,6 +1465,9 @@ def cmd_tick(args: argparse.Namespace) -> int:
         return 0
     attach_spec_prs(items)
     hydrate(items)
+    # Must follow hydrate: the blocker reference is parsed out of the comments
+    # hydrate fetches. One batched call, skipped when nothing is blocked.
+    resolve_blockers(items)
     projects = args.projects_dir or (workspace_root() / "projects")
     for it in items:
         if not args.no_local:

@@ -107,6 +107,7 @@ broken by who has waited longest):
 | `SPEC-APPROVED` | owner applied `approved:spec` | implement from `tasks.md` |
 | `UNPUSHED` | work exists only in the local worktree | **push it first** — it is the only state that can lose work |
 | `SPEC-MERGED` | spec PR merged but no work pushed | start implementing |
+| `UNBLOCKED` | the blocker this task named has closed/merged | drop the `blocked` label and pick it up |
 | `CI-RED` | checks failing, or the PR conflicts | fix |
 | `THREADS` | unresolved review threads | address + resolve |
 | `READY` | Ready and routed to this loop | pick it up |
@@ -114,7 +115,7 @@ broken by who has waited longest):
 | `WIP` | In progress with pushed work, nothing new | continue it |
 | `TRACKER` | legacy `tracker` label from before issues stopped being split | work the issue itself and drop the label |
 | `WAITING-OWNER` | needs the owner, nothing new since | **skip** — do not touch |
-| `BLOCKED` | blocked, blocker already written on the issue | **skip** — do not touch |
+| `BLOCKED` | blocked, and the blocker is confirmed still open this tick | **skip** — do not touch |
 
 Rows also carry `⚠` **hygiene warnings** (a blocked task parked In progress, an
 In-review task with no reason label, an In-progress task with nothing pushed).
@@ -128,6 +129,57 @@ the issue by the label protocol), or **an open spec PR plus
 `needs:spec-approval`** — a spec-only task has no code PR *by design* until the
 spec gate passes. It still fires for the case it was written for: In review, no
 code PR, and nothing accounting for it.
+
+There is one warning you must never rationalise away: **`TRUNCATED`**. Every
+`first:`/`last:` in the digest's GraphQL fragments is a cap, and GraphQL raises no
+error when one bites — it just returns fewer rows. That makes an under-reporting
+tick indistinguishable from a quiet one, which is precisely how five owner
+comments once stayed hidden for a day. So every capped connection is fetched with
+its `totalCount` and any shortfall becomes a row-level warning:
+
+```
+⚠ TRUNCATED: spec PR #36 review threads returned 30 of 47 — 17 not seen by this
+  tick; raise the cap in the GraphQL fragment before trusting this row
+```
+
+The row's `HUM`/`BOT`/`THR` counts are then **known to be incomplete**. Raise the
+cap in the fragment and re-run before acting on that row — never treat the digest
+as authoritative for a row carrying `TRUNCATED`.
+
+### A `blocked` row is re-checked, not trusted
+
+`blocked` is a *claim*, and claims go stale: the blocker merges, nobody notices,
+and the row keeps ranking `BLOCKED` — which the loops read as "skip, do not
+touch" — so it rots indefinitely. Two rows were sitting on already-closed
+blockers when this check was written.
+
+So every tick resolves what each blocked row is waiting on:
+
+- The blocker is parsed from the **most recent comment naming it as
+  `owner/repo#N`** (or the equivalent issue/PR URL), taken from *after* a blocker
+  phrase — `blocked on`/`blocked by`/`waiting on`/`depends on`/`gating on`/
+  `blocker:`. The phrase anchor is load-bearing: a real blocker comment also
+  cites the blocker's own spec and code PRs, and those are usually *merged*, so a
+  parser that grabbed any reference would report "cleared" on a live blocker.
+- **Blocker closed or merged** → the row is signalled `UNBLOCKED` (actionable,
+  ranked with `SPEC-MERGED`, well above `BLOCKED`) and carries a `⚠` naming the
+  close date. Drop the `blocked` label and work it.
+- **Blocker still open** → stays `BLOCKED`, with a quiet DETAILS line naming it,
+  its state and its age. No `⚠` — nothing is wrong — but it is now visible and
+  re-checkable every tick.
+- **No parseable reference** → a `⚠`. A `blocked` label with no
+  machine-readable blocker can never un-block itself, so it is a dead end by
+  construction: state the blocker as `owner/repo#N` or drop the label.
+
+**Write blocker comments so this works.** `**Blocked on gaarutyunov/ui-kit#7**,
+which is …` parses; "waiting for the kit release" does not.
+
+A blocked row now *always* appears in DETAILS. It is never a bare table line
+with nothing to re-examine.
+
+Cost: **one** batched GraphQL call per tick, deduplicated by blocker (N rows
+waiting on the same thing cost one alias), and skipped entirely when nothing is
+blocked. A lookup failure is reported on the row and never breaks the tick.
 
 ### An empty PR is a diagnosis, not a dead end
 
@@ -440,7 +492,13 @@ actively working it; a blocked task is not being worked, and parking it there
 hides it from the owner and re-parks it every tick. When you discover a blocker:
 
 1. Post the blocker on the issue with `board-tick.py post` — what is blocked,
-   what it depends on (link the issue/PR), and what unblocks it.
+   what it depends on, and what unblocks it. **Name the blocker as
+   `owner/repo#N` directly after a blocker phrase**, e.g.
+   `**Blocked on gaarutyunov/ui-kit#7**, which is …`. This is not a formatting
+   preference: it is the only thing that lets every later tick re-check whether
+   the blocker has cleared (see *A `blocked` row is re-checked, not trusted*).
+   Prose like "waiting for the kit release" produces a dead end that can never
+   un-block itself, and the digest will warn about it.
 2. Add the `blocked` label.
 3. Move the item to **In review**.
 4. Pick up the next task.
