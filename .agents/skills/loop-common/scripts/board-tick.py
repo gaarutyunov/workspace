@@ -820,8 +820,19 @@ def compute_signal(item: Item) -> None:
         item.warnings.append("in review with no needs:*/blocked label — say what it waits for")
     if item.status == "Ready" and not item.loop:
         item.warnings.append("Ready but no Loop value — neither loop will pick this up")
-    if item.status == "In review" and item.pr_number is None and "needs:input" not in labels:
-        item.warnings.append("in review with no PR — is the blocker written on the issue?")
+    if item.status == "In review" and item.pr_number is None:
+        # The warning exists for a task parked In review with *nothing to show*.
+        # Three things fully explain an absent code PR, and firing anyway trains
+        # the loop to ignore the ⚠ line: a question is out (`needs:input`), the
+        # task is blocked (the blocker is on the issue by the label protocol), or
+        # the spec gate has not passed yet — a spec-only task has no code PR *by
+        # design*, so an open spec PR plus `needs:spec-approval` is the complete
+        # answer to "where is the work?".
+        spec_gate_pending = (
+            item.spec_pr_number is not None and "needs:spec-approval" in labels
+        )
+        if not (spec_gate_pending or labels & {"needs:input", "blocked"}):
+            item.warnings.append("in review with no PR — is the blocker written on the issue?")
     if item.local_work:
         bits = []
         if item.wt_unpushed:

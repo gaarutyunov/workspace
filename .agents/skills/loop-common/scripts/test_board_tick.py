@@ -187,6 +187,47 @@ class PendingReviewComments(unittest.TestCase):
         self.assertIn("spec", {c.kind for c in item.pending_human})
 
 
+class NoPrWarning(unittest.TestCase):
+    """`in review with no PR` must only fire when nothing explains the absence.
+
+    A ⚠ that fires on a healthy task is worse than no ⚠ at all — it teaches the
+    loop to skim past the hygiene warnings that do matter.
+    """
+
+    WARNING = "in review with no PR"
+
+    def _warns(self, **kw):
+        item = _item(**kw)
+        bt.compute_signal(item)
+        return any(self.WARNING in w for w in item.warnings)
+
+    def test_fires_when_there_is_genuinely_nothing_to_show(self):
+        self.assertTrue(self._warns(labels=["needs:review"]))
+
+    def test_silent_for_a_spec_only_task_awaiting_the_spec_gate(self):
+        # goga#1: spec PR open, spec gate not passed, so no code PR *by design*.
+        self.assertFalse(
+            self._warns(labels=["needs:spec-approval"], spec_pr_number=36, spec_pr_state="OPEN")
+        )
+
+    def test_still_fires_when_the_spec_pr_is_missing(self):
+        # `needs:spec-approval` with no spec PR to approve is exactly the state
+        # blind spot 1 produced — the label claims a gate that isn't there.
+        self.assertTrue(self._warns(labels=["needs:spec-approval"]))
+
+    def test_still_fires_when_the_label_is_missing(self):
+        # A spec PR with no needs:spec-approval is unexplained — the loop either
+        # forgot the label or the spec already cleared and coding never started.
+        self.assertTrue(self._warns(labels=[], spec_pr_number=36, spec_pr_state="OPEN"))
+
+    def test_silent_when_blocked_or_a_question_is_out(self):
+        self.assertFalse(self._warns(labels=["blocked"]))
+        self.assertFalse(self._warns(labels=["needs:input"]))
+
+    def test_silent_when_a_code_pr_exists(self):
+        self.assertFalse(self._warns(labels=["needs:review"], pr_number=40))
+
+
 class AckBuckets(unittest.TestCase):
     def test_pending_is_a_ledger_bucket(self):
         item = _item()

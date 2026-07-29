@@ -120,6 +120,15 @@ Rows also carry `⚠` **hygiene warnings** (a blocked task parked In progress, a
 In-review task with no reason label, an In-progress task with nothing pushed).
 Fix the hygiene problem in the same tick you see it.
 
+A warning that fires on a healthy task is worse than no warning, because it
+teaches the loop to skim past the `⚠` lines that *do* matter. So
+`in review with no PR` stays silent whenever something already explains the
+absent code PR: `needs:input` (a question is out), `blocked` (the blocker is on
+the issue by the label protocol), or **an open spec PR plus
+`needs:spec-approval`** — a spec-only task has no code PR *by design* until the
+spec gate passes. It still fires for the case it was written for: In review, no
+code PR, and nothing accounting for it.
+
 ### An empty PR is a diagnosis, not a dead end
 
 A PR with no changed files means a previous tick claimed the task and produced
