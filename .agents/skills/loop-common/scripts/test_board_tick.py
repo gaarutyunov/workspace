@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Unit tests for board-tick.py — run with `python3 -m unittest` from this dir.
+"""Tests for board-tick.py — the pure logic only: no network, no `gh` calls.
 
-The module name has a hyphen, so it cannot be imported normally; load it by path.
-No network, no `gh` — everything here is pure parsing / classification.
+The script is deliberately stdlib-only so it stays runnable with zero install
+steps; these tests keep that property (plain `unittest`, no pytest).
+
+Run:
+    python3 -m unittest discover -s .agents/skills/loop-common/scripts -p 'test_*.py' -v
 """
 
 from __future__ import annotations
@@ -10,23 +13,682 @@ from __future__ import annotations
 import argparse
 import contextlib
 import importlib.util
+import inspect
 import io
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
 
-_spec = importlib.util.spec_from_file_location(
-    "board_tick", Path(__file__).with_name("board-tick.py")
+# board-tick.py is not an importable module name (hyphen), so load it by path.
+_SPEC = importlib.util.spec_from_file_location(
+    "board_tick", Path(__file__).resolve().parent / "board-tick.py"
 )
-bt = importlib.util.module_from_spec(_spec)
+bt = importlib.util.module_from_spec(_SPEC)
 # @dataclass resolves annotations through sys.modules[cls.__module__], so the
-# module has to be registered before it is executed.
+# module has to be registered *before* its body runs.
 sys.modules["board_tick"] = bt
-_spec.loader.exec_module(bt)
+_SPEC.loader.exec_module(bt)
 
 
-class SpecBranchKey(unittest.TestCase):
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+
+def make_item(**kw) -> "bt.Item":
+    """An Item with the required fields filled in; override anything by keyword."""
+    base = dict(
+        item_id="PVTI_test",
+        status="In progress",
+        loop="auto",
+        repo="demo",
+        number=1,
+        title="A task",
+        issue_url="https://github.com/gaarutyunov/demo/issues/1",
+    )
+    base.update(kw)
+    return bt.Item(**base)
+
+
+def blocker(number: int, state: str = "OPEN", repo: str = "gaarutyunov/dep") -> "bt.Blocker":
+    return bt.Blocker(
+        repo=repo,
+        number=number,
+        state=state,
+        title=f"blocker {number}",
+        url=f"https://github.com/{repo}/issues/{number}",
+        created="2020-01-01T00:00:00Z",
+    )
+
+
+def human_comment(cid: int = 1) -> "bt.Comment":
+    return bt.Comment(
+        kind="issue",
+        cid=cid,
+        author="gaarutyunov",
+        body="please rework this",
+        created="2020-01-01T00:00:00Z",
+        url="https://example.invalid/c",
+        who="human",
+    )
+
+
+def signal_of(item: "bt.Item") -> str:
+    bt.compute_signal(item)
+    return item.signal
+
+
+def chain_signals() -> list[str]:
+    """Signals in the order compute_signal's if/elif chain can assign them.
+
+    Derived from the source so a signal added to the chain but not to
+    SIGNAL_ORDER (or vice versa) fails the test instead of silently sorting to
+    the bottom of the digest.
+    """
+    src = inspect.getsource(bt.compute_signal)
+    return re.findall(r'item\.signal\s*=\s*"([A-Z][A-Z-]*)"', src)
+
+
+# ── the two highest-risk invariants ─────────────────────────────────────────
+
+
+class TestActiveStatuses(unittest.TestCase):
+    def test_blocked_is_an_active_status(self):
+        """Regression: dropping Blocked here makes blocked items vanish entirely.
+
+        A blocked item outside ACTIVE_STATUSES is fetched by no tick, so it is
+        strictly less visible than the old label-only scheme.
+        """
+        self.assertIn("Blocked", bt.ACTIVE_STATUSES)
+
+    def test_blocked_status_constant_matches(self):
+        self.assertEqual(bt.BLOCKED_STATUS, "Blocked")
+        self.assertIn(bt.BLOCKED_STATUS, bt.ACTIVE_STATUSES)
+        self.assertIn(bt.BLOCKED_STATUS, bt.STATUS_OPTION_IDS)
+
+    def test_backlog_and_done_stay_inactive(self):
+        self.assertNotIn("Backlog", bt.ACTIVE_STATUSES)
+        self.assertNotIn("Done", bt.ACTIVE_STATUSES)
+
+
+class TestSignalOrderAgreesWithChain(unittest.TestCase):
+    def test_every_assignable_signal_is_orderable(self):
+        """Both lists must name the same signals — derived, never hardcoded."""
+        chain = set(chain_signals())
+        order = set(bt.SIGNAL_ORDER)
+        self.assertEqual(
+            chain - order, set(), "signal(s) assigned by compute_signal but missing from SIGNAL_ORDER"
+        )
+        self.assertEqual(
+            order - chain, set(), "signal(s) in SIGNAL_ORDER that compute_signal never assigns"
+        )
+
+    def test_signal_order_has_no_duplicates(self):
+        self.assertEqual(len(bt.SIGNAL_ORDER), len(set(bt.SIGNAL_ORDER)))
+
+    def test_unblocked_ranks_immediately_after_human_input_in_both(self):
+        chain = chain_signals()
+        self.assertEqual(chain[:2], ["HUMAN-INPUT", "UNBLOCKED"])
+        self.assertEqual(bt.SIGNAL_ORDER[:2], ["HUMAN-INPUT", "UNBLOCKED"])
+
+    def test_blocked_precedes_waiting_owner_in_both(self):
+        chain = chain_signals()
+        self.assertLess(chain.index("BLOCKED"), chain.index("WAITING-OWNER"))
+        self.assertLess(
+            bt.SIGNAL_ORDER.index("BLOCKED"), bt.SIGNAL_ORDER.index("WAITING-OWNER")
+        )
+
+    def test_unblocked_outranks_blocked_in_the_sort(self):
+        self.assertLess(
+            bt.SIGNAL_ORDER.index("UNBLOCKED"), bt.SIGNAL_ORDER.index("BLOCKED")
+        )
+
+
+# ── compute_signal, branch by branch ────────────────────────────────────────
+
+
+class TestComputeSignalBlocked(unittest.TestCase):
+    def test_blocked_status_with_open_blocker(self):
+        item = make_item(status="Blocked", blockers=[blocker(9)], blockers_total=1)
+        self.assertEqual(signal_of(item), "BLOCKED")
+        self.assertTrue(any("dep#9" in r for r in item.reasons))
+
+    def test_blocked_label_with_open_blocker(self):
+        item = make_item(status="In review", labels=["blocked"], blockers=[blocker(9)], blockers_total=1)
+        self.assertEqual(signal_of(item), "BLOCKED")
+
+    def test_mixed_blockers_stay_blocked(self):
+        item = make_item(
+            status="Blocked",
+            blockers=[blocker(9, "CLOSED"), blocker(10, "OPEN")],
+            blockers_total=2,
+        )
+        self.assertEqual(signal_of(item), "BLOCKED")
+
+    def test_reason_names_open_blockers_and_their_age(self):
+        item = make_item(status="Blocked", blockers=[blocker(9)], blockers_total=1)
+        signal_of(item)
+        reason = " ".join(item.reasons)
+        self.assertIn("dep#9", reason)
+        self.assertIn("open", reason)
+
+
+class TestComputeSignalUnblocked(unittest.TestCase):
+    def test_all_blockers_closed_is_unblocked(self):
+        item = make_item(
+            status="Blocked", blockers=[blocker(9, "CLOSED")], blockers_total=1
+        )
+        self.assertEqual(signal_of(item), "UNBLOCKED")
+
+    def test_reason_names_the_blocker_that_closed(self):
+        item = make_item(
+            status="Blocked",
+            blockers=[blocker(9, "CLOSED"), blocker(10, "CLOSED")],
+            blockers_total=2,
+        )
+        signal_of(item)
+        reason = " ".join(item.reasons)
+        self.assertIn("dep#9 closed", reason)
+        self.assertIn("dep#10 closed", reason)
+        self.assertIn("Ready", reason)
+
+    def test_blocked_label_with_no_recorded_blocker_is_unblocked(self):
+        """The three legacy label-only items — surfaced, not skipped."""
+        item = make_item(status="In review", labels=["blocked", "needs:review"])
+        self.assertEqual(signal_of(item), "UNBLOCKED")
+
+    def test_unblocked_outranks_waiting_owner(self):
+        item = make_item(
+            status="Blocked",
+            labels=["blocked", "needs:review"],
+            blockers=[blocker(9, "CLOSED")],
+            blockers_total=1,
+        )
+        self.assertEqual(signal_of(item), "UNBLOCKED")
+
+    def test_unblocked_yields_to_a_waiting_owner_comment(self):
+        item = make_item(
+            status="Blocked", blockers=[blocker(9, "CLOSED")], blockers_total=1
+        )
+        item.comments.append(human_comment())
+        self.assertEqual(signal_of(item), "HUMAN-INPUT")
+
+    def test_unblocked_outranks_pr_approved(self):
+        item = make_item(
+            status="Blocked",
+            labels=["blocked", "approved:pr"],
+            blockers=[blocker(9, "CLOSED")],
+            blockers_total=1,
+        )
+        self.assertEqual(signal_of(item), "UNBLOCKED")
+
+    def test_not_flagged_blocked_never_gets_a_blocked_signal(self):
+        """A native edge alone does not park a task — it warns instead."""
+        item = make_item(status="Ready", blockers=[blocker(9)], blockers_total=1)
+        self.assertEqual(signal_of(item), "READY")
+        self.assertTrue(any("open blocker" in w for w in item.warnings))
+
+
+class TestComputeSignalOtherBranches(unittest.TestCase):
+    def test_human_input(self):
+        item = make_item()
+        item.comments.append(human_comment())
+        self.assertEqual(signal_of(item), "HUMAN-INPUT")
+
+    def test_pr_approved(self):
+        self.assertEqual(signal_of(make_item(labels=["approved:pr"])), "PR-APPROVED")
+
+    def test_spec_approved(self):
+        item = make_item(labels=["approved:spec", "needs:spec-approval"])
+        self.assertEqual(signal_of(item), "SPEC-APPROVED")
+
+    def test_unpushed(self):
+        self.assertEqual(
+            signal_of(make_item(worktree="/tmp/wt", wt_unpushed=2)), "UNPUSHED"
+        )
+
+    def test_spec_merged(self):
+        item = make_item(spec_pr_number=7, spec_pr_state="MERGED")
+        self.assertEqual(signal_of(item), "SPEC-MERGED")
+
+    def test_ci_red_on_failing_check(self):
+        item = make_item(pr_number=3, pr_changed_files=4, ci_failing=["build"])
+        self.assertEqual(signal_of(item), "CI-RED")
+
+    def test_ci_red_on_conflict(self):
+        item = make_item(pr_number=3, pr_changed_files=4, pr_mergeable="CONFLICTING")
+        self.assertEqual(signal_of(item), "CI-RED")
+
+    def test_threads(self):
+        item = make_item(pr_number=3, pr_changed_files=4, unresolved_threads=2)
+        self.assertEqual(signal_of(item), "THREADS")
+
+    def test_waiting_owner(self):
+        item = make_item(status="In review", labels=["needs:review"])
+        self.assertEqual(signal_of(item), "WAITING-OWNER")
+
+    def test_tracker(self):
+        item = make_item(status="In progress", labels=["tracker"])
+        self.assertEqual(signal_of(item), "TRACKER")
+
+    def test_ready(self):
+        self.assertEqual(signal_of(make_item(status="Ready")), "READY")
+
+    def test_not_started(self):
+        self.assertEqual(signal_of(make_item(status="In progress")), "NOT-STARTED")
+
+    def test_wip(self):
+        item = make_item(status="In progress", pr_number=3, pr_changed_files=5)
+        self.assertEqual(signal_of(item), "WIP")
+
+    def test_idle(self):
+        self.assertEqual(signal_of(make_item(status="In review")), "IDLE")
+
+    def test_every_chain_signal_is_reachable_by_some_test(self):
+        """Sanity: the branch tests above cover the whole chain."""
+        covered = {
+            "HUMAN-INPUT", "UNBLOCKED", "PR-APPROVED", "SPEC-APPROVED", "UNPUSHED",
+            "SPEC-MERGED", "CI-RED", "THREADS", "BLOCKED", "WAITING-OWNER",
+            "TRACKER", "READY", "NOT-STARTED", "WIP", "IDLE",
+        }
+        self.assertEqual(set(chain_signals()), covered)
+
+
+# ── hygiene warnings ────────────────────────────────────────────────────────
+
+
+class TestBlockedHygiene(unittest.TestCase):
+    def test_blocked_status_without_a_recorded_blocker_warns(self):
+        item = make_item(status="Blocked")
+        signal_of(item)
+        self.assertTrue(
+            any("blocked with no recorded blocker" in w for w in item.warnings), item.warnings
+        )
+
+    def test_legacy_label_without_blocked_status_warns_about_migration(self):
+        item = make_item(status="In review", labels=["blocked"])
+        signal_of(item)
+        self.assertTrue(
+            any("legacy `blocked` label" in w for w in item.warnings), item.warnings
+        )
+
+    def test_legacy_label_item_also_warns_about_the_missing_blocker(self):
+        """The three legacy items carry the label and no dependency edge — both
+        warnings apply, and they name two different fixes."""
+        item = make_item(status="In review", labels=["blocked"])
+        signal_of(item)
+        self.assertTrue(
+            any("blocked with no recorded blocker" in w for w in item.warnings), item.warnings
+        )
+        self.assertTrue(any("board-tick.py block" in w for w in item.warnings), item.warnings)
+
+    def test_recorded_blocker_suppresses_the_missing_blocker_warning(self):
+        item = make_item(status="Blocked", blockers=[blocker(9)], blockers_total=1)
+        signal_of(item)
+        self.assertFalse(
+            any("no recorded blocker" in w for w in item.warnings), item.warnings
+        )
+
+    def test_all_blockers_closed_warns_to_move_to_ready(self):
+        item = make_item(
+            status="Blocked", blockers=[blocker(9, "CLOSED")], blockers_total=1
+        )
+        signal_of(item)
+        self.assertTrue(any("move it to Ready" in w for w in item.warnings), item.warnings)
+
+    def test_open_blocker_without_the_flag_warns(self):
+        item = make_item(status="In progress", pr_number=1, pr_changed_files=2,
+                         blockers=[blocker(9)], blockers_total=1)
+        signal_of(item)
+        self.assertTrue(
+            any("not marked" in w and "dep#9" in w for w in item.warnings), item.warnings
+        )
+
+    def test_unfetched_blockers_warn(self):
+        item = make_item(status="Blocked", blockers=[blocker(9)], blockers_total=25)
+        signal_of(item)
+        self.assertTrue(any("only 1 fetched" in w for w in item.warnings), item.warnings)
+
+    def test_blocked_label_is_not_routed_to_in_review(self):
+        """`blocked` belongs in Blocked, so it must not also say "In review"."""
+        item = make_item(status="In progress", labels=["blocked"], blockers=[blocker(9)])
+        signal_of(item)
+        self.assertFalse(
+            any("move to In review" in w for w in item.warnings), item.warnings
+        )
+
+    def test_blocked_label_no_longer_justifies_sitting_in_in_review(self):
+        """In review = waiting on a human. `blocked` means waiting on an issue, so
+        it must not be offered as a valid reason to be In review."""
+        src = inspect.getsource(bt.compute_signal)
+        self.assertNotIn("needs:*/blocked label", src)
+        self.assertNotIn("is the blocker written on the issue", src)
+
+    def test_in_review_warning_names_the_human_decision(self):
+        item = make_item(status="In review", pr_number=3, pr_changed_files=2)
+        signal_of(item)
+        self.assertTrue(
+            any("waiting on a human" in w for w in item.warnings), item.warnings
+        )
+
+    def test_in_review_with_no_pr_points_at_the_blocked_status(self):
+        item = make_item(status="In review", labels=["needs:review"])
+        signal_of(item)
+        self.assertTrue(
+            any("board-tick.py block" in w and "no PR" in w for w in item.warnings),
+            item.warnings,
+        )
+
+    def test_blocked_flagged_item_is_not_told_off_twice_for_in_review(self):
+        """check_blocked_hygiene already names the fix — no redundant pile-on."""
+        item = make_item(status="In review", labels=["blocked"])
+        signal_of(item)
+        self.assertFalse(any("waiting on a human" in w for w in item.warnings), item.warnings)
+        self.assertFalse(any("no PR" in w for w in item.warnings), item.warnings)
+
+    def test_other_waiting_labels_still_route_to_in_review(self):
+        item = make_item(status="In progress", labels=["needs:review"],
+                         pr_number=1, pr_changed_files=2)
+        signal_of(item)
+        self.assertTrue(
+            any("move to In review" in w for w in item.warnings), item.warnings
+        )
+
+
+# ── the suppression bug ─────────────────────────────────────────────────────
+
+
+class TestDetailsSuppression(unittest.TestCase):
+    def _render(self, item):
+        bt.compute_signal(item)
+        return bt.render_details([item], include_bots=False, body_limit=500)
+
+    def test_blocked_item_is_never_suppressed(self):
+        """A well-recorded blocked item has no pending comments and no warnings —
+        the old `quiet` tuple printed nothing at all for it."""
+        item = make_item(status="Blocked", blockers=[blocker(9)], blockers_total=1)
+        out = self._render(item)
+        self.assertIn(item.slug, out)
+        self.assertIn("BLOCKED", out)
+        self.assertIn("dep#9", out)
+
+    def test_unblocked_item_is_never_suppressed(self):
+        item = make_item(status="Blocked", blockers=[blocker(9, "CLOSED")], blockers_total=1)
+        out = self._render(item)
+        self.assertIn(item.slug, out)
+        self.assertIn("UNBLOCKED", out)
+
+    def test_blocker_url_is_printed(self):
+        item = make_item(status="Blocked", blockers=[blocker(9)], blockers_total=1)
+        self.assertIn("https://github.com/gaarutyunov/dep/issues/9", self._render(item))
+
+    def test_idle_item_with_nothing_new_is_still_suppressed(self):
+        """The lean-digest property the `quiet` tuple exists for must survive."""
+        item = make_item(status="In review", labels=["approved:pr"])
+        item.signal = "IDLE"  # set directly: no compute_signal, no warnings
+        out = bt.render_details([item], include_bots=False, body_limit=500)
+        self.assertEqual(out.strip(), "")
+
+
+# ── table cells ─────────────────────────────────────────────────────────────
+
+
+class TestBlkCell(unittest.TestCase):
+    def test_no_blockers(self):
+        self.assertEqual(bt.blk_cell(make_item()), "-")
+
+    def test_partially_closed(self):
+        item = make_item(
+            blockers=[blocker(9, "CLOSED"), blocker(10, "OPEN")], blockers_total=2
+        )
+        self.assertEqual(bt.blk_cell(item), "1/2")
+
+    def test_none_closed(self):
+        item = make_item(blockers=[blocker(9), blocker(10)], blockers_total=2)
+        self.assertEqual(bt.blk_cell(item), "0/2")
+
+    def test_fully_unblocked_is_visually_distinct(self):
+        item = make_item(
+            blockers=[blocker(9, "CLOSED"), blocker(10, "CLOSED")], blockers_total=2
+        )
+        self.assertEqual(bt.blk_cell(item), "2/2✓")
+
+    def test_total_count_beyond_the_fetched_page(self):
+        item = make_item(blockers=[blocker(9, "CLOSED")], blockers_total=25)
+        self.assertEqual(bt.blk_cell(item), "1/25")
+
+
+class TestTableColumnAlignment(unittest.TestCase):
+    def test_header_and_row_widths_match(self):
+        items = [
+            make_item(status="Blocked", blockers=[blocker(9)], blockers_total=1),
+            make_item(number=2, status="Ready", pr_number=4, pr_changed_files=3),
+        ]
+        for it in items:
+            bt.compute_signal(it)
+        lines = bt.render_table(items).splitlines()
+        header_cols = len(lines[0].split())
+        self.assertEqual(header_cols, 16, "BLK must be added to headers exactly once")
+        self.assertIn("BLK", lines[0].split())
+        # Positional lists: a mismatch shifts every later column, so compare the
+        # padded widths rather than the (variable) token counts.
+        widths = [len(c) for c in re.findall(r"-+", lines[1])]
+        self.assertEqual(len(widths), header_cols)
+
+    def test_blk_column_sits_between_thr_and_pr(self):
+        cols = bt.render_table([make_item()]).splitlines()[0].split()
+        self.assertEqual(cols[cols.index("BLK") - 1], "THR")
+        self.assertEqual(cols[cols.index("BLK") + 1], "PR")
+
+
+# ── ledger round-trip ───────────────────────────────────────────────────────
+
+
+class TestLedgerRoundTrip(unittest.TestCase):
+    def test_documented_shape_round_trips(self):
+        data = {"v": 1, "acked": {"issue": [1, 2], "pr": [3], "review": [], "spec": []}}
+        out = bt.parse_ledger(bt.render_ledger(data))
+        out.pop("updated", None)
+        self.assertEqual(out, data)
+
+    def test_unknown_top_level_keys_survive(self):
+        """render_ledger re-emits every non-underscore key, so extra state
+        round-trips without a new mechanism."""
+        data = {"v": 1, "acked": {}, "blocked_note": "waiting on dep#9", "tries": 3}
+        out = bt.parse_ledger(bt.render_ledger(data))
+        self.assertEqual(out["blocked_note"], "waiting on dep#9")
+        self.assertEqual(out["tries"], 3)
+
+    def test_underscore_keys_are_dropped(self):
+        data = {"v": 1, "acked": {}, "_comment_id": 999}
+        out = bt.parse_ledger(bt.render_ledger(data))
+        self.assertNotIn("_comment_id", out)
+
+    def test_render_ledger_stamps_updated(self):
+        self.assertIn("updated", bt.parse_ledger(bt.render_ledger({"v": 1, "acked": {}})))
+
+    def test_unparseable_body_degrades_to_an_empty_ledger(self):
+        self.assertEqual(bt.parse_ledger("no json here"), {"v": 1, "acked": {}})
+
+    def test_ledger_comment_is_excluded_from_last_activity(self):
+        """apply_issue must not count our own ledger write as activity — it would
+        make a rotting task look fresh."""
+        item = make_item()
+        issue = {
+            "createdAt": "2020-01-01T00:00:00Z",
+            "labels": {"nodes": []},
+            "blockedBy": {"totalCount": 0, "nodes": []},
+            "comments": {
+                "nodes": [
+                    {
+                        "databaseId": 5,
+                        "author": {"login": "gaarutyunov"},
+                        "body": bt.render_ledger({"v": 1, "acked": {}}),
+                        "createdAt": "2030-01-01T00:00:00Z",
+                        "url": "https://example.invalid/l",
+                    }
+                ]
+            },
+        }
+        bt.apply_issue(item, issue)
+        self.assertTrue(item.has_ledger)
+        self.assertEqual(item.comments, [])
+        self.assertEqual(item.last_activity, "2020-01-01T00:00:00Z")
+
+
+# ── blocker refs and the GraphQL surface ────────────────────────────────────
+
+
+class TestParseBlockerRef(unittest.TestCase):
+    def test_bare_number_means_the_same_repo(self):
+        self.assertEqual(bt.parse_blocker_ref("123", "demo"), ("gaarutyunov", "demo", 123))
+
+    def test_hash_number_means_the_same_repo(self):
+        self.assertEqual(bt.parse_blocker_ref("#123", "demo"), ("gaarutyunov", "demo", 123))
+
+    def test_owner_repo_hash_number(self):
+        self.assertEqual(
+            bt.parse_blocker_ref("gaarutyunov/blog#31", "demo"), ("gaarutyunov", "blog", 31)
+        )
+
+    def test_other_owner_is_preserved(self):
+        self.assertEqual(
+            bt.parse_blocker_ref("someone/other#7", "demo"), ("someone", "other", 7)
+        )
+
+    def test_repo_hash_number_defaults_the_owner(self):
+        self.assertEqual(
+            bt.parse_blocker_ref("postgres-pglite#6", "demo"),
+            ("gaarutyunov", "postgres-pglite", 6),
+        )
+
+    def test_surrounding_whitespace_is_tolerated(self):
+        self.assertEqual(bt.parse_blocker_ref("  #9 ", "demo"), ("gaarutyunov", "demo", 9))
+
+    def test_garbage_is_rejected(self):
+        for bad in ("", "abc", "demo#", "#", "1/2/3"):
+            with self.subTest(ref=bad):
+                with self.assertRaises(RuntimeError):
+                    bt.parse_blocker_ref(bad, "demo")
+
+
+class TestMutationText(unittest.TestCase):
+    def test_add_mutation_shape(self):
+        out = bt.blocked_by_mutation("add", "I_target", "I_blocking")
+        self.assertIn("addBlockedBy", out)
+        self.assertIn('issueId: "I_target"', out)
+        self.assertIn('blockingIssueId: "I_blocking"', out)
+
+    def test_remove_mutation_shape(self):
+        out = bt.blocked_by_mutation("remove", "I_target", "I_blocking")
+        self.assertIn("removeBlockedBy", out)
+        self.assertNotIn("addBlockedBy", out)
+
+    def test_status_move_command_uses_the_blocked_option_id(self):
+        cmd = bt.status_move_command("PVTI_x", "Blocked")
+        self.assertIn("--single-select-option-id 8351b71b", cmd)
+        self.assertIn(f"--field-id {bt.STATUS_FIELD_ID}", cmd)
+        self.assertIn(f"--project-id {bt.PROJECT_NODE_ID}", cmd)
+
+    def test_status_move_command_for_ready(self):
+        self.assertIn("61e4505c", bt.status_move_command("PVTI_x", "Ready"))
+
+
+class TestIssueFragment(unittest.TestCase):
+    def test_blocked_by_rides_along_with_the_issue_query(self):
+        """Free: no extra API call, so the digest cost is unchanged."""
+        self.assertIn("blockedBy", bt.ISSUE_FRAGMENT)
+        self.assertIn("totalCount", bt.ISSUE_FRAGMENT)
+        self.assertIn("nameWithOwner", bt.ISSUE_FRAGMENT)
+
+    def test_apply_blockers_reads_the_payload(self):
+        item = make_item()
+        bt.apply_blockers(
+            item,
+            {
+                "blockedBy": {
+                    "totalCount": 2,
+                    "nodes": [
+                        {
+                            "number": 28,
+                            "state": "OPEN",
+                            "title": "moisture sensor",
+                            "url": "https://github.com/gaarutyunov/blog/issues/28",
+                            "createdAt": "2020-01-01T00:00:00Z",
+                            "repository": {"nameWithOwner": "gaarutyunov/blog"},
+                        },
+                        {
+                            "number": 9,
+                            "state": "CLOSED",
+                            "title": "done thing",
+                            "url": "https://github.com/gaarutyunov/gopgql/issues/9",
+                            "createdAt": "2020-01-01T00:00:00Z",
+                            "repository": {"nameWithOwner": "gaarutyunov/gopgql"},
+                        },
+                    ],
+                }
+            },
+        )
+        self.assertEqual(item.blockers_total, 2)
+        self.assertEqual([b.slug for b in item.open_blockers], ["blog#28"])
+        self.assertEqual([b.slug for b in item.closed_blockers], ["gopgql#9"])
+
+    def test_missing_blocked_by_is_handled(self):
+        item = make_item()
+        bt.apply_blockers(item, {})
+        self.assertEqual(item.blockers, [])
+        self.assertEqual(item.blockers_total, 0)
+
+
+class TestBlockedFlagged(unittest.TestCase):
+    def test_status_alone_flags(self):
+        self.assertTrue(make_item(status="Blocked").blocked_flagged)
+
+    def test_label_alone_flags(self):
+        self.assertTrue(make_item(status="In review", labels=["blocked"]).blocked_flagged)
+
+    def test_neither_does_not_flag(self):
+        self.assertFalse(make_item(status="Ready").blocked_flagged)
+
+
+# ── JSON output ─────────────────────────────────────────────────────────────
+
+
+class TestRenderJson(unittest.TestCase):
+    def test_blockers_and_signal_are_exposed(self):
+        import json as _json
+
+        item = make_item(
+            status="Blocked",
+            blockers=[blocker(9, "CLOSED"), blocker(10, "OPEN")],
+            blockers_total=2,
+        )
+        bt.compute_signal(item)
+        payload = _json.loads(bt.render_json([item]))[0]
+        self.assertEqual(payload["signal"], "BLOCKED")
+        self.assertEqual(payload["blocked"]["total"], 2)
+        self.assertEqual(payload["blocked"]["open"], 1)
+        self.assertEqual(payload["blocked"]["closed"], 1)
+        self.assertTrue(payload["blocked"]["flagged"])
+        self.assertEqual(
+            [b["number"] for b in payload["blocked"]["blockers"]], [9, 10]
+        )
+        self.assertIn("url", payload["blocked"]["blockers"][0])
+
+    def test_unblocked_signal_is_exposed(self):
+        import json as _json
+
+        item = make_item(status="Blocked", blockers=[blocker(9, "CLOSED")], blockers_total=1)
+        bt.compute_signal(item)
+        payload = _json.loads(bt.render_json([item]))[0]
+        self.assertEqual(payload["signal"], "UNBLOCKED")
+        self.assertEqual(payload["blocked"]["open"], 0)
+
+
+# ── spec-PR discovery ───────────────────────────────────────────────────────
+
+
+class TestSpecBranchKey(unittest.TestCase):
     """Every branch style a tick has ever produced must resolve to (repo, issue).
 
     A branch that fails to parse means the spec PR is never found, which means the
@@ -69,16 +731,11 @@ class SpecBranchKey(unittest.TestCase):
         self.assertIsNone(bt.spec_branch_key("spec/goga-1abc"))
 
 
-def _item(**kw):
-    base = dict(
-        item_id="x", status="In review", loop="hitl", repo="goga", number=1,
-        title="t", issue_url="u",
-    )
-    base.update(kw)
-    return bt.Item(**base)
+# ── unsubmitted (PENDING) review comments ───────────────────────────────────
 
 
-def _review_comment(cid, path, line, body):
+def draft_review_comment(cid: int, path: str, line: int, body: str) -> dict:
+    """One inline comment node as it arrives under a review's `comments`."""
     return {
         "databaseId": cid,
         "author": {"login": bt.OWNER},
@@ -90,7 +747,7 @@ def _review_comment(cid, path, line, body):
     }
 
 
-class PendingReviewComments(unittest.TestCase):
+class TestPendingReviewComments(unittest.TestCase):
     """Comments in an unsubmitted review are owner direction and must surface."""
 
     def _spec_payload(self):
@@ -109,8 +766,12 @@ class PendingReviewComments(unittest.TestCase):
                         "url": "https://example.test/pull/36",
                         "comments": {
                             "nodes": [
-                                _review_comment(3662973631, "design.md", 114, "Sqlc will appear in codiq"),
-                                _review_comment(3663003636, "tasks.md", 73, "What are these?"),
+                                draft_review_comment(
+                                    3662973631, "design.md", 114, "Sqlc will appear in codiq"
+                                ),
+                                draft_review_comment(
+                                    3663003636, "tasks.md", 73, "What are these?"
+                                ),
                             ]
                         },
                     }
@@ -124,20 +785,32 @@ class PendingReviewComments(unittest.TestCase):
                         "isResolved": False,
                         "path": "design.md",
                         "line": 114,
-                        "comments": {"nodes": [_review_comment(3662973631, "design.md", 114, "Sqlc will appear in codiq")]},
+                        "comments": {
+                            "nodes": [
+                                draft_review_comment(
+                                    3662973631, "design.md", 114, "Sqlc will appear in codiq"
+                                )
+                            ]
+                        },
                     },
                     {
                         "isResolved": False,
                         "path": "tasks.md",
                         "line": 73,
-                        "comments": {"nodes": [_review_comment(3663003636, "tasks.md", 73, "What are these?")]},
+                        "comments": {
+                            "nodes": [
+                                draft_review_comment(
+                                    3663003636, "tasks.md", 73, "What are these?"
+                                )
+                            ]
+                        },
                     },
                 ]
             },
         }
 
     def test_drafts_land_in_the_human_pool_marked_and_deduped(self):
-        item = _item(spec_pr_number=36)
+        item = make_item(status="In review", spec_pr_number=36)
         bt.apply_spec(item, self._spec_payload())
 
         self.assertEqual(len(item.pending_human), 2)
@@ -152,7 +825,7 @@ class PendingReviewComments(unittest.TestCase):
         self.assertEqual(item.spec_unresolved_threads, 2)
 
     def test_drafts_drive_the_signal_and_the_hum_cell(self):
-        item = _item(spec_pr_number=36)
+        item = make_item(status="In review", spec_pr_number=36)
         bt.apply_spec(item, self._spec_payload())
         bt.compute_signal(item)
 
@@ -161,7 +834,7 @@ class PendingReviewComments(unittest.TestCase):
         self.assertTrue(bt.hum_cell(item).endswith("+2✎"))
 
     def test_details_flags_the_unsubmitted_state(self):
-        item = _item(spec_pr_number=36, spec_pr_state="OPEN")
+        item = make_item(status="In review", spec_pr_number=36, spec_pr_state="OPEN")
         bt.apply_spec(item, self._spec_payload())
         bt.compute_signal(item)
         text = bt.render_details([item], include_bots=False, body_limit=500)
@@ -171,7 +844,7 @@ class PendingReviewComments(unittest.TestCase):
         self.assertIn("3662973631", text)
 
     def test_acked_drafts_stay_gone(self):
-        item = _item(spec_pr_number=36)
+        item = make_item(status="In review", spec_pr_number=36)
         bt.apply_spec(item, self._spec_payload())
         item.ledger = {"v": 1, "acked": {"pending": [3662973631]}}
         bt.drop_acked(item)
@@ -184,14 +857,22 @@ class PendingReviewComments(unittest.TestCase):
         payload["reviews"]["nodes"][0].update(
             state="CHANGES_REQUESTED", submittedAt="2026-07-28T06:00:00Z", body="please fix"
         )
-        item = _item(spec_pr_number=36)
+        item = make_item(status="In review", spec_pr_number=36)
         bt.apply_spec(item, payload)
 
         self.assertEqual(item.pending_draft, [])
         self.assertIn("spec", {c.kind for c in item.pending_human})
 
+    def test_pending_is_a_ledger_bucket(self):
+        item = make_item()
+        item.ledger = {"v": 1, "acked": {"pending": [1, 2], "spec": [3]}}
+        self.assertEqual(bt.acked_ids(item), {1, 2, 3})
 
-class NoPrWarning(unittest.TestCase):
+
+# ── the "in review with no PR" warning ──────────────────────────────────────
+
+
+class TestNoPrWarning(unittest.TestCase):
     """`in review with no PR` must only fire when nothing explains the absence.
 
     A ⚠ that fires on a healthy task is worse than no ⚠ at all — it teaches the
@@ -201,7 +882,7 @@ class NoPrWarning(unittest.TestCase):
     WARNING = "in review with no PR"
 
     def _warns(self, **kw):
-        item = _item(**kw)
+        item = make_item(status="In review", **kw)
         bt.compute_signal(item)
         return any(self.WARNING in w for w in item.warnings)
 
@@ -232,11 +913,14 @@ class NoPrWarning(unittest.TestCase):
         self.assertFalse(self._warns(labels=["needs:review"], pr_number=40))
 
 
-class Truncation(unittest.TestCase):
+# ── truncated connections ───────────────────────────────────────────────────
+
+
+class TestTruncation(unittest.TestCase):
     """A cap that bites must never be silent."""
 
     def test_warns_naming_the_connection_and_both_numbers(self):
-        item = _item()
+        item = make_item()
         nodes = bt.note_truncation(
             item, {"totalCount": 47, "nodes": [{"databaseId": i} for i in range(30)]},
             "spec PR #36 review threads",
@@ -250,7 +934,7 @@ class Truncation(unittest.TestCase):
         self.assertIn("17 not seen", warning)
 
     def test_silent_when_nothing_was_dropped(self):
-        item = _item()
+        item = make_item()
         bt.note_truncation(item, {"totalCount": 4, "nodes": [1, 2, 3, 4]}, "x")
         bt.note_truncation(item, {"totalCount": 0, "nodes": []}, "x")
         bt.note_truncation(item, None, "x")
@@ -258,186 +942,32 @@ class Truncation(unittest.TestCase):
         self.assertEqual(item.warnings, [])
 
     def test_truncation_forces_an_otherwise_quiet_row_into_details(self):
-        item = _item(status="In review", labels=["needs:review"])
+        item = make_item(status="In review", labels=["needs:review"])
         bt.note_truncation(item, {"totalCount": 9, "nodes": [1]}, "PR #40 comments")
         bt.compute_signal(item)
         self.assertEqual(item.signal, "WAITING-OWNER")  # a normally-skipped row
         self.assertIn("TRUNCATED", bt.render_details([item], False, 200))
 
-
-class BlockerParsing(unittest.TestCase):
-    """`blocked` is a claim; the blocker it names has to be machine-readable."""
-
-    # The real blocker comment from bikelanes#4. It cites three references: the
-    # blocker, its spec PR and its code PR — and the spec PR is MERGED, so a
-    # parser that grabs the wrong one reports "cleared" on a live blocker.
-    REAL = (
-        "**Blocked on gaarutyunov/ui-kit#7**, which is waiting on spec approval "
-        "(spec PR: gaarutyunov/workspace#22, code PR: gaarutyunov/ui-kit#9)."
-    )
-
-    def test_takes_the_reference_after_the_blocker_phrase(self):
-        b = bt.parse_blocker([{"databaseId": 1, "body": self.REAL}])
-        self.assertEqual((b.owner, b.repo, b.number), ("gaarutyunov", "ui-kit", 7))
-        self.assertEqual(b.ref, "gaarutyunov/ui-kit#7")
-        self.assertEqual(b.source_cid, 1)
-
-    def test_accepts_the_url_form_and_other_phrasings(self):
-        for body, want in [
-            ("Blocked by https://github.com/gaarutyunov/gopgql/issues/9 for now", 9),
-            ("This is gating on gaarutyunov/postgres-pglite#6.", 6),
-            ("Waiting on gaarutyunov/ui-kit#12 to cut a release", 12),
-            ("Depends on gaarutyunov/epos#3", 3),
-            ("Blocker: gaarutyunov/sysgo#67", 67),
-            ("blocked on gaarutyunov/workspace/pull/22", 22),
-        ]:
-            with self.subTest(body=body):
-                b = bt.parse_blocker([{"databaseId": 1, "body": body}])
-                self.assertIsNotNone(b, body)
-                self.assertEqual(b.number, want)
-
-    def test_most_recent_blocker_comment_wins(self):
-        nodes = [
-            {"databaseId": 1, "body": "Blocked on gaarutyunov/ui-kit#7"},
-            {"databaseId": 2, "body": "Now blocked on gaarutyunov/gopgql#9 instead"},
-        ]
-        self.assertEqual(bt.parse_blocker(nodes).ref, "gaarutyunov/gopgql#9")
-
-    def test_no_reference_without_a_blocker_phrase(self):
-        # A bare mention is not a blocker — every issue body cites numbers.
-        self.assertIsNone(
-            bt.parse_blocker([{"databaseId": 1, "body": "See gaarutyunov/ui-kit#7 for context"}])
-        )
-
-    def test_bare_hash_number_is_not_a_blocker(self):
-        self.assertIsNone(bt.parse_blocker([{"databaseId": 1, "body": "Blocked on #7"}]))
-
-    def test_ignores_the_ledger_comment(self):
-        self.assertIsNone(
-            bt.parse_blocker([{"databaseId": 1, "body": bt.LEDGER_MARKER + " blocked on a/b#1"}])
-        )
-
-    def test_parsed_only_for_blocked_rows(self):
-        payload = {
-            "labels": {"nodes": []},
-            "createdAt": "2026-07-01T00:00:00Z",
-            "comments": {"totalCount": 1, "nodes": [{"databaseId": 1, "body": self.REAL,
-                                                     "author": {"login": bt.OWNER},
-                                                     "createdAt": "2026-07-01T00:00:00Z"}]},
-        }
-        item = _item()
-        bt.apply_issue(item, payload)
-        self.assertIsNone(item.blocker)  # no `blocked` label → nothing to re-check
-
-        blocked = _item()
-        payload["labels"] = {"nodes": [{"name": "blocked"}]}
-        bt.apply_issue(blocked, payload)
-        self.assertEqual(blocked.blocker.ref, "gaarutyunov/ui-kit#7")
+    def test_every_capped_connection_selects_total_count(self):
+        """A `first:`/`last:` with no sibling totalCount can truncate silently."""
+        for name, fragment in (
+            ("ISSUE_FRAGMENT", bt.ISSUE_FRAGMENT),
+            ("SPEC_FRAGMENT", bt.SPEC_FRAGMENT),
+            ("PR_FRAGMENT", bt.PR_FRAGMENT),
+        ):
+            with self.subTest(fragment=name):
+                caps = len(re.findall(r"\((?:first|last):\s*\d+\)", fragment))
+                totals = fragment.count("totalCount")
+                # `labels` is the one deliberate exception: 50 labels on one issue
+                # is not a real state, and a ⚠ there would be pure noise.
+                expected = caps - fragment.count("labels(first:")
+                self.assertGreaterEqual(totals, expected, f"{name}: {totals} < {expected}")
 
 
-class BlockerSignal(unittest.TestCase):
-    def _blocked(self, blocker):
-        item = _item(status="In review", labels=["blocked"])
-        item.blocker = blocker
-        bt.compute_signal(item)
-        return item
-
-    def _resolved(self, state, kind="Issue"):
-        return bt.Blocker(
-            owner="gaarutyunov", repo="ui-kit", number=7, resolved=True, kind=kind,
-            state=state, title="Some blocker", url="https://example.test/7",
-            created_at="2026-07-25T18:39:33Z", closed_at="2026-07-26T19:54:22Z",
-        )
-
-    def test_cleared_blocker_becomes_actionable(self):
-        for state, kind in (("CLOSED", "Issue"), ("MERGED", "PullRequest")):
-            with self.subTest(state=state):
-                item = self._blocked(self._resolved(state, kind))
-                self.assertEqual(item.signal, "UNBLOCKED")
-                self.assertTrue(any("CLEARED" in w for w in item.warnings))
-                # Ranked above the signals a rotting task would otherwise hide under.
-                self.assertLess(
-                    bt.SIGNAL_ORDER.index("UNBLOCKED"), bt.SIGNAL_ORDER.index("BLOCKED")
-                )
-                self.assertLess(
-                    bt.SIGNAL_ORDER.index("UNBLOCKED"), bt.SIGNAL_ORDER.index("READY")
-                )
-
-    def test_open_blocker_stays_blocked_but_renders(self):
-        item = self._blocked(self._resolved("OPEN"))
-        self.assertEqual(item.signal, "BLOCKED")
-        self.assertFalse(any("CLEARED" in w for w in item.warnings))
-        details = bt.render_details([item], False, 200)
-        self.assertIn("blocker: gaarutyunov/ui-kit#7 — still open", details)
-
-    def test_unparseable_blocker_is_a_warning(self):
-        item = self._blocked(None)
-        self.assertEqual(item.signal, "BLOCKED")
-        self.assertTrue(any("no comment names a blocker" in w for w in item.warnings))
-
-    def test_unresolvable_blocker_is_a_warning(self):
-        item = self._blocked(bt.Blocker(owner="gaarutyunov", repo="gone", number=1))
-        self.assertTrue(any("could not be resolved" in w for w in item.warnings))
-
-    def test_a_blocked_row_is_never_a_bare_table_line(self):
-        """The regression this exists to prevent: nothing left to re-examine."""
-        item = self._blocked(self._resolved("OPEN"))
-        self.assertEqual(item.pending, [])
-        self.assertEqual(item.warnings, [])  # open blocker warrants no ⚠ …
-        self.assertIn("blocker:", bt.render_details([item], False, 200))  # … but still renders
-
-    def test_resolve_blockers_is_skipped_when_nothing_is_blocked(self):
-        called = []
-        original = bt.gh_graphql
-        bt.gh_graphql = lambda *a, **k: called.append(a) or {}
-        try:
-            bt.resolve_blockers([_item(), _item(labels=["needs:review"])])
-        finally:
-            bt.gh_graphql = original
-        self.assertEqual(called, [])
-
-    def test_resolve_blockers_dedupes_into_one_call(self):
-        """N rows blocked on the same thing must cost one alias, not N calls."""
-        items = [_item(number=n, labels=["blocked"]) for n in (1, 2, 3)]
-        for it in items:
-            it.blocker = bt.Blocker(owner="gaarutyunov", repo="ui-kit", number=7)
-        queries = []
-
-        def fake(query, tolerant=False):
-            queries.append(query)
-            return {"b0": {"issueOrPullRequest": {
-                "__typename": "Issue", "title": "t", "url": "u",
-                "state": "CLOSED", "createdAt": "2026-07-01T00:00:00Z",
-                "closedAt": "2026-07-28T00:00:00Z"}}}
-
-        original = bt.gh_graphql
-        bt.gh_graphql = fake
-        try:
-            bt.resolve_blockers(items)
-        finally:
-            bt.gh_graphql = original
-
-        self.assertEqual(len(queries), 1)
-        self.assertEqual(queries[0].count("issueOrPullRequest"), 1)
-        self.assertTrue(all(i.blocker.cleared for i in items))
-
-    def test_a_failed_lookup_never_breaks_the_tick(self):
-        item = _item(labels=["blocked"])
-        item.blocker = bt.Blocker(owner="gaarutyunov", repo="ui-kit", number=7)
-        original = bt.gh_graphql
-
-        def boom(*a, **k):
-            raise RuntimeError("GraphQL exploded")
-
-        bt.gh_graphql = boom
-        try:
-            bt.resolve_blockers([item])  # must not raise
-        finally:
-            bt.gh_graphql = original
-        self.assertFalse(item.blocker.resolved)
+# ── the GraphQL rate-limit guard ────────────────────────────────────────────
 
 
-class RateLimitGuard(unittest.TestCase):
+class TestRateLimitGuard(unittest.TestCase):
     """A tick that cannot see the board must not look like one that saw it empty.
 
     Every test here stubs the budget — none of them touch the network, which is
@@ -511,7 +1041,6 @@ class RateLimitGuard(unittest.TestCase):
         self.assertEqual(out.getvalue(), "")
 
     def test_a_rate_limited_gh_failure_raises_RateLimited(self):
-        bt.graphql_budget = self._budget  # unused; stderr alone is decisive
         self._budget_is(0)
         original_run = bt.subprocess.run
 
@@ -562,16 +1091,27 @@ class RateLimitGuard(unittest.TestCase):
         finally:
             bt.subprocess.run = original_run
 
-    def test_graphql_rate_limit_errors_beat_tolerant_mode(self):
-        """`tolerant` swallows a missing node, never a missing response."""
+    def test_a_rate_limited_graphql_payload_is_not_a_plain_query_error(self):
+        """The budget can run out *inside* a 200 response, in the errors array."""
         bt.gh = lambda *a, **k: json.dumps(
             {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}
         )
         with self.assertRaises(bt.RateLimited):
-            bt.gh_graphql("query {x}", tolerant=True)
+            bt.gh_graphql("query {x}")
+
+    def test_an_ordinary_graphql_error_stays_a_plain_RuntimeError(self):
+        bt.gh = lambda *a, **k: json.dumps(
+            {"errors": [{"type": "NOT_FOUND", "message": "Could not resolve to an Issue"}]}
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            bt.gh_graphql("query {x}")
+        self.assertNotIsInstance(ctx.exception, bt.RateLimited)
 
 
-class LocalCheck(unittest.TestCase):
+# ── the local (LOCAL / UNPUSHED) check ──────────────────────────────────────
+
+
+class TestLocalCheck(unittest.TestCase):
     """`LOCAL -` must mean "I looked", never "I could not look".
 
     LOCAL is what produces `UNPUSHED`, the only signal guarding against work lost
@@ -591,20 +1131,20 @@ class LocalCheck(unittest.TestCase):
         return root
 
     def test_missing_clone_is_unknown_not_clean(self):
-        item = _item(repo="goga")
+        item = make_item(repo="goga")
         bt.inspect_worktree(item, self._projects())  # dir exists, no clones
         self.assertFalse(item.local_checked)
         self.assertEqual(bt.local_cell(item), "?")
 
     def test_present_clone_with_no_worktree_is_clean(self):
-        item = _item(repo="goga")
+        item = make_item(repo="goga")
         bt.inspect_worktree(item, self._projects("goga"))
         self.assertTrue(item.local_checked)
         self.assertEqual(bt.local_cell(item), "-")
 
     def test_run_level_warning_when_nothing_could_be_checked(self):
         projects = self._projects()
-        items = [_item(repo="goga"), _item(repo="epos")]
+        items = [make_item(repo="goga"), make_item(repo="epos")]
         for it in items:
             bt.inspect_worktree(it, projects)
         notice = bt.local_check_notice(items, projects, no_local=False)
@@ -616,7 +1156,7 @@ class LocalCheck(unittest.TestCase):
 
     def test_no_run_level_warning_when_some_clone_was_found(self):
         projects = self._projects("goga")
-        items = [_item(repo="goga"), _item(repo="epos")]
+        items = [make_item(repo="goga"), make_item(repo="epos")]
         for it in items:
             bt.inspect_worktree(it, projects)
         self.assertIsNone(bt.local_check_notice(items, projects, no_local=False))
@@ -624,17 +1164,17 @@ class LocalCheck(unittest.TestCase):
         self.assertEqual(bt.local_cell(items[1]), "?")
 
     def test_no_local_flag_is_also_unknown(self):
-        items = [_item(repo="goga")]
+        items = [make_item(repo="goga")]
         notice = bt.local_check_notice(items, "/anywhere", no_local=True)
         self.assertIn("--no-local", notice)
         self.assertIn("will NOT be reported", notice)
         self.assertEqual(bt.local_cell(items[0]), "?")
 
     def test_diagnose_empty_does_not_claim_a_missing_worktree(self):
-        unchecked = _item(status="In progress")
+        unchecked = make_item(status="In progress")
         self.assertIn("local state is unknown", bt.diagnose_empty(unchecked))
 
-        checked = _item(status="In progress")
+        checked = make_item(status="In progress")
         checked.local_checked = True
         self.assertIn("no local worktree", bt.diagnose_empty(checked))
 
@@ -670,13 +1210,6 @@ class LocalCheck(unittest.TestCase):
         # The real resolution: --git-common-dir from the worktree → main root.
         common = bt.git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")
         self.assertEqual(Path(common).parent.resolve(), main.resolve())
-
-
-class AckBuckets(unittest.TestCase):
-    def test_pending_is_a_ledger_bucket(self):
-        item = _item()
-        item.ledger = {"v": 1, "acked": {"pending": [1, 2], "spec": [3]}}
-        self.assertEqual(bt.acked_ids(item), {1, 2, 3})
 
 
 if __name__ == "__main__":

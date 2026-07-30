@@ -1,6 +1,6 @@
 ---
 name: loop-common
-description: "Shared mechanics for the auto-loop and hitl-loop delivery skills: the rule that all work is delegated to child agents while the loop only orchestrates, the board-tick.py digest that starts every tick, the label protocol for intermediate states, the comment ack ledger, GitHub-only interaction (never AskUserQuestion), the blocked/needs-owner → In review rule, the one-issue-one-deliverable rule (never split an issue into sub-issues), board IDs (gaarutyunov project #6), clone/worktree + gortex tracking, opening a PR early, the OpenSpec /opsx:* spec flow, commit/push discipline, and CodeRabbit + review-thread handling. NOT a standalone loop — it has no merge gate of its own; auto-loop and hitl-loop invoke it and add their own gates. Read it when running or editing either loop."
+description: "Shared mechanics for the auto-loop and hitl-loop delivery skills: the rule that all work is delegated to child agents while the loop only orchestrates, the board-tick.py digest that starts every tick, the label protocol for intermediate states, the comment ack ledger, GitHub-only interaction (never AskUserQuestion), the Blocked-vs-In-review rule (Blocked = waiting on another issue, recorded as a native GitHub issue dependency so the digest signals UNBLOCKED the moment every blocker closes; In review = waiting on a human), the one-issue-one-deliverable rule (never split an issue into sub-issues), board IDs (gaarutyunov project #6, six statuses), clone/worktree + gortex tracking, opening a PR early, the OpenSpec /opsx:* spec flow, commit/push discipline, and CodeRabbit + review-thread handling. NOT a standalone loop — it has no merge gate of its own; auto-loop and hitl-loop invoke it and add their own gates. Read it when running or editing either loop."
 ---
 
 # Loop common mechanics
@@ -25,12 +25,15 @@ this file apply and layers its own gates on top.
 - The workspace repo (this repo) is the home for **specs** — OpenSpec is
   initialized here (`/opsx:*` commands + `openspec/`). Pet-project code repos are
   cloned under `projects/` (gitignored) or worked via git worktree.
-- `.claude/skills/loop-common/scripts/board-tick.py` — the digest/ack/label tool
-  every tick runs through. Python 3 stdlib only; shells out to `gh`. Run
+- `.claude/skills/loop-common/scripts/board-tick.py` — the digest/ack/label/block
+  tool every tick runs through. Python 3 stdlib only; shells out to `gh`. Run
   `board-tick.py init-labels --repo <repo>` once per repo the loops touch so the
-  loop label set exists there. Its parsing/classification logic is covered by
-  `scripts/test_board_tick.py` — `cd` into `scripts/` and run
-  `python3 -m unittest` after editing it.
+  loop label set exists there. Its unit tests (`scripts/test_board_tick.py`) run
+  in this repo's CI (`.github/workflows/ci.yml`), so a change to the script that
+  breaks a signal or a column fails the PR — keep them passing when you edit it.
+  Locally: `python3 -m unittest` from `scripts/`. They use fixtures and never
+  touch the network, so they cost no GraphQL budget (see below) — **verify
+  against them, not by re-running live ticks**.
 
 ## Board IDs (project #6 "growth")
 
@@ -39,7 +42,7 @@ Stable — skip discovery unless the board schema changes:
 - Project id: `PVT_kwHOAjGWgc4Bcice`
 - Status field id: `PVTSSF_lAHOAjGWgc4BcicezhXKdRQ`
 - Options: Backlog `f75ad846` · Ready `61e4505c` · In progress `47fc9ee4` ·
-  In review `df73e18b` · Done `98236657`
+  In review `df73e18b` · **Blocked `8351b71b`** · Done `98236657`
 - **Loop field id: `PVTSSF_lAHOAjGWgc4BcicezhYRXrw`** · options: hitl `d03523f4`
   · auto `ee15c5cc`
 
@@ -108,18 +111,20 @@ any task on the basis of it. Wait for the reset and re-run.
 > network. Verify against that, not by re-running live ticks.
 
 One call (~7s) returns every **active** board item — everything except Backlog
-and Done — with, for each one: its status, Loop routing, labels, the code PR,
-**the spec PR**, CI, mergeability, unresolved review threads, staleness, and
-**the full text of every owner comment that has not yet been acknowledged**.
+and Done, so **Blocked** items appear in every digest too — with, for each one:
+its status, Loop routing, labels, the code PR, **the spec PR**, CI,
+mergeability, unresolved review threads, its open/closed blockers, staleness,
+and **the full text of every owner comment that has not yet been acknowledged**.
 Machine comments are classified out, so the digest is signal only.
 
 The output is a decision table sorted by urgency, then a details block:
 
 ```
-SIGNAL       TASK           STATUS       LOOP  LABELS  AGE  HUM   BOT  THR  PR   WORK   LOCAL  CI       MRG  SPEC
-HUMAN-INPUT  site-review#2  In progress  hitl  -       4d   4·5d  1    -    #3   EMPTY  clean  ok       ok   #10:merged
-UNPUSHED     workout#4      In progress  hitl  -       4d   -     -    -    #5   EMPTY  2c+3f  -        -    -
-NOT-STARTED  boids#7        In progress  hitl  -       4d   -     -    -    -    -      -      -        -    -
+SIGNAL       TASK           STATUS       LOOP  LABELS   AGE  HUM   BOT  THR  BLK   PR  WORK   LOCAL  CI  MRG  SPEC
+HUMAN-INPUT  site-review#2  In progress  hitl  -        4d   4·5d  1    -    -     #3  EMPTY  clean  ok  ok   #10:merged
+UNBLOCKED    gopgql#9       Blocked      auto  BLOCKED  2d   -     -    -    1/1✓  #8  12f    clean  ok  ok   #29:merged
+UNPUSHED     workout#4      In progress  hitl  -        4d   -     -    -    -     #5  EMPTY  2c+3f  -   -    -
+BLOCKED      sysgo#67       Blocked      auto  BLOCKED  6d   -     -    -    0/2   -   -      -      -   -    -
 ```
 
 - **`HUM`** — `count·age`: unaddressed owner comments, and how long the oldest
@@ -128,6 +133,9 @@ NOT-STARTED  boids#7        In progress  hitl  -       4d   -     -    -    -   
 - **`AGE`** — time since the last real activity (a comment or a pushed commit).
   Ledger writes deliberately don't count, so acking can't make a rotting task
   look fresh.
+- **`BLK`** — `closed/total` of the issue's recorded blockers, read from GitHub's
+  native `blockedBy` dependencies. A trailing **`✓`** means every blocker has
+  closed, so the task is free to move again; `0/2` means two are still open.
 - **`WORK`** — what the PR actually contains: `8f` (8 changed files) or
   **`EMPTY`** for a PR holding nothing but the starter commit.
 - **`LOCAL`** — work in the task's worktree that GitHub has never seen:
@@ -143,32 +151,50 @@ broken by who has waited longest):
 | Signal | Means | Do |
 |---|---|---|
 | `HUMAN-INPUT` | owner comments you have never acted on | read them, act, then **ack** |
+| `UNBLOCKED` | marked blocked, but **every** blocker has now closed | **pick it up** — `unblock`, move it back to Ready, work it |
 | `PR-APPROVED` | owner applied `approved:pr` | merge (per the calling skill's gate) |
 | `SPEC-APPROVED` | owner applied `approved:spec` | implement from `tasks.md` |
 | `UNPUSHED` | work exists only in the local worktree | **push it first** — it is the only state that can lose work |
 | `SPEC-MERGED` | spec PR merged but no work pushed | start implementing |
-| `UNBLOCKED` | the blocker this task named has closed/merged | drop the `blocked` label and pick it up |
 | `CI-RED` | checks failing, or the PR conflicts | fix |
 | `THREADS` | unresolved review threads | address + resolve |
 | `READY` | Ready and routed to this loop | pick it up |
 | `NOT-STARTED` | In progress but nothing pushed | start (or restart) the work |
 | `WIP` | In progress with pushed work, nothing new | continue it |
 | `TRACKER` | legacy `tracker` label from before issues stopped being split | work the issue itself and drop the label |
+| `BLOCKED` | at least one blocker is **still open** | **skip** — do not touch |
 | `WAITING-OWNER` | needs the owner, nothing new since | **skip** — do not touch |
-| `BLOCKED` | blocked, and the blocker is confirmed still open this tick | **skip** — do not touch |
 
-Rows also carry `⚠` **hygiene warnings** (a blocked task parked In progress, an
-In-review task with no reason label, an In-progress task with nothing pushed).
+`UNBLOCKED` and `BLOCKED` are the two halves of one state, split on a fact the
+digest can check: whether any `blockedBy` issue is still open. Only the
+open-blocker half is a skip. The all-closed half is **work waiting to be picked
+up**, which is why it ranks second, immediately below `HUMAN-INPUT` — a blocker
+that cleared while nobody was looking used to be how a task sat forgotten for
+days.
+
+Rows also carry `⚠` **hygiene warnings**, each naming the command that fixes it:
+
+- a task carrying `needs:*` parked In progress → move it to In review;
+- **Blocked** with no recorded blocker → record one with `board-tick.py block`,
+  or move it out of Blocked;
+- the legacy `blocked` label with some other status → record the dependency and
+  move it to **Blocked**;
+- **every blocker closed** → move it to Ready;
+- open blockers but *not* marked blocked → move it to Blocked, or drop the
+  dependency with `board-tick.py unblock`;
+- an In-review task with no reason label, and an In-progress task with nothing
+  pushed.
+
 Fix the hygiene problem in the same tick you see it.
 
 A warning that fires on a healthy task is worse than no warning, because it
 teaches the loop to skim past the `⚠` lines that *do* matter. So
 `in review with no PR` stays silent whenever something already explains the
-absent code PR: `needs:input` (a question is out), `blocked` (which gets its own,
-stronger check — see *A `blocked` row is re-checked, not trusted*), or **an open spec PR plus
-`needs:spec-approval`** — a spec-only task has no code PR *by design* until the
-spec gate passes. It still fires for the case it was written for: In review, no
-code PR, and nothing accounting for it.
+absent code PR: `needs:input` (a question is out), a blocked flag (which gets its
+own, stronger checks above), or **an open spec PR plus `needs:spec-approval`** —
+a spec-only task has no code PR *by design* until the spec gate passes. It still
+fires for the case it was written for: In review, no code PR, and nothing
+accounting for it.
 
 There is one warning you must never rationalise away: **`TRUNCATED`**. Every
 `first:`/`last:` in the digest's GraphQL fragments is a cap, and GraphQL raises no
@@ -185,41 +211,6 @@ its `totalCount` and any shortfall becomes a row-level warning:
 The row's `HUM`/`BOT`/`THR` counts are then **known to be incomplete**. Raise the
 cap in the fragment and re-run before acting on that row — never treat the digest
 as authoritative for a row carrying `TRUNCATED`.
-
-### A `blocked` row is re-checked, not trusted
-
-`blocked` is a *claim*, and claims go stale: the blocker merges, nobody notices,
-and the row keeps ranking `BLOCKED` — which the loops read as "skip, do not
-touch" — so it rots indefinitely. Two rows were sitting on already-closed
-blockers when this check was written.
-
-So every tick resolves what each blocked row is waiting on:
-
-- The blocker is parsed from the **most recent comment naming it as
-  `owner/repo#N`** (or the equivalent issue/PR URL), taken from *after* a blocker
-  phrase — `blocked on`/`blocked by`/`waiting on`/`depends on`/`gating on`/
-  `blocker:`. The phrase anchor is load-bearing: a real blocker comment also
-  cites the blocker's own spec and code PRs, and those are usually *merged*, so a
-  parser that grabbed any reference would report "cleared" on a live blocker.
-- **Blocker closed or merged** → the row is signalled `UNBLOCKED` (actionable,
-  ranked with `SPEC-MERGED`, well above `BLOCKED`) and carries a `⚠` naming the
-  close date. Drop the `blocked` label and work it.
-- **Blocker still open** → stays `BLOCKED`, with a quiet DETAILS line naming it,
-  its state and its age. No `⚠` — nothing is wrong — but it is now visible and
-  re-checkable every tick.
-- **No parseable reference** → a `⚠`. A `blocked` label with no
-  machine-readable blocker can never un-block itself, so it is a dead end by
-  construction: state the blocker as `owner/repo#N` or drop the label.
-
-**Write blocker comments so this works.** `**Blocked on gaarutyunov/ui-kit#7**,
-which is …` parses; "waiting for the kit release" does not.
-
-A blocked row now *always* appears in DETAILS. It is never a bare table line
-with nothing to re-examine.
-
-Cost: **one** batched GraphQL call per tick, deduplicated by blocker (N rows
-waiting on the same thing cost one alias), and skipped entirely when nothing is
-blocked. A lookup failure is reported on the row and never breaks the tick.
 
 ### An empty PR is a diagnosis, not a dead end
 
@@ -284,8 +275,7 @@ optional trailing slug after the number. The number is the **first** `-<digits>-
 run, so a slug that itself starts with digits can't steal the match. A number
 that isn't separated from what follows it (`spec/goga-1abc`) stays unmatched
 rather than being guessed at. `spec_branch_key` is covered by
-`scripts/test_board_tick.py` — add a case there when a new naming style appears,
-and run `python3 -m unittest` from `scripts/`.
+`scripts/test_board_tick.py` — add a case there when a new naming style appears.
 
 ### Unsubmitted reviews are read too
 
@@ -314,7 +304,9 @@ everyone else and can submit next time.
 
 Useful flags: `--repo <name>` to narrow, `--include-bots` to expand suppressed
 machine comments, `--json` for the structured form, `--status <s>` to override
-which statuses count as active.
+which statuses count as active. The default active set includes **Blocked** —
+if you pass `--status` you replace that set wholesale, so a hand-rolled list
+that omits `Blocked` hides every blocked item from the digest. Don't.
 
 ## Comments: read → act → **ack**
 
@@ -323,8 +315,8 @@ disapproval, a scope change or an answer by *commenting* — labels are only how
 approval arrives (`approved:spec` / `approved:pr`). So an unaddressed owner comment
 makes a task actionable **even when it is labelled `needs:spec-approval` or
 `needs:review`** and would otherwise read as "waiting on the owner". The digest
-ranks such a task `HUMAN-INPUT`, above `WAITING-OWNER`, for exactly this reason —
-never skip it because a waiting label is present.
+ranks such a task `HUMAN-INPUT`, above `WAITING-OWNER` and `BLOCKED`, for exactly
+this reason — never skip it because a waiting label or a blocker is present.
 
 Read the digest's **DETAILS section**, not just the summary table. The table's
 `HUM` column is a count; the comment text lives below it. Truncating the digest
@@ -379,9 +371,9 @@ thread is still open.
 
 ## Labels carry every state the board can't
 
-The board has five statuses and the owner only ever moves an item to **Ready**.
-Everything else — every other status move, and every intermediate state — is the
-loop's job, expressed as **labels on the issue**.
+The board has six statuses and the owner only ever moves an item to **Ready**.
+Everything else — every other status move, and every state finer-grained than a
+status — is the loop's job, expressed as **labels on the issue**.
 
 | Label | Set by | Meaning |
 |---|---|---|
@@ -390,10 +382,10 @@ loop's job, expressed as **labels on the issue**.
 | `needs:spec-approval` | loop | spec PR open, waiting on the owner |
 | `needs:review` | loop | code PR ready, waiting on the owner |
 | `needs:input` | loop | a question is posted on the issue, waiting on the owner |
-| `blocked` | loop | blocked by something external; the blocker is written on the issue |
+| `blocked` | loop | blocked by another issue; the blocker is recorded as a GitHub issue dependency |
 | `tracker` | — | **deprecated** — see below |
 
-Every loop label forces **In review**.
+Every `needs:*` label forces **In review**; `blocked` forces **Blocked**.
 
 `tracker` is no longer set by either loop. It marked an issue that had been split
 into sub-issues, and the loops no longer split issues: an issue is one deliverable
@@ -412,13 +404,17 @@ rather than treating it as a parent to skip.
 
 Rules:
 
-- **Never invent a new status.** If a state isn't one of the five, it's a label.
-- Clear a `needs:*` label the moment it stops being true; leaving stale labels
-  makes the digest lie.
+- **The status set is fixed at these six.** Backlog, Ready, In progress, In
+  review, Blocked, Done — if a state isn't one of them, it's a label. Adding a
+  seventh is not a call you make mid-tick: `Blocked` earned its place through
+  its own issue (workspace#38), and any future status needs the same.
+- Clear a `needs:*` or `blocked` label the moment it stops being true; leaving
+  stale labels makes the digest lie.
 - When the owner grants `approved:spec` / `approved:pr`, drop the matching
   `needs:*` label as you act on it.
-- The owner is not expected to move anything out of **In review** — an approval
-  label is the whole signal. **You** move the status.
+- The owner is not expected to move anything out of **In review** or **Blocked** —
+  an approval label, an answer, or the blocking issue closing is the whole
+  signal. **You** move the status.
 
 ## Interaction happens on GitHub, nowhere else
 
@@ -432,7 +428,8 @@ When you need the owner — a decision, an approval, a credential, an answer:
 1. Post the question on the **issue** with `board-tick.py post` (state the
    options and your recommendation, so a one-word reply is enough).
 2. Add `needs:input`.
-3. Move the item to **In review**.
+3. Move the item to **In review** — a question is a *human* need, so it is never
+   **Blocked**, which means "waiting on another issue" and nothing else.
 4. Move on to the next task.
 
 The answer arrives as an owner comment and reaches you as `HUMAN-INPUT` on a
@@ -486,7 +483,10 @@ Before acting on a report:
 - re-run the digest rather than believing the board state it describes;
 - check the pushed commits are what it says they are;
 - treat a claim that something is impossible, blocked, or already done the way
-  you would treat a `blocked` label: re-check it.
+  you would treat a `blocked` label: re-check it. For a blocker this is now
+  mechanical — the digest reads the issue's `blockedBy` dependencies and signals
+  `UNBLOCKED` once they have all closed, so a prose claim that contradicts the
+  digest is simply wrong.
 
 **Never paste an agent's output into the tick's report.** Relay the conclusion
 and what it changes.
@@ -526,45 +526,95 @@ ticks skip.
   a follow-up issue, unless the owner explicitly asks for it to be split out.
 - **Clear technical blockers in the same PR.** Build the missing piece rather
   than filing it as foundation work for a later tick. Re-check any `blocked`
-  claim before believing it — the thing it waited on has often merged since.
+  claim before believing it — the thing it waited on has often merged since, and
+  the digest's `BLK` column tells you outright.
 
-Only a blocker that genuinely needs the *owner* — a credential, an access grant,
-a product decision nobody else can make — leaves the issue unfinished, and it
-goes to **In review** as below.
+Only two things leave the issue unfinished: a blocker that genuinely needs the
+*owner* — a credential, an access grant, a product decision nobody else can make —
+which goes to **In review**, and a genuine dependency on *another issue*, which
+goes to **Blocked**. Both are covered below.
 
-## Anything that needs the owner sits in **In review**
+## Waiting on a human → **In review**; waiting on another issue → **Blocked**
 
-**In review** means "this needs the owner". It is not only for finished code —
-it is the single place the owner looks. A task belongs there the moment it is
-waiting on a human, whatever the reason: review, spec approval, an answer, or a
-blocker.
+**Blocked = waiting on another issue. In review = waiting on a human.** That is
+the whole rule, and the test is who has to act next: if a *person* has to read,
+decide, approve, answer or supply something, it is **In review**; if the only
+thing in the way is *another issue* getting finished, it is **Blocked**.
 
-**Never leave a blocked task In progress.** *In progress* means the loop is
-actively working it; a blocked task is not being worked, and parking it there
-hides it from the owner and re-parks it every tick. When you discover a blocker:
+**Never leave either one In progress.** *In progress* means the loop is actively
+working it right now. A task that is waiting is not being worked, and parking it
+there hides it and re-parks it every tick.
 
-1. Post the blocker on the issue with `board-tick.py post` — what is blocked,
-   what it depends on, and what unblocks it. **Name the blocker as
-   `owner/repo#N` directly after a blocker phrase**, e.g.
-   `**Blocked on gaarutyunov/ui-kit#7**, which is …`. This is not a formatting
-   preference: it is the only thing that lets every later tick re-check whether
-   the blocker has cleared (see *A `blocked` row is re-checked, not trusted*).
-   Prose like "waiting for the kit release" produces a dead end that can never
-   un-block itself, and the digest will warn about it.
-2. Add the `blocked` label.
-3. Move the item to **In review**.
+### Waiting on a human → **In review**
+
+Review, spec approval, an answer, a credential, an access grant, a product
+decision nobody else can make. **In review** is the single place the owner looks,
+and it is not only for finished code:
+
+1. Post what you need on the issue with `board-tick.py post` — the options and
+   your recommendation, so a one-word reply is enough.
+2. Add the matching `needs:*` label (`needs:review`, `needs:spec-approval`,
+   `needs:input`).
+3. Move the item to **In review** (`df73e18b`).
 4. Pick up the next task.
 
-The same applies to any partial work: push what you have, say what's outstanding
-on the issue, label it, and move it to **In review** rather than leaving it
-parked In progress.
+### Waiting on another issue → **Blocked**
+
+The blocker is **recorded as a GitHub issue dependency**, not described in prose.
+A blocker written only in a comment is invisible to the digest, which is exactly
+how one got written down and then forgotten for days:
+
+1. Record it — this writes the native `blockedBy` edge, adds the `blocked`
+   label, posts the note as a marked comment, and prints the status-move command:
+
+   ```bash
+   .claude/skills/loop-common/scripts/board-tick.py block \
+     --repo <repo> --issue <N> --on <ref> --note "<what is blocked, and why>"
+   ```
+
+   A `<ref>` is `123`, `repo#123` or `owner/repo#123`; repeat `--on` for several
+   blockers. `--dry-run` prints the GraphQL and sends nothing.
+2. Run the printed command to move the item to **Blocked** (`8351b71b`).
+3. Push whatever partial work exists so nothing is lost.
+4. Pick up the next task.
+
+Because the dependency is a real edge, the digest tracks it for you: `BLK` shows
+`closed/total`, and the moment the last blocker closes the row becomes
+`UNBLOCKED` — actionable, and never quietly suppressed. To clear it:
+
+```bash
+.claude/skills/loop-common/scripts/board-tick.py unblock --repo <repo> --issue <N>
+```
+
+With no `--on` this drops exactly the dependencies that have **closed** and never
+an open one, removes the `blocked` label, and prints the command to move the item
+back to **Ready** (`61e4505c`). Then work it.
+
+### **Blocked** is not a parking space
+
+It means one specific thing: **another issue must land first.** It is not a
+polite way to end a tick early, and the anti-parking rules lose none of their
+force because it exists:
+
+- **A blocker you could clear yourself is not a blocker.** Build the missing
+  piece in this PR (*One issue, one deliverable* above). A technical gap, a
+  missing helper, an absent foundation — that is the deliverable, not a
+  dependency.
+- **Size is not a blocker,** and neither is a test you haven't finished
+  debugging. Large means a long tick.
+- **A human need is never Blocked.** It is In review, with a `needs:*` label.
+
+Partial work follows the same discipline either way: push what you have, say
+what's outstanding on the issue, label it, and move it to **In review** or
+**Blocked** rather than leaving it parked In progress.
 
 ## Select a task to work
 
 Take it from the digest, not from a fresh board query. Work the first row whose
-signal is actionable for your loop (`HUMAN-INPUT` → `PR-APPROVED` →
+signal is actionable for your loop (`HUMAN-INPUT` → `UNBLOCKED` → `PR-APPROVED` →
 `SPEC-APPROVED` → `UNPUSHED` → `SPEC-MERGED` → `CI-RED` → `THREADS` →
 `READY` → `NOT-STARTED` → `WIP`), skipping `WAITING-OWNER` and `BLOCKED`.
+`UNBLOCKED` is actionable, not a skip — its blockers have all closed.
 Capture the row's **item id** (printed in the details block), the **issue**
 (repo + number), and the title.
 
@@ -704,8 +754,9 @@ applicable, the merged spec PR.
 
 **Status moves are yours, not the owner's.** The owner only ever moves an item to
 **Ready** (and applies `approved:*` labels). Every other transition — Ready → In
-progress, In progress → In review, In review → In progress, → Done — is performed
-by the loop. Don't wait for the owner to move anything, and don't ask them to.
+progress, In progress → In review, In progress → Blocked, In review → In progress,
+Blocked → Ready, → Done — is performed by the loop. Don't wait for the owner to
+move anything, and don't ask them to.
 
 ```bash
 gh project item-edit --project-id PVT_kwHOAjGWgc4Bcice --id <ITEM_ID> \
@@ -713,15 +764,19 @@ gh project item-edit --project-id PVT_kwHOAjGWgc4Bcice --id <ITEM_ID> \
 ```
 
 Option ids are listed under **Board IDs** above (Backlog / Ready / In progress /
-In review / Done). The `<ITEM_ID>` is the `item=PVTI_…` line in the digest's
-details block.
+In review / Blocked / Done). The `<ITEM_ID>` is the `item=PVTI_…` line in the
+digest's details block.
 
 Every move must leave the board honest:
 
-- **In progress** — you are actively working it *right now* and nothing is
-  waiting on the owner. Never park anything here.
-- **In review** — waiting on the owner, for any reason. Always carries a
-  `needs:*` or `blocked` label saying which.
+- **In progress** — you are actively working it *right now*, and nothing is
+  waiting on a human or on another issue. Never park anything here.
+- **In review** — waiting on a *human*, for any reason. Always carries a
+  `needs:*` label saying which.
+- **Blocked** — waiting on *another issue*, and on nothing else. Always carries
+  the `blocked` label **and** a native GitHub issue dependency naming the
+  blocker, so the digest can tell when it clears. Never use it for work you
+  simply haven't done.
 - **Done** — merged and finished.
 
 ## CodeRabbit + review threads

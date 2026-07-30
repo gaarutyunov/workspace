@@ -15,8 +15,8 @@ When working the project board (the `hitl-loop` / `auto-loop` / `loop-common` sk
 Corollaries, all detailed in `.claude/skills/loop-common/SKILL.md`:
 
 - Every tick starts with `.claude/skills/loop-common/scripts/board-tick.py` — never hand-roll board or comment queries.
-- Intermediate states are **labels**, never new statuses. The owner sets only `approved:spec` / `approved:pr` and only ever moves an item to **Ready**; every other status move is the agent's.
-- **In review** means "needs the owner", for any reason. Nothing blocked or awaiting a human is ever left **In progress**.
+- The board has exactly six statuses (Backlog, Ready, In progress, In review, Blocked, Done). Every other intermediate state is a **label**, and adding a seventh status needs its own issue, as `Blocked` got. The owner sets only `approved:spec` / `approved:pr` and only ever moves an item to **Ready**; every other status move is the agent's.
+- **Blocked** means "waiting on another issue"; **In review** means "waiting on a human", for any reason — review, spec approval, an answer, a credential, a product decision. Nothing waiting on either is ever left **In progress**.
 - Every comment the agent posts carries the agent marker (use `board-tick.py post`), and every owner comment acted on is acked (`board-tick.py ack`) so it never re-surfaces.
 
 ## Cloning repos
