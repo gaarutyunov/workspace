@@ -3,10 +3,13 @@
 
 Fetches every *active* item on the gaarutyunov project board (everything except
 Backlog and Done), and for each one pulls the issue, its labels, its comments,
-the linked PR's comments, review threads and CI status. Comments are classified
-(human / agent / bot) and filtered against a per-issue **ack ledger** stored as a
-machine-managed comment on the issue itself, so comments that were already seen
-and addressed never come back.
+the linked PR's comments, review threads and CI status — including the inline
+comments of reviews the owner *started but never submitted*, which no ordinary
+comment endpoint returns.
+
+Comments are classified (human / agent / bot) and filtered against a per-issue
+**ack ledger** stored as a machine-managed comment on the issue itself, so
+comments that were already seen and addressed never come back.
 
 The output is a decision table for the orchestrator plus a details block holding
 the full text of everything still unaddressed.
@@ -111,6 +114,20 @@ LABEL_ABBREV = {
 # ── gh plumbing ─────────────────────────────────────────────────────────────
 
 
+class RateLimited(RuntimeError):
+    """The GitHub GraphQL budget ran out mid-tick.
+
+    Its own type because it demands its own handling: a rate-limited tick has
+    seen *nothing*, and must not be mistaken for a tick that saw a quiet board.
+    """
+
+
+# `gh` does not say "rate limit" in every case. Notably a rate-limited
+# `gh project item-list` prints `unknown owner type`, which reads like a scope or
+# argument bug — so any gh failure is checked against the real budget.
+RATE_LIMIT_TEXT = re.compile(r"rate limit|RATE_LIMITED|secondary rate", re.I)
+
+
 def gh(*args: str, check: bool = True, stdin: str | None = None) -> str:
     proc = subprocess.run(
         ["gh", *args],
@@ -119,15 +136,90 @@ def gh(*args: str, check: bool = True, stdin: str | None = None) -> str:
         input=stdin,
     )
     if check and proc.returncode != 0:
-        raise RuntimeError(f"gh {' '.join(args)} failed:\n{proc.stderr.strip()}")
+        err = proc.stderr.strip()
+        if RATE_LIMIT_TEXT.search(err) or exhausted_budget():
+            raise RateLimited(err)
+        raise RuntimeError(f"gh {' '.join(args)} failed:\n{err}")
     return proc.stdout
+
+
+def graphql_budget() -> tuple[int, int, int] | None:
+    """(remaining, limit, reset epoch) for the GraphQL budget, or None if unknown.
+
+    `GET /rate_limit` is REST and is itself exempt from rate limiting, so this is
+    free to call — including on the failure path.
+    """
+    proc = subprocess.run(
+        ["gh", "api", "rate_limit"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        res = (json.loads(proc.stdout or "{}").get("resources") or {}).get("graphql") or {}
+    except json.JSONDecodeError:
+        return None
+    if "remaining" not in res:
+        return None
+    return int(res["remaining"]), int(res.get("limit", 0)), int(res.get("reset", 0))
+
+
+def exhausted_budget() -> bool:
+    budget = graphql_budget()
+    return budget is not None and budget[0] <= 0
+
+
+def reset_phrase(reset_epoch: int) -> str:
+    when = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
+    mins = max(0, int((when - datetime.now(timezone.utc)).total_seconds() // 60))
+    return f"{when.strftime('%Y-%m-%d %H:%M UTC')} (in {mins}m)"
+
+
+def rate_limit_banner(headline: str, budget: tuple[int, int, int] | None) -> str:
+    """The one thing a tick must never do quietly is fail to see the board."""
+    rule = "═" * 74
+    if budget:
+        remaining, limit, reset = budget
+        line = f" graphql budget: {remaining}/{limit} · resets {reset_phrase(reset)}"
+    else:
+        line = " graphql budget: unknown (could not read gh api rate_limit)"
+    return "\n".join(
+        [
+            rule,
+            f" {headline}",
+            rule,
+            line,
+            "",
+            " This is NOT an empty board and NOT a healthy tick. No board data was",
+            " read, so nothing here can be trusted: do not pick up, skip, label or",
+            " close any task on the basis of this run.",
+            "",
+            " `gh` disguises this failure. The same condition makes",
+            f"   gh project item-list {PROJECT} --owner {OWNER}",
+            " print `unknown owner type`, which reads like a permissions or argument",
+            " bug and is nothing of the kind. Confirm with:  gh api rate_limit",
+            "",
+            " Every `gh pr list` / `gh pr view` and every hydration query draws on",
+            " this same GraphQL budget, and it is shared by every agent and tool on",
+            " the machine — concurrent runs drain it together.",
+            "",
+            " Wait for the reset and re-run. Do NOT weaken or trim queries to make",
+            " the error go away.",
+            rule,
+        ]
+    )
 
 
 def gh_graphql(query: str) -> dict:
     out = gh("api", "graphql", "-f", f"query={query}")
     payload = json.loads(out)
-    if payload.get("errors"):
-        raise RuntimeError("GraphQL errors: " + json.dumps(payload["errors"], indent=2))
+    errors = payload.get("errors")
+    if errors:
+        blob = json.dumps(errors)
+        if RATE_LIMIT_TEXT.search(blob):
+            # A rate-limited response is *missing* data, not reporting absent
+            # data — it must never be reported as an ordinary query error.
+            raise RateLimited(blob)
+        raise RuntimeError("GraphQL errors: " + json.dumps(errors, indent=2))
     return payload["data"]
 
 
@@ -136,7 +228,7 @@ def gh_graphql(query: str) -> dict:
 
 @dataclass
 class Comment:
-    kind: str  # issue | pr | review | spec
+    kind: str  # issue | pr | review | spec | pending
     cid: int  # databaseId — the id used by the ledger
     author: str
     body: str
@@ -146,6 +238,9 @@ class Comment:
     thread_id: str | None = None
     thread_resolved: bool = False
     path: str | None = None
+    # Set for comments belonging to a review the owner started but never
+    # submitted. Nobody but us can see these, so the digest has to say so.
+    draft_on: str | None = None  # e.g. "PR #40" / "spec PR #36"
 
 
 @dataclass
@@ -197,14 +292,19 @@ class Item:
     pr_deletions: int = 0
     pr_commits: int = 0
     # Local state — work that exists on this machine but not on GitHub.
+    # `local_checked` False means the local check could not run for this task, so
+    # LOCAL is unknown rather than clean. Absence must never read as reassurance.
+    local_checked: bool = False
     worktree: str | None = None
     wt_dirty: int = 0  # uncommitted files
     wt_unpushed: int = 0  # commits ahead of the remote branch
     wt_stat: str = ""
     comments: list[Comment] = field(default_factory=list)
+    seen_cids: set[int] = field(default_factory=set)
     unresolved_threads: int = 0
-    # The spec PR lives in the *workspace* repo on `spec/<repo>-issue-<N>`, i.e.
-    # usually a different repo from the issue — it has to be found separately.
+    # The spec PR lives in the *workspace* repo on a `spec…` branch naming this
+    # repo and issue (see spec_branch_key), i.e. usually a different repo from the
+    # issue — nothing links it, so it has to be found separately.
     spec_pr_number: int | None = None
     spec_pr_url: str | None = None
     spec_pr_state: str = ""
@@ -277,6 +377,11 @@ class Item:
     @property
     def pending_bot(self) -> list[Comment]:
         return [c for c in self.comments if c.who == "bot"]
+
+    @property
+    def pending_draft(self) -> list[Comment]:
+        """Unaddressed comments the owner left in a review they never submitted."""
+        return [c for c in self.comments if c.draft_on and c.who != "agent"]
 
 
 # ── Time ────────────────────────────────────────────────────────────────────
@@ -352,10 +457,33 @@ def fetch_board(statuses: tuple[str, ...]) -> list[Item]:
 
 
 def workspace_root() -> "Path":
+    """The **main** worktree's root — the only place `projects/` really lives.
+
+    Deliberately not derived from `__file__`. Run from a git worktree (this repo
+    gives every task its own under `.worktrees/<branch>/`), the script's own path
+    yields that *worktree's* root — and because `projects/.gitignore` is tracked,
+    git materialises an otherwise-empty `projects/` there. So the old
+    `parents[4]` found a real directory containing no clones, every `LOCAL` cell
+    read `-` ("no worktree on this machine"), and the `UNPUSHED` signal — the one
+    guard against losing work outright — was silently disabled.
+
+    `--git-common-dir` resolves to the shared `.git` from any worktree, so its
+    parent is the main checkout.
+    """
     from pathlib import Path
 
-    # <root>/.agents/skills/loop-common/scripts/board-tick.py — resolve() so the
-    # .claude/skills symlink lands on the real path.
+    here = Path(__file__).resolve().parent
+    for args in (
+        ("rev-parse", "--path-format=absolute", "--git-common-dir"),  # git ≥ 2.31
+        ("rev-parse", "--git-common-dir"),  # older git: may be relative
+    ):
+        out = git(here, *args)
+        if out:
+            common = Path(out)
+            if not common.is_absolute():
+                common = (here / common).resolve()
+            return common.parent
+    # Not a git checkout at all: <root>/.agents/skills/loop-common/scripts/…
     return Path(__file__).resolve().parents[4]
 
 
@@ -367,8 +495,17 @@ def git(cwd, *args: str) -> str | None:
 
 
 def inspect_worktree(item: Item, projects_dir) -> None:
-    """Look for uncommitted / unpushed work in the task's local checkout."""
+    """Look for uncommitted / unpushed work in the task's local checkout.
+
+    Sets `local_checked` only when this task's clone is actually present. Without
+    the clone there is nothing to look at, and the answer is "unknown" — never
+    "clean". `-` in the LOCAL column has to keep meaning "I looked".
+    """
     from pathlib import Path
+
+    if not (Path(projects_dir) / item.repo).is_dir():
+        return  # local_checked stays False → LOCAL renders `?`, not `-`
+    item.local_checked = True
 
     branch = f"issue-{item.number}"
     candidates = [Path(projects_dir) / item.repo / ".worktrees" / branch]
@@ -407,14 +544,25 @@ SPEC_REPO = "workspace"  # specs are always authored in the workspace repo
 def spec_branch_key(branch: str) -> tuple[str, int] | None:
     """Parse a spec branch name into (repo, issue number), or None.
 
-    Matched loosely on purpose. Ticks have named these branches both
-    `spec/<repo>-issue-<N>` and `spec-<repo>-<N>`, and an exact-match lookup
-    silently dropped the spec PR for every branch in the second style — which
-    meant its comments (where the owner's spec feedback lives) were never read.
-    A missed owner comment is far worse than a mis-parsed branch name, so accept
-    any `spec`-prefixed branch that ends in the issue number.
+    Matched loosely on purpose. Ticks have named these branches every which way —
+    `spec/<repo>-issue-<N>`, `spec-<repo>-<N>`, and (most often, because the spec
+    flow names the branch after the change) `spec/<repo>-<N>-<slug>` — and an
+    exact-match lookup silently dropped the spec PR for every style but the first,
+    which meant its comments (where the owner's spec feedback lives) were never
+    read. A missed owner comment is far worse than a mis-parsed branch name, so
+    accept any `spec`-prefixed branch carrying the issue number, with or without
+    a trailing descriptive slug.
+
+    The `repo` group is non-greedy so that the *first* `-<digits>-` run is taken
+    as the issue number: `spec/ui-kit-6-workout-components` is (ui-kit, 6), not
+    (ui-kit-6, …) — a slug that itself starts with digits cannot steal the match.
+    The trailing slug must be separated by `/` or `-`, so `spec/goga-1abc` stays
+    unmatched rather than silently reading as issue 1.
     """
-    m = re.fullmatch(r"spec[/-](?P<repo>.+?)[/-](?:issue[/-])?(?P<num>\d+)", branch)
+    m = re.fullmatch(
+        r"spec[/-](?P<repo>.+?)[/-](?:issue[/-])?(?P<num>\d+)(?:[/-].*)?",
+        branch,
+    )
     if not m:
         return None
     return m.group("repo"), int(m.group("num"))
@@ -488,6 +636,12 @@ def find_pr_by_branch(repo: str, issue: int) -> int | None:
 
 # ── GraphQL hydration ───────────────────────────────────────────────────────
 
+# Every capped connection selects `totalCount` next to its `nodes`. A cap that
+# silently returns fewer rows than exist is indistinguishable from "there was
+# nothing more" — the exact failure that hid this PR's owner comments for a day —
+# so `note_truncation` turns every such gap into a row-level ⚠. (`blockedBy` is
+# the one exception: check_blocked_hygiene already warns on its shortfall, and a
+# second ⚠ saying the same thing is noise.)
 ISSUE_FRAGMENT = """
 fragment IssueBits on Issue {
   number url title state createdAt
@@ -497,6 +651,7 @@ fragment IssueBits on Issue {
     nodes { number state title url createdAt repository { nameWithOwner } }
   }
   comments(last: 100) {
+    totalCount
     nodes { databaseId author { login } body createdAt url }
   }
 }
@@ -506,15 +661,25 @@ SPEC_FRAGMENT = """
 fragment SpecBits on PullRequest {
   number url state mergedAt isDraft
   comments(last: 50) {
+    totalCount
     nodes { databaseId author { login } body createdAt url }
   }
   reviews(last: 20) {
-    nodes { databaseId author { login } body state submittedAt url }
+    totalCount
+    nodes {
+      databaseId author { login } body state submittedAt url
+      comments(first: 50) {
+        totalCount
+        nodes { databaseId author { login } body createdAt url path line }
+      }
+    }
   }
   reviewThreads(first: 30) {
+    totalCount
     nodes {
       isResolved path line
       comments(first: 5) {
+        totalCount
         nodes { databaseId author { login } body createdAt url }
       }
     }
@@ -527,22 +692,34 @@ fragment PrBits on PullRequest {
   number url isDraft state mergeable reviewDecision headRefName
   changedFiles additions deletions
   comments(last: 100) {
+    totalCount
     nodes { databaseId author { login } body createdAt url }
   }
   reviews(last: 30) {
-    nodes { databaseId author { login } body state submittedAt url }
+    totalCount
+    nodes {
+      databaseId author { login } body state submittedAt url
+      comments(first: 50) {
+        totalCount
+        nodes { databaseId author { login } body createdAt url path line }
+      }
+    }
   }
   reviewThreads(first: 60) {
+    totalCount
     nodes {
       id isResolved isOutdated path line
       comments(first: 10) {
+        totalCount
         nodes { databaseId author { login } body createdAt url }
       }
     }
   }
   commits(last: 1) {
     totalCount
-    nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes {
+    nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) {
+      totalCount
+      nodes {
       __typename
       ... on CheckRun { name conclusion status detailsUrl }
       ... on StatusContext { context state targetUrl }
@@ -609,11 +786,18 @@ def ingest(item: Item, node: dict, kind: str, **extra) -> Comment | None:
     body = node.get("body") or ""
     if LEDGER_MARKER in body:
         return None
+    # A draft-review comment is reachable two ways — through its review and
+    # through its (unresolved) review thread. Whichever arrives first wins, so
+    # the draft pass runs before the thread pass and keeps its `draft_on` mark.
+    cid = node["databaseId"]
+    if cid in item.seen_cids:
+        return None
+    item.seen_cids.add(cid)
     login = (node.get("author") or {}).get("login", "ghost")
     created = node.get("createdAt") or node.get("submittedAt") or ""
     comment = Comment(
         kind=kind,
-        cid=node["databaseId"],
+        cid=cid,
         author=login,
         body=body,
         created=created,
@@ -624,6 +808,62 @@ def ingest(item: Item, node: dict, kind: str, **extra) -> Comment | None:
     item.comments.append(comment)
     item.last_activity = newest(item.last_activity, created)
     return comment
+
+
+def note_truncation(item: Item, conn: dict | None, what: str) -> list:
+    """Warn when a capped connection returned fewer rows than actually exist.
+
+    Every `first:`/`last:` in the fragments above is a cap, and GraphQL reports no
+    error when it bites — it just returns fewer nodes. That makes an
+    under-reporting tick indistinguishable from a quiet one, which is how this
+    tool lost five owner comments for a day. So the caller pairs every capped
+    connection with `totalCount` and routes it through here: any shortfall
+    becomes a row-level ⚠ naming the connection and both numbers, so a tick can
+    never silently under-report.
+
+    Returns the connection's nodes, so call sites can use it inline.
+    """
+    conn = conn or {}
+    nodes = conn.get("nodes") or []
+    total = conn.get("totalCount")
+    if isinstance(total, int) and total > len(nodes):
+        item.warnings.append(
+            f"TRUNCATED: {what} returned {len(nodes)} of {total} — "
+            f"{total - len(nodes)} not seen by this tick; raise the cap in the "
+            "GraphQL fragment before trusting this row"
+        )
+    return nodes
+
+
+def ingest_pending_review(item: Item, review: dict, label: str) -> int:
+    """Fold an *unsubmitted* review's inline comments into the pending pool.
+
+    A review the owner starts and never submits stays `PENDING` with a null
+    `submittedAt`, and its inline comments are invisible to the ordinary comment
+    endpoints — `GET /pulls/{n}/comments` omits them, and so does
+    `gh pr view --json comments,reviews`. They are nonetheless real owner
+    direction, and because the loop and the owner share one GitHub account the
+    API hands us the drafts. Ignoring them is exactly how five owner comments on
+    a spec PR stayed hidden for over an hour.
+
+    They ride in on the `reviews` connection the digest already queries, so this
+    adds no API call. Comments are tagged `pending` (their own ack bucket) and
+    carry `draft_on` so the renderer can flag the state — the owner may well not
+    realise an unsubmitted review is invisible to everyone else.
+    """
+    count = 0
+    for node in note_truncation(item, review.get("comments"), f"{label} draft-review comments"):
+        line = node.get("line")
+        got = ingest(
+            item,
+            node,
+            "pending",
+            draft_on=label,
+            path=f"{node.get('path')}:{line}" if node.get("path") else None,
+        )
+        if got:
+            count += 1
+    return count
 
 
 def apply_blockers(item: Item, issue: dict) -> None:
@@ -648,7 +888,7 @@ def apply_issue(item: Item, issue: dict) -> None:
     apply_blockers(item, issue)
     item.issue_created = issue.get("createdAt", "")
     item.last_activity = newest(item.last_activity, item.issue_created)
-    for node in (issue.get("comments") or {}).get("nodes", []):
+    for node in note_truncation(item, issue.get("comments"), "issue comments"):
         if LEDGER_MARKER in (node.get("body") or ""):
             # The ledger is our own bookkeeping: it is neither a comment to act
             # on nor activity — counting it would make every task look fresh.
@@ -662,21 +902,27 @@ def apply_issue(item: Item, issue: dict) -> None:
 def apply_spec(item: Item, spec: dict) -> None:
     item.spec_pr_state = spec.get("state", item.spec_pr_state)
     item.spec_pr_url = spec.get("url") or item.spec_pr_url
-    for node in (spec.get("comments") or {}).get("nodes", []):
+    label = f"spec PR #{item.spec_pr_number}"
+    for node in note_truncation(item, spec.get("comments"), f"{label} comments"):
         ingest(item, node, "spec")
-    for node in (spec.get("reviews") or {}).get("nodes", []):
-        body = (node.get("body") or "").strip()
+    for node in note_truncation(item, spec.get("reviews"), f"{label} reviews"):
         state = node.get("state", "")
+        if state == "PENDING":
+            # Runs before the thread pass below so the draft mark survives dedupe.
+            ingest_pending_review(item, node, label)
+            continue
+        body = (node.get("body") or "").strip()
         if not body and state not in ("CHANGES_REQUESTED", "APPROVED"):
             continue
         node = {**node, "body": f"[spec review {state}] {body}".strip()}
         ingest(item, node, "spec")
-    for thread in (spec.get("reviewThreads") or {}).get("nodes", []):
+    for thread in note_truncation(item, spec.get("reviewThreads"), f"{label} review threads"):
         if thread.get("isResolved"):
             continue
         item.spec_unresolved_threads += 1
-        for node in (thread.get("comments") or {}).get("nodes", []):
-            ingest(item, node, "spec", path=f"{thread.get('path')}:{thread.get('line')}")
+        where = f"{thread.get('path')}:{thread.get('line')}"
+        for node in note_truncation(item, thread.get("comments"), f"{label} thread {where}"):
+            ingest(item, node, "spec", path=where)
 
 
 def apply_pr(item: Item, pr: dict) -> None:
@@ -690,38 +936,38 @@ def apply_pr(item: Item, pr: dict) -> None:
     item.pr_deletions = pr.get("deletions") or 0
     item.pr_commits = ((pr.get("commits") or {}).get("totalCount")) or 0
 
-    for node in (pr.get("comments") or {}).get("nodes", []):
+    label = f"PR #{item.pr_number}"
+    for node in note_truncation(item, pr.get("comments"), f"{label} comments"):
         ingest(item, node, "pr")
 
-    for node in (pr.get("reviews") or {}).get("nodes", []):
-        body = (node.get("body") or "").strip()
+    for node in note_truncation(item, pr.get("reviews"), f"{label} reviews"):
         state = node.get("state", "")
+        if state == "PENDING":
+            # Runs before the thread pass below so the draft mark survives dedupe.
+            ingest_pending_review(item, node, label)
+            continue
+        body = (node.get("body") or "").strip()
         if not body and state not in ("CHANGES_REQUESTED", "APPROVED"):
             continue
         ingest(item, {**node, "body": f"[review {state}] {body}".strip()}, "pr")
 
-    for thread in (pr.get("reviewThreads") or {}).get("nodes", []):
+    for thread in note_truncation(item, pr.get("reviewThreads"), f"{label} review threads"):
         if thread.get("isResolved"):
             continue  # resolving a thread *is* the ack for review comments
         item.unresolved_threads += 1
-        for node in (thread.get("comments") or {}).get("nodes", []):
+        where = f"{thread.get('path')}:{thread.get('line')}"
+        for node in note_truncation(item, thread.get("comments"), f"{label} thread {where}"):
             login = (node.get("author") or {}).get("login", "ghost")
             if classify(login, node.get("body") or "") == "agent":
                 continue
-            ingest(
-                item,
-                node,
-                "review",
-                thread_id=thread["id"],
-                path=f"{thread.get('path')}:{thread.get('line')}",
-            )
+            ingest(item, node, "review", thread_id=thread["id"], path=where)
 
     commits = (pr.get("commits") or {}).get("nodes", [])
     if commits:
         item.last_activity = newest(item.last_activity, commits[0]["commit"].get("committedDate", ""))
     rollup = (commits[0]["commit"].get("statusCheckRollup") if commits else None) or {}
     item.ci_state = rollup.get("state")
-    for ctx in (rollup.get("contexts") or {}).get("nodes", []):
+    for ctx in note_truncation(item, rollup.get("contexts"), f"{label} CI checks"):
         if ctx.get("__typename") == "CheckRun":
             name = ctx.get("name", "?")
             if ctx.get("status") != "COMPLETED":
@@ -781,9 +1027,12 @@ def drop_acked(item: Item) -> None:
 
 def diagnose_empty(item: Item) -> str:
     """Explain an empty PR: a stopped run, an exhausted one, or a lost worktree."""
+    unknown = " (the local check did not run — verify before restarting)"
     if not item.pr_number:
         if item.worktree:
             return f"no PR exists, but a worktree does ({item.worktree}) — resume there"
+        if not item.local_checked:
+            return "no PR, and the local state is unknown" + unknown
         return "no PR and no local worktree — the task was claimed but never begun"
     if item.pr_commits <= 1:
         base = (
@@ -794,6 +1043,8 @@ def diagnose_empty(item: Item) -> str:
         base = f"PR #{item.pr_number} has {item.pr_commits} commits but no file changes; "
     if item.worktree:
         return base + f"and its worktree ({item.worktree}) is clean — restart the work"
+    if not item.local_checked:
+        return base + "and the local state is unknown" + unknown
     return base + "and no local worktree survives — restart the work from scratch"
 
 
@@ -869,11 +1120,20 @@ def compute_signal(item: Item) -> None:
         )
     if item.status == "Ready" and not item.loop:
         item.warnings.append("Ready but no Loop value — neither loop will pick this up")
+    # The warning exists for a task parked In review with *nothing to show*.
+    # Firing it on a task that fully explains its absent code PR only trains the
+    # loop to skim past the ⚠ line. Three things explain it: a question is out
+    # (`needs:input`), the task is blocked (check_blocked_hygiene already names
+    # the fix), or the spec gate has not passed yet — a spec-only task has no
+    # code PR *by design*, so an open spec PR plus `needs:spec-approval` is the
+    # complete answer to "where is the work?".
+    spec_gate_pending = item.spec_pr_number is not None and "needs:spec-approval" in labels
     if (
         item.status == "In review"
         and item.pr_number is None
         and "needs:input" not in labels
         and not item.blocked_flagged
+        and not spec_gate_pending
     ):
         item.warnings.append(
             "in review with no PR — nothing here for a human to review; if it is "
@@ -896,21 +1156,27 @@ def compute_signal(item: Item) -> None:
         )
 
     if n_human:
-        reasons.append(f"{n_human} unaddressed owner comment(s)")
+        note = f"{n_human} unaddressed owner comment(s)"
+        n_draft = len(item.pending_draft)
+        if n_draft:
+            note += f" ({n_draft} in an unsubmitted review)"
+        reasons.append(note)
         item.signal = "HUMAN-INPUT"
-    elif item.blocked_flagged and not item.open_blockers:
-        # Marked blocked, but nothing is blocking it any more. This is the one
-        # blocked state that is *actionable*, so it outranks everything except a
-        # waiting owner — and it must never be silently skipped.
-        if item.closed_blockers:
-            reasons.append(
-                f"unblocked — {'; '.join(f'{b.slug} closed' for b in item.closed_blockers)}; "
-                "move it back to Ready"
-            )
-        else:
-            reasons.append(
-                "marked blocked but no blocker is recorded — record one or move it to Ready"
-            )
+    elif item.blocked_flagged and item.blockers and not item.open_blockers:
+        # Marked blocked, and every blocker it *recorded* has closed. This is the
+        # one blocked state that is *actionable*, so it outranks everything except
+        # a waiting owner — and it must never be silently skipped.
+        #
+        # `item.blockers` is load-bearing, not redundant with `not open_blockers`:
+        # over an empty blocker list `not open_blockers` is vacuously true, so
+        # without it a task marked blocked with *nothing recorded* ranked
+        # UNBLOCKED — telling the loop to start work on a genuinely blocked task
+        # while its own ⚠ said no blocker was recorded. That state is hygiene,
+        # not a pickup; it falls through to BLOCKED-UNRECORDED below.
+        reasons.append(
+            f"unblocked — {'; '.join(f'{b.slug} closed' for b in item.closed_blockers)}; "
+            "move it back to Ready"
+        )
         item.signal = "UNBLOCKED"
     elif "approved:pr" in labels:
         reasons.append("owner approved the PR")
@@ -941,11 +1207,22 @@ def compute_signal(item: Item) -> None:
     elif item.unresolved_threads:
         reasons.append(f"{item.unresolved_threads} unresolved review thread(s)")
         item.signal = "THREADS"
-    elif item.blocked_flagged:
-        # blocked_flagged with at least one OPEN blocker — the UNBLOCKED branch
-        # above already claimed the all-closed case, so this is a real skip.
+    elif item.blocked_flagged and item.open_blockers:
+        # The UNBLOCKED branch above already claimed "recorded, and all closed",
+        # so this is a real skip: something open is genuinely in the way.
         reasons.append("blocked by " + blocker_list(item.open_blockers, with_age=True))
         item.signal = "BLOCKED"
+    elif item.blocked_flagged:
+        # Flagged blocked with nothing recorded. Not a pickup — there is no edge
+        # to watch, so this can never clear itself and would sit here forever;
+        # and not BLOCKED either, since nothing names what it waits on. Its own
+        # signal so the row reads as the hygiene fix it needs, which
+        # check_blocked_hygiene has already spelled out in a ⚠.
+        reasons.append(
+            "marked blocked but no blocker is recorded — record one with "
+            "`board-tick.py block`, or move it out of Blocked"
+        )
+        item.signal = "BLOCKED-UNRECORDED"
     elif labels & set(WAITING_LABELS):
         reasons.append("waiting on owner: " + ", ".join(sorted(labels & set(WAITING_LABELS))))
         item.signal = "WAITING-OWNER"
@@ -983,8 +1260,8 @@ def compute_signal(item: Item) -> None:
 # (BLOCKED/WAITING-OWNER/TRACKER) here — a task you can pick up outranks one you
 # cannot, even though a `blocked` label outranks "status says In progress" when
 # classifying. Within the skip block the order matches the chain: BLOCKED before
-# WAITING-OWNER (they used to disagree), and UNBLOCKED sits immediately after
-# HUMAN-INPUT in both.
+# BLOCKED-UNRECORDED before WAITING-OWNER (the first two used to disagree with
+# the chain), and UNBLOCKED sits immediately after HUMAN-INPUT in both.
 SIGNAL_ORDER = [
     "HUMAN-INPUT",
     "UNBLOCKED",
@@ -998,6 +1275,7 @@ SIGNAL_ORDER = [
     "NOT-STARTED",
     "WIP",
     "BLOCKED",
+    "BLOCKED-UNRECORDED",
     "WAITING-OWNER",
     "TRACKER",
     "IDLE",
@@ -1032,11 +1310,16 @@ def spec_cell(item: Item) -> str:
 
 
 def hum_cell(item: Item) -> str:
-    """Count of unaddressed owner comments, and how long the oldest has waited."""
+    """Count of unaddressed owner comments, and how long the oldest has waited.
+
+    A trailing `+N✎` says N of them come from a review the owner never submitted.
+    """
     pending = item.pending_human
     if not pending:
         return "-"
-    return f"{len(pending)}·{age_of(item.oldest_pending_human)}"
+    cell = f"{len(pending)}·{age_of(item.oldest_pending_human)}"
+    drafts = len(item.pending_draft)
+    return f"{cell}+{drafts}✎" if drafts else cell
 
 
 def work_cell(item: Item) -> str:
@@ -1057,8 +1340,40 @@ def blk_cell(item: Item) -> str:
     return f"{closed}/{total}✓" if closed == total else f"{closed}/{total}"
 
 
+def local_check_notice(items: list[Item], projects, no_local: bool) -> str | None:
+    """A run-level ⚠ when the local check saw nothing at all.
+
+    Per-row `?` covers a single missing clone. This covers the systemic case —
+    typically the digest being run from a git worktree, where `projects/` exists
+    (its `.gitignore` is tracked) but holds no clones. Every row then reads `?`,
+    and the `UNPUSHED` signal cannot fire for any task, so the run has to say so
+    rather than let a wall of `?` pass for a quiet board.
+    """
+    if not items or any(i.local_checked for i in items):
+        return None
+    if no_local:
+        return (
+            "LOCAL not checked (--no-local): UNPUSHED cannot fire, so stranded "
+            "uncommitted or unpushed work will NOT be reported by this run."
+        )
+    return (
+        f"LOCAL not checked for ANY task: no task clones under {projects} — "
+        "UNPUSHED cannot fire, so work stranded in a task worktree will NOT be "
+        "reported. This is what running the digest from a git worktree looks "
+        "like (its `projects/` is materialised but empty). Re-run from the main "
+        "checkout, or pass --projects-dir <path> to the directory holding the "
+        "task clones."
+    )
+
+
 def local_cell(item: Item) -> str:
-    """Work sitting in the local worktree that GitHub has never seen."""
+    """Work sitting in the local worktree that GitHub has never seen.
+
+    `?` = not checked (no clone here, or --no-local). `-` = checked, no worktree.
+    The distinction is the whole point: `-` must not double as "didn't look".
+    """
+    if not item.local_checked:
+        return "?"
     if not item.worktree:
         return "-"
     bits = []
@@ -1183,8 +1498,18 @@ def render_details(items: list[Item], include_bots: bool, body_limit: int) -> st
                 "   ⚠ no ack ledger yet — comments below may include pre-marker agent output; "
                 "read them, then ack what is already handled"
             )
+        drafts = it.pending_draft
+        if drafts:
+            where = ", ".join(sorted({c.draft_on for c in drafts if c.draft_on}))
+            out.append(
+                f"   ⚠ {len(drafts)} of the owner comments below sit in an UNSUBMITTED "
+                f"(pending) review on {where} — visible only because the loop shares the "
+                "owner's account, invisible to everyone else. Treat them as direction; "
+                "when you reply, say the review was never submitted."
+            )
         for c in it.pending_human:
-            head = f"   [OWNER · {c.kind} {c.cid}] @{c.author} {c.created} ({age_of(c.created)} ago)"
+            tag = "OWNER · DRAFT REVIEW" if c.draft_on else "OWNER"
+            head = f"   [{tag} · {c.kind} {c.cid}] @{c.author} {c.created} ({age_of(c.created)} ago)"
             if c.path:
                 head += f" · {c.path}"
             out.append(head)
@@ -1233,6 +1558,9 @@ def render_json(items: list[Item]) -> str:
                 "oldest_pending_human": it.oldest_pending_human or None,
                 "work_started": it.work_started,
                 "pushed_work": it.pushed_work,
+                # `local_checked` false means `local` is unknown, not empty — a
+                # consumer must not read a null `local` as "nothing stranded".
+                "local_checked": it.local_checked,
                 "blocked": {
                     "flagged": it.blocked_flagged,
                     "total": max(it.blockers_total, len(it.blockers)),
@@ -1302,6 +1630,7 @@ def render_json(items: list[Item]) -> str:
                         "url": c.url,
                         "path": c.path,
                         "thread_id": c.thread_id,
+                        "draft_review_on": c.draft_on,
                         "body": c.body,
                     }
                     for c in it.pending
@@ -1314,7 +1643,45 @@ def render_json(items: list[Item]) -> str:
 # ── Commands ────────────────────────────────────────────────────────────────
 
 
+# A tick is a few dozen GraphQL requests (the board list, a spec-PR list, a PR
+# list per unlinked item, the hydration chunks), and requests cost points rather
+# than one each. Refuse to start without headroom: a tick that dies halfway has
+# already spent the budget and still tells you nothing.
+#
+# Measured, not guessed: a 17-item hitl tick cost 228 of the 5000 hourly points
+# (4121 → 3893). The default leaves headroom for a larger board; raise it if the
+# board grows, and note that ~20 ticks per hour is the ceiling either way.
+MIN_GRAPHQL_BUDGET = 400
+
+
+def preflight(min_budget: int) -> str | None:
+    """Refuse to start a tick the GraphQL budget cannot finish. None = go ahead."""
+    budget = graphql_budget()
+    if budget is None:
+        return None  # can't tell — proceed and let the mid-tick guard catch it
+    remaining, _, _ = budget
+    if remaining >= min_budget:
+        return None
+    headline = (
+        "GITHUB GRAPHQL BUDGET TOO LOW TO RUN A TICK — NOTHING WAS READ"
+        if remaining > 0
+        else "GITHUB GRAPHQL RATE LIMIT EXHAUSTED — NOTHING WAS READ"
+    )
+    extra = (
+        f"\n Refusing to start: {remaining} point(s) left, {min_budget} needed "
+        f"(--min-budget to override)."
+    )
+    return rate_limit_banner(headline, budget) + extra
+
+
 def cmd_tick(args: argparse.Namespace) -> int:
+    # Before anything else: a tick that cannot see the board must say so rather
+    # than half-read it. Checked up front because `gh` reports exhaustion with
+    # misleading errors that read like configuration bugs.
+    refusal = preflight(args.min_budget)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 75  # EX_TEMPFAIL — transient; re-run after the reset
     statuses = tuple(args.status) if args.status else ACTIVE_STATUSES
     items = fetch_board(statuses)
     if args.loop:
@@ -1332,6 +1699,7 @@ def cmd_tick(args: argparse.Namespace) -> int:
             inspect_worktree(it, projects)
         drop_acked(it)
         compute_signal(it)
+    local_notice = local_check_notice(items, projects, args.no_local)
     # Most urgent signal first; within a signal, the longest-neglected first.
     items.sort(
         key=lambda i: (
@@ -1342,11 +1710,18 @@ def cmd_tick(args: argparse.Namespace) -> int:
     )
 
     if args.json:
+        # On stderr, so stdout stays a plain array for any existing consumer.
+        # Machine callers should read each row's `local_checked` instead.
+        if local_notice:
+            print(f"⚠ {local_notice}", file=sys.stderr)
         print(render_json(items))
         return 0
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    print(f"Board tick · {stamp} · {len(items)} active item(s)\n")
+    print(f"Board tick · {stamp} · {len(items)} active item(s)")
+    if local_notice:
+        print(f"\n⚠ {local_notice}")
+    print()
     print(render_table(items))
     details = render_details(items, args.include_bots, args.body_limit)
     if details.strip():
@@ -1384,9 +1759,15 @@ def collect_pending_ids(repo: str, issue: int) -> dict[str, list[int]]:
     attach_spec_prs([item])
     hydrate([item])
     drop_acked(item)
-    buckets: dict[str, list[int]] = {"issue": [], "pr": [], "review": [], "spec": []}
+    buckets: dict[str, list[int]] = {
+        "issue": [],
+        "pr": [],
+        "review": [],
+        "spec": [],
+        "pending": [],
+    }
     for c in item.pending:
-        buckets[c.kind].append(c.cid)
+        buckets.setdefault(c.kind, []).append(c.cid)
     return buckets
 
 
@@ -1402,6 +1783,7 @@ def cmd_ack(args: argparse.Namespace) -> int:
             "issue": list(args.issue_comment),
             "pr": list(args.pr_comment),
             "review": list(args.review_comment),
+            "pending": list(args.pending_comment),
         }
     total = sum(len(v) for v in buckets.values())
     if not total:
@@ -1730,6 +2112,12 @@ def main(argv: list[str]) -> int:
     p_tick.add_argument("--projects-dir", help="where task worktrees live (default <workspace>/projects)")
     p_tick.add_argument("--no-local", action="store_true", help="skip the local worktree check")
     p_tick.add_argument("--json", action="store_true", help="machine-readable output")
+    p_tick.add_argument(
+        "--min-budget",
+        type=int,
+        default=MIN_GRAPHQL_BUDGET,
+        help=f"refuse to start below this many GraphQL points (default {MIN_GRAPHQL_BUDGET}; 0 disables)",
+    )
     p_tick.set_defaults(func=cmd_tick)
 
     p_ack = sub.add_parser("ack", help="mark comments seen/addressed in the issue's ledger")
@@ -1740,6 +2128,13 @@ def main(argv: list[str]) -> int:
     p_ack.add_argument("--pr-comment", action="append", type=int, default=[])
     p_ack.add_argument("--review-comment", action="append", type=int, default=[])
     p_ack.add_argument("--spec-comment", action="append", type=int, default=[])
+    p_ack.add_argument(
+        "--pending-comment",
+        action="append",
+        type=int,
+        default=[],
+        help="ack a comment from an unsubmitted (pending) review",
+    )
     p_ack.add_argument("--note", help="short record of what was done about them")
     p_ack.add_argument("--dry-run", action="store_true")
     p_ack.set_defaults(func=cmd_ack)
@@ -1796,6 +2191,18 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
+    except RateLimited:
+        # Deliberately not a partial digest: a half-read board invites exactly the
+        # silent under-reporting the TRUNCATED warning exists to prevent. Whatever
+        # was collected before this point is discarded.
+        print(
+            rate_limit_banner(
+                "GITHUB GRAPHQL RATE LIMIT HIT MID-TICK — THIS TICK IS VOID",
+                graphql_budget(),
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(75)  # EX_TEMPFAIL — transient; re-run after the reset
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

@@ -28,9 +28,12 @@ this file apply and layers its own gates on top.
 - `.claude/skills/loop-common/scripts/board-tick.py` — the digest/ack/label/block
   tool every tick runs through. Python 3 stdlib only; shells out to `gh`. Run
   `board-tick.py init-labels --repo <repo>` once per repo the loops touch so the
-  loop label set exists there. Its unit tests run in this repo's CI
-  (`.github/workflows/ci.yml`), so a change to the script that breaks a signal or
-  a column fails the PR — keep them passing when you edit it.
+  loop label set exists there. Its unit tests (`scripts/test_board_tick.py`) run
+  in this repo's CI (`.github/workflows/ci.yml`), so a change to the script that
+  breaks a signal or a column fails the PR — keep them passing when you edit it.
+  Locally: `python3 -m unittest` from `scripts/`. They use fixtures and never
+  touch the network, so they cost no GraphQL budget (see below) — **verify
+  against them, not by re-running live ticks**.
 
 ## Board IDs (project #6 "growth")
 
@@ -69,6 +72,44 @@ comment queries — the digest is the only sanctioned way to see the board.**
 .claude/skills/loop-common/scripts/board-tick.py --loop hitl   # or --loop auto
 ```
 
+### Precondition: the GraphQL budget
+
+A tick is a few dozen GitHub **GraphQL** requests — `gh project item-list`, every
+`gh pr list`, and every hydration query all draw on the same 5000-point/hour
+budget, and that budget is **shared by every agent and tool on the machine**, so
+concurrent runs drain it together.
+
+**A 17-item tick costs ~230 points** (measured: 4121 → 3893), so the practical
+ceiling is roughly **20 ticks per hour across all agents**. Ticking in a tight
+loop, or re-running the digest to debug it, will exhaust the hour.
+
+The digest checks this itself before reading anything, and **refuses to start**
+without headroom (`--min-budget`, default 400 points; `0` disables). If it hits
+the wall mid-tick it aborts rather than printing a partial board, because a
+half-read board is exactly the silent under-reporting the `TRUNCATED` warning
+exists to prevent. Either way you get a banner naming the budget and the reset
+time, and **exit code 75**:
+
+```
+══════════════════════════════════════════════════════════════════
+ GITHUB GRAPHQL RATE LIMIT EXHAUSTED — NOTHING WAS READ
+══════════════════════════════════════════════════════════════════
+ graphql budget: 0/5000 · resets 2026-07-29 23:06 UTC (in 10m)
+```
+
+**A tick that hits this has seen nothing.** Do not pick up, skip, label or close
+any task on the basis of it. Wait for the reset and re-run.
+
+> **Diagnostic trap.** `gh` disguises this failure. A rate-limited
+> `gh project item-list 6 --owner gaarutyunov` prints **`unknown owner type`** —
+> which reads like a permissions or argument bug and is nothing of the kind.
+> Before "fixing" any `gh` error, run `gh api rate_limit`. Never weaken or trim a
+> query to make the error go away.
+>
+> Don't burn the budget on diagnostics either: `board-tick.py`'s logic is covered
+> by `scripts/test_board_tick.py`, which uses fixtures and never calls the
+> network. Verify against that, not by re-running live ticks.
+
 One call (~7s) returns every **active** board item — everything except Backlog
 and Done, so **Blocked** items appear in every digest too — with, for each one:
 its status, Loop routing, labels, the code PR, **the spec PR**, CI,
@@ -87,7 +128,8 @@ BLOCKED      sysgo#67       Blocked      auto  BLOCKED  6d   -     -    -    0/2
 ```
 
 - **`HUM`** — `count·age`: unaddressed owner comments, and how long the oldest
-  has been waiting. The column that matters most.
+  has been waiting. The column that matters most. A trailing **`+N✎`** means N of
+  them come from a review the owner never submitted (see *Unsubmitted reviews*).
 - **`AGE`** — time since the last real activity (a comment or a pushed commit).
   Ledger writes deliberately don't count, so acking can't make a rotting task
   look fresh.
@@ -98,7 +140,9 @@ BLOCKED      sysgo#67       Blocked      auto  BLOCKED  6d   -     -    -    0/2
   **`EMPTY`** for a PR holding nothing but the starter commit.
 - **`LOCAL`** — work in the task's worktree that GitHub has never seen:
   `2c+3f` = 2 unpushed commits + 3 uncommitted files. `clean` = worktree exists
-  and is in sync; `-` = no worktree on this machine.
+  and is in sync; `-` = looked, no worktree for this task; **`?` = could not
+  look** (the repo isn't cloned here, or `--no-local`). `?` is not `-`: it means
+  `UNPUSHED` cannot fire for that row, so nothing rules out stranded work.
 - **`SPEC`** — the task's spec PR and its state.
 
 Work the table top-down; the signals, in the order the digest sorts them (ties
@@ -119,14 +163,26 @@ broken by who has waited longest):
 | `WIP` | In progress with pushed work, nothing new | continue it |
 | `TRACKER` | legacy `tracker` label from before issues stopped being split | work the issue itself and drop the label |
 | `BLOCKED` | at least one blocker is **still open** | **skip** — do not touch |
+| `BLOCKED-UNRECORDED` | flagged blocked, but **no** blocker is recorded | record one with `board-tick.py block`, or move it out of Blocked |
 | `WAITING-OWNER` | needs the owner, nothing new since | **skip** — do not touch |
 
-`UNBLOCKED` and `BLOCKED` are the two halves of one state, split on a fact the
+`UNBLOCKED` and `BLOCKED` are two halves of one state, split on a fact the
 digest can check: whether any `blockedBy` issue is still open. Only the
 open-blocker half is a skip. The all-closed half is **work waiting to be picked
 up**, which is why it ranks second, immediately below `HUMAN-INPUT` — a blocker
 that cleared while nobody was looking used to be how a task sat forgotten for
 days.
+
+Both halves require at least one **recorded** blocker. A task flagged blocked
+with nothing recorded is the third state, `BLOCKED-UNRECORDED`, and it is neither
+of the other two: there is no dependency edge to watch, so it can never clear
+itself, and nothing names what it is waiting on. It is a **hygiene state, not a
+pickup** — the fix is to record the blocker or move the item out of Blocked.
+
+> Do not be tempted to fold it back into `UNBLOCKED`. It was there once, because
+> "every blocker has closed" over an *empty* blocker list is vacuously true, and
+> the digest duly told the loop to start work on genuinely blocked tasks while
+> printing `⚠ blocked with no recorded blocker` on the very same row.
 
 Rows also carry `⚠` **hygiene warnings**, each naming the command that fixes it:
 
@@ -143,6 +199,31 @@ Rows also carry `⚠` **hygiene warnings**, each naming the command that fixes i
 
 Fix the hygiene problem in the same tick you see it.
 
+A warning that fires on a healthy task is worse than no warning, because it
+teaches the loop to skim past the `⚠` lines that *do* matter. So
+`in review with no PR` stays silent whenever something already explains the
+absent code PR: `needs:input` (a question is out), a blocked flag (which gets its
+own, stronger checks above), or **an open spec PR plus `needs:spec-approval`** —
+a spec-only task has no code PR *by design* until the spec gate passes. It still
+fires for the case it was written for: In review, no code PR, and nothing
+accounting for it.
+
+There is one warning you must never rationalise away: **`TRUNCATED`**. Every
+`first:`/`last:` in the digest's GraphQL fragments is a cap, and GraphQL raises no
+error when one bites — it just returns fewer rows. That makes an under-reporting
+tick indistinguishable from a quiet one, which is precisely how five owner
+comments once stayed hidden for a day. So every capped connection is fetched with
+its `totalCount` and any shortfall becomes a row-level warning:
+
+```
+⚠ TRUNCATED: spec PR #36 review threads returned 30 of 47 — 17 not seen by this
+  tick; raise the cap in the GraphQL fragment before trusting this row
+```
+
+The row's `HUM`/`BOT`/`THR` counts are then **known to be incomplete**. Raise the
+cap in the fragment and re-run before acting on that row — never treat the digest
+as authoritative for a row carrying `TRUNCATED`.
+
 ### An empty PR is a diagnosis, not a dead end
 
 A PR with no changed files means a previous tick claimed the task and produced
@@ -156,6 +237,7 @@ you're in:
 | `EMPTY` | `2c+3f` | the run was stopped / ran out of context **after** editing | **push the work** — review the diff, commit, push |
 | `EMPTY` | `clean` | interrupted before any edit landed | restart the work |
 | `EMPTY` | `-` | no worktree on this machine either | restart from the issue + spec |
+| `EMPTY` | `?` | **the local check could not run** — nothing is ruled out | resolve `?` first (below), then re-read |
 | `8f` | `2c+3f` | pushed work **plus** newer local edits | push the remainder before anything else |
 
 Anything with local-only work is signalled **`UNPUSHED`** and ranks above CI
@@ -166,16 +248,71 @@ The check is local and free (no API calls). Skip it with `--no-local`, or point
 it elsewhere with `--projects-dir <path>` — useful when a tick runs on a
 different machine from the one that did the work, where `LOCAL` is meaningless.
 
+> **Run the digest from the main checkout, not from a task worktree.** The
+> projects directory is resolved from the repository's *main* worktree
+> (`git rev-parse --git-common-dir`), so either location now works — but the
+> trap is worth knowing, because it used to fail silently and dangerously.
+> `projects/.gitignore` is tracked, so **git recreates an empty `projects/` in
+> every worktree**; a directory-exists check walks straight past it. The digest
+> therefore decides per row, on whether `projects/<repo>` is actually there, and
+> reports `?` rather than `-` when it isn't. If *no* task clone is found at all,
+> the run prints a `⚠` above the table saying `UNPUSHED` cannot fire for any
+> task — because a wall of `?` must not pass for a quiet board.
+
 ### The spec PR is fetched too
 
-A task's spec lives in the **workspace** repo on `spec/<repo>-issue-<N>` — for
-every project task that is a *different repo* from the issue, so nothing on the
-issue links to it. The digest resolves it by branch name and pulls its comments,
-reviews and unresolved threads into the same pool, tagged `spec`.
+A task's spec lives in the **workspace** repo on a `spec…` branch naming the
+task's repo and issue number — for every project task that is a *different repo*
+from the issue, so nothing on the issue links to it. The digest resolves it by
+branch name and pulls its comments, reviews and unresolved threads into the same
+pool, tagged `spec`.
 
 This matters: owner approvals and scope changes are routinely written on the
 spec PR, and before this was wired the loop simply never saw them. Ack them like
 any other comment (`--spec-comment <id>`, or `--all`).
+
+**Branch matching is deliberately loose**, because a spec PR the digest fails to
+recognise is a spec PR whose owner feedback is never read. All of these resolve:
+
+| Branch | → |
+|---|---|
+| `spec/goga-1-framework-foundations` | goga#1 |
+| `spec/ui-kit-6-workout-components` | ui-kit#6 |
+| `spec/gopgql-issue-38` | gopgql#38 |
+| `spec/gopgql-issue-9-m7-full-sdl-conformance` | gopgql#9 |
+| `spec-ui-kit-6` | ui-kit#6 |
+
+So: a `/` or `-` separator either way, an optional `issue` segment, and an
+optional trailing slug after the number. The number is the **first** `-<digits>-`
+run, so a slug that itself starts with digits can't steal the match. A number
+that isn't separated from what follows it (`spec/goga-1abc`) stays unmatched
+rather than being guessed at. `spec_branch_key` is covered by
+`scripts/test_board_tick.py` — add a case there when a new naming style appears.
+
+### Unsubmitted reviews are read too
+
+GitHub lets a reviewer write inline comments, never click **Submit review**, and
+leave the review `PENDING` — its comments then appear in **no** ordinary
+endpoint: not `GET /pulls/{n}/comments`, not `gh pr view --json comments,reviews`.
+The owner usually has no idea the comments are invisible; from their side they
+look written.
+
+Because the loop and the owner post from the same GitHub account, the API *does*
+hand us those drafts, so the digest fetches them (off the `reviews` connection it
+already queries — no extra API call) for both the code PR and the spec PR. They
+are folded into the same unaddressed-owner-comment pool as everything else: they
+count in `HUM` (with the `+N✎` suffix), they rank the task `HUMAN-INPUT`, and they
+print in DETAILS tagged **`[OWNER · DRAFT REVIEW · pending <id>]`** under a `⚠`
+line naming the PR.
+
+**Treat them as direction — they are real owner intent.** Ack them like any other
+comment (`--pending-comment <id>`, or `--all`). When you reply, *say* the review
+was never submitted, so the owner learns that their comments were invisible to
+everyone else and can submit next time.
+
+> A draft comment also shows up as an unresolved review thread. The digest counts
+> the thread once and the comment once, and the draft tag wins — so `THR` and
+> `HUM` don't double-report the same feedback.
 
 Useful flags: `--repo <name>` to narrow, `--include-bots` to expand suppressed
 machine comments, `--json` for the structured form, `--status <s>` to override
@@ -223,9 +360,11 @@ the *same* GitHub account. Two mechanisms keep them apart:
    ```
 
    `--all` acks everything the digest currently shows for that task, across the
-   issue, the code PR **and the spec PR**. To ack selectively, pass
+   issue, the code PR, the spec PR **and any unsubmitted review**. To ack
+   selectively, pass
    `--issue-comment <id>` / `--pr-comment <id>` / `--review-comment <id>` /
-   `--spec-comment <id>` (the ids are printed in the details block). Add
+   `--spec-comment <id>` / `--pending-comment <id>` (the ids are printed in the
+   details block, after the `·` in each comment's header). Add
    `--dry-run` to see the ledger without writing it.
 
 **An owner comment is never "read and skipped".** Either act on it and ack it,

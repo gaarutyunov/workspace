@@ -10,8 +10,12 @@ Run:
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import importlib.util
 import inspect
+import io
+import json
 import re
 import sys
 import unittest
@@ -188,11 +192,6 @@ class TestComputeSignalUnblocked(unittest.TestCase):
         self.assertIn("dep#10 closed", reason)
         self.assertIn("Ready", reason)
 
-    def test_blocked_label_with_no_recorded_blocker_is_unblocked(self):
-        """The three legacy label-only items — surfaced, not skipped."""
-        item = make_item(status="In review", labels=["blocked", "needs:review"])
-        self.assertEqual(signal_of(item), "UNBLOCKED")
-
     def test_unblocked_outranks_waiting_owner(self):
         item = make_item(
             status="Blocked",
@@ -223,6 +222,64 @@ class TestComputeSignalUnblocked(unittest.TestCase):
         item = make_item(status="Ready", blockers=[blocker(9)], blockers_total=1)
         self.assertEqual(signal_of(item), "READY")
         self.assertTrue(any("open blocker" in w for w in item.warnings))
+
+
+class TestUnblockedNeedsARecordedBlocker(unittest.TestCase):
+    """UNBLOCKED must never fire over an *empty* blocker set.
+
+    `all(b.closed for b in [])` is vacuously true, so a task flagged blocked with
+    nothing recorded used to rank UNBLOCKED — an actionable pickup the loops are
+    told to "never leave sitting". Both blocked items on the live board hit this,
+    each with a ⚠ on the same row saying no blocker was recorded: the digest
+    contradicted its own signal and sent the loop to start genuinely blocked work.
+    """
+
+    def test_blocked_status_with_no_recorded_blocker_is_not_unblocked(self):
+        item = make_item(status="Blocked")
+        self.assertNotEqual(signal_of(item), "UNBLOCKED")
+        self.assertEqual(item.signal, "BLOCKED-UNRECORDED")
+
+    def test_blocked_label_with_no_recorded_blocker_is_not_unblocked(self):
+        """The legacy label-only items — surfaced as hygiene, not as a pickup."""
+        item = make_item(status="In review", labels=["blocked", "needs:review"])
+        self.assertEqual(signal_of(item), "BLOCKED-UNRECORDED")
+
+    def test_the_signal_and_the_row_warning_now_agree(self):
+        """The contradiction itself: signal said "go", the ⚠ said "nothing recorded"."""
+        item = make_item(status="Blocked")
+        signal_of(item)
+        self.assertTrue(
+            any("no recorded blocker" in w for w in item.warnings), item.warnings
+        )
+        self.assertNotEqual(item.signal, "UNBLOCKED")
+        self.assertTrue(any("no blocker is recorded" in r for r in item.reasons), item.reasons)
+
+    def test_the_reason_names_the_fix_rather_than_offering_a_pickup(self):
+        item = make_item(status="Blocked")
+        signal_of(item)
+        reason = " ".join(item.reasons)
+        self.assertIn("board-tick.py block", reason)
+        self.assertNotIn("move it back to Ready", reason)
+
+    def test_one_recorded_blocker_that_closed_still_unblocks(self):
+        """The guard must not cost the real case its actionable signal."""
+        item = make_item(status="Blocked", blockers=[blocker(9, "CLOSED")], blockers_total=1)
+        self.assertEqual(signal_of(item), "UNBLOCKED")
+
+    def test_unrecorded_is_a_skip_not_a_pickup_in_the_sort(self):
+        """It ranks with the skips: there is no edge to watch, so no work to start."""
+        self.assertGreater(
+            bt.SIGNAL_ORDER.index("BLOCKED-UNRECORDED"), bt.SIGNAL_ORDER.index("READY")
+        )
+        self.assertGreater(
+            bt.SIGNAL_ORDER.index("BLOCKED-UNRECORDED"), bt.SIGNAL_ORDER.index("UNBLOCKED")
+        )
+
+    def test_the_row_is_never_suppressed_from_details(self):
+        item = make_item(status="Blocked")
+        signal_of(item)
+        out = bt.render_details([item], include_bots=False, body_limit=500)
+        self.assertIn("BLOCKED-UNRECORDED", out)
 
 
 class TestComputeSignalOtherBranches(unittest.TestCase):
@@ -284,8 +341,8 @@ class TestComputeSignalOtherBranches(unittest.TestCase):
         """Sanity: the branch tests above cover the whole chain."""
         covered = {
             "HUMAN-INPUT", "UNBLOCKED", "PR-APPROVED", "SPEC-APPROVED", "UNPUSHED",
-            "SPEC-MERGED", "CI-RED", "THREADS", "BLOCKED", "WAITING-OWNER",
-            "TRACKER", "READY", "NOT-STARTED", "WIP", "IDLE",
+            "SPEC-MERGED", "CI-RED", "THREADS", "BLOCKED", "BLOCKED-UNRECORDED",
+            "WAITING-OWNER", "TRACKER", "READY", "NOT-STARTED", "WIP", "IDLE",
         }
         self.assertEqual(set(chain_signals()), covered)
 
@@ -679,6 +736,533 @@ class TestRenderJson(unittest.TestCase):
         payload = _json.loads(bt.render_json([item]))[0]
         self.assertEqual(payload["signal"], "UNBLOCKED")
         self.assertEqual(payload["blocked"]["open"], 0)
+
+
+# ── spec-PR discovery ───────────────────────────────────────────────────────
+
+
+class TestSpecBranchKey(unittest.TestCase):
+    """Every branch style a tick has ever produced must resolve to (repo, issue).
+
+    A branch that fails to parse means the spec PR is never found, which means the
+    owner's spec feedback is never read — the failure this test exists to prevent.
+    """
+
+    def test_trailing_slug(self):
+        # The style the spec flow actually produces, and the one `fullmatch`
+        # without a slug group silently dropped.
+        self.assertEqual(bt.spec_branch_key("spec/goga-1-framework-foundations"), ("goga", 1))
+        self.assertEqual(
+            bt.spec_branch_key("spec/gopgql-issue-38-migration-modes"), ("gopgql", 38)
+        )
+        self.assertEqual(
+            bt.spec_branch_key("spec/gopgql-issue-9-m7-full-sdl-conformance"), ("gopgql", 9)
+        )
+        self.assertEqual(
+            bt.spec_branch_key("spec/ui-kit-6-workout-components"), ("ui-kit", 6)
+        )
+
+    def test_no_slug(self):
+        self.assertEqual(bt.spec_branch_key("spec/gopgql-issue-38"), ("gopgql", 38))
+        self.assertEqual(bt.spec_branch_key("spec-ui-kit-6"), ("ui-kit", 6))
+        self.assertEqual(bt.spec_branch_key("spec/ui-kit-issue-10"), ("ui-kit", 10))
+
+    def test_repo_group_does_not_swallow_the_issue_number(self):
+        # `repo` is non-greedy: a slug starting with digits must not be mistaken
+        # for the issue number, and the repo must not absorb it either.
+        self.assertEqual(bt.spec_branch_key("spec/ui-kit-6-workout-components"), ("ui-kit", 6))
+        self.assertEqual(bt.spec_branch_key("spec/ui-kit-6-2fa-support"), ("ui-kit", 6))
+        self.assertEqual(bt.spec_branch_key("spec/goga-12-multi-digit"), ("goga", 12))
+
+    def test_rejects_non_spec_branches(self):
+        for branch in ("main", "issue-38", "spec/nonumber"):
+            with self.subTest(branch=branch):
+                self.assertIsNone(bt.spec_branch_key(branch))
+
+    def test_rejects_a_number_not_separated_from_its_slug(self):
+        # Better to miss than to guess: `1abc` is not issue 1.
+        self.assertIsNone(bt.spec_branch_key("spec/goga-1abc"))
+
+
+# ── unsubmitted (PENDING) review comments ───────────────────────────────────
+
+
+def draft_review_comment(cid: int, path: str, line: int, body: str) -> dict:
+    """One inline comment node as it arrives under a review's `comments`."""
+    return {
+        "databaseId": cid,
+        "author": {"login": bt.OWNER},
+        "body": body,
+        "createdAt": "2026-07-28T05:17:19Z",
+        "url": f"https://example.test/#discussion_r{cid}",
+        "path": path,
+        "line": line,
+    }
+
+
+class TestPendingReviewComments(unittest.TestCase):
+    """Comments in an unsubmitted review are owner direction and must surface."""
+
+    def _spec_payload(self):
+        return {
+            "state": "OPEN",
+            "url": "https://example.test/pull/36",
+            "comments": {"nodes": []},
+            "reviews": {
+                "nodes": [
+                    {
+                        "databaseId": 4793987058,
+                        "author": {"login": bt.OWNER},
+                        "body": "",
+                        "state": "PENDING",
+                        "submittedAt": None,
+                        "url": "https://example.test/pull/36",
+                        "comments": {
+                            "nodes": [
+                                draft_review_comment(
+                                    3662973631, "design.md", 114, "Sqlc will appear in codiq"
+                                ),
+                                draft_review_comment(
+                                    3663003636, "tasks.md", 73, "What are these?"
+                                ),
+                            ]
+                        },
+                    }
+                ]
+            },
+            # GitHub also exposes each draft comment as an unresolved thread; the
+            # digest must count the thread once and the comment once.
+            "reviewThreads": {
+                "nodes": [
+                    {
+                        "isResolved": False,
+                        "path": "design.md",
+                        "line": 114,
+                        "comments": {
+                            "nodes": [
+                                draft_review_comment(
+                                    3662973631, "design.md", 114, "Sqlc will appear in codiq"
+                                )
+                            ]
+                        },
+                    },
+                    {
+                        "isResolved": False,
+                        "path": "tasks.md",
+                        "line": 73,
+                        "comments": {
+                            "nodes": [
+                                draft_review_comment(
+                                    3663003636, "tasks.md", 73, "What are these?"
+                                )
+                            ]
+                        },
+                    },
+                ]
+            },
+        }
+
+    def test_drafts_land_in_the_human_pool_marked_and_deduped(self):
+        item = make_item(status="In review", spec_pr_number=36)
+        bt.apply_spec(item, self._spec_payload())
+
+        self.assertEqual(len(item.pending_human), 2)
+        self.assertEqual(len(item.pending_draft), 2)
+        self.assertEqual({c.kind for c in item.pending_draft}, {"pending"})
+        self.assertEqual({c.draft_on for c in item.pending_draft}, {"spec PR #36"})
+        self.assertEqual(
+            sorted(c.cid for c in item.pending_draft), [3662973631, 3663003636]
+        )
+        # The thread pass must not re-add them under kind "spec".
+        self.assertEqual([c.cid for c in item.comments].count(3662973631), 1)
+        self.assertEqual(item.spec_unresolved_threads, 2)
+
+    def test_drafts_drive_the_signal_and_the_hum_cell(self):
+        item = make_item(status="In review", spec_pr_number=36)
+        bt.apply_spec(item, self._spec_payload())
+        bt.compute_signal(item)
+
+        self.assertEqual(item.signal, "HUMAN-INPUT")
+        self.assertIn("unsubmitted review", " ".join(item.reasons))
+        self.assertTrue(bt.hum_cell(item).endswith("+2✎"))
+
+    def test_details_flags_the_unsubmitted_state(self):
+        item = make_item(status="In review", spec_pr_number=36, spec_pr_state="OPEN")
+        bt.apply_spec(item, self._spec_payload())
+        bt.compute_signal(item)
+        text = bt.render_details([item], include_bots=False, body_limit=500)
+
+        self.assertIn("UNSUBMITTED", text)
+        self.assertIn("DRAFT REVIEW", text)
+        self.assertIn("3662973631", text)
+
+    def test_acked_drafts_stay_gone(self):
+        item = make_item(status="In review", spec_pr_number=36)
+        bt.apply_spec(item, self._spec_payload())
+        item.ledger = {"v": 1, "acked": {"pending": [3662973631]}}
+        bt.drop_acked(item)
+
+        self.assertEqual([c.cid for c in item.pending_human], [3663003636])
+
+    def test_submitted_reviews_are_unaffected(self):
+        """A submitted review's comments still arrive via its thread, kind `spec`."""
+        payload = self._spec_payload()
+        payload["reviews"]["nodes"][0].update(
+            state="CHANGES_REQUESTED", submittedAt="2026-07-28T06:00:00Z", body="please fix"
+        )
+        item = make_item(status="In review", spec_pr_number=36)
+        bt.apply_spec(item, payload)
+
+        self.assertEqual(item.pending_draft, [])
+        self.assertIn("spec", {c.kind for c in item.pending_human})
+
+    def test_pending_is_a_ledger_bucket(self):
+        item = make_item()
+        item.ledger = {"v": 1, "acked": {"pending": [1, 2], "spec": [3]}}
+        self.assertEqual(bt.acked_ids(item), {1, 2, 3})
+
+
+# ── the "in review with no PR" warning ──────────────────────────────────────
+
+
+class TestNoPrWarning(unittest.TestCase):
+    """`in review with no PR` must only fire when nothing explains the absence.
+
+    A ⚠ that fires on a healthy task is worse than no ⚠ at all — it teaches the
+    loop to skim past the hygiene warnings that do matter.
+    """
+
+    WARNING = "in review with no PR"
+
+    def _warns(self, **kw):
+        item = make_item(status="In review", **kw)
+        bt.compute_signal(item)
+        return any(self.WARNING in w for w in item.warnings)
+
+    def test_fires_when_there_is_genuinely_nothing_to_show(self):
+        self.assertTrue(self._warns(labels=["needs:review"]))
+
+    def test_silent_for_a_spec_only_task_awaiting_the_spec_gate(self):
+        # goga#1: spec PR open, spec gate not passed, so no code PR *by design*.
+        self.assertFalse(
+            self._warns(labels=["needs:spec-approval"], spec_pr_number=36, spec_pr_state="OPEN")
+        )
+
+    def test_still_fires_when_the_spec_pr_is_missing(self):
+        # `needs:spec-approval` with no spec PR to approve is exactly the state
+        # blind spot 1 produced — the label claims a gate that isn't there.
+        self.assertTrue(self._warns(labels=["needs:spec-approval"]))
+
+    def test_still_fires_when_the_label_is_missing(self):
+        # A spec PR with no needs:spec-approval is unexplained — the loop either
+        # forgot the label or the spec already cleared and coding never started.
+        self.assertTrue(self._warns(labels=[], spec_pr_number=36, spec_pr_state="OPEN"))
+
+    def test_silent_when_blocked_or_a_question_is_out(self):
+        self.assertFalse(self._warns(labels=["blocked"]))
+        self.assertFalse(self._warns(labels=["needs:input"]))
+
+    def test_silent_when_a_code_pr_exists(self):
+        self.assertFalse(self._warns(labels=["needs:review"], pr_number=40))
+
+
+# ── truncated connections ───────────────────────────────────────────────────
+
+
+class TestTruncation(unittest.TestCase):
+    """A cap that bites must never be silent."""
+
+    def test_warns_naming_the_connection_and_both_numbers(self):
+        item = make_item()
+        nodes = bt.note_truncation(
+            item, {"totalCount": 47, "nodes": [{"databaseId": i} for i in range(30)]},
+            "spec PR #36 review threads",
+        )
+        self.assertEqual(len(nodes), 30)  # still returns what it got
+        self.assertEqual(len(item.warnings), 1)
+        warning = item.warnings[0]
+        self.assertIn("TRUNCATED", warning)
+        self.assertIn("spec PR #36 review threads", warning)
+        self.assertIn("30 of 47", warning)
+        self.assertIn("17 not seen", warning)
+
+    def test_silent_when_nothing_was_dropped(self):
+        item = make_item()
+        bt.note_truncation(item, {"totalCount": 4, "nodes": [1, 2, 3, 4]}, "x")
+        bt.note_truncation(item, {"totalCount": 0, "nodes": []}, "x")
+        bt.note_truncation(item, None, "x")
+        bt.note_truncation(item, {"nodes": [1]}, "x")  # totalCount not selected
+        self.assertEqual(item.warnings, [])
+
+    def test_truncation_forces_an_otherwise_quiet_row_into_details(self):
+        item = make_item(status="In review", labels=["needs:review"])
+        bt.note_truncation(item, {"totalCount": 9, "nodes": [1]}, "PR #40 comments")
+        bt.compute_signal(item)
+        self.assertEqual(item.signal, "WAITING-OWNER")  # a normally-skipped row
+        self.assertIn("TRUNCATED", bt.render_details([item], False, 200))
+
+    def test_every_capped_connection_selects_total_count(self):
+        """A `first:`/`last:` with no sibling totalCount can truncate silently."""
+        for name, fragment in (
+            ("ISSUE_FRAGMENT", bt.ISSUE_FRAGMENT),
+            ("SPEC_FRAGMENT", bt.SPEC_FRAGMENT),
+            ("PR_FRAGMENT", bt.PR_FRAGMENT),
+        ):
+            with self.subTest(fragment=name):
+                caps = len(re.findall(r"\((?:first|last):\s*\d+\)", fragment))
+                totals = fragment.count("totalCount")
+                # `labels` is the one deliberate exception: 50 labels on one issue
+                # is not a real state, and a ⚠ there would be pure noise.
+                expected = caps - fragment.count("labels(first:")
+                self.assertGreaterEqual(totals, expected, f"{name}: {totals} < {expected}")
+
+
+# ── the GraphQL rate-limit guard ────────────────────────────────────────────
+
+
+class TestRateLimitGuard(unittest.TestCase):
+    """A tick that cannot see the board must not look like one that saw it empty.
+
+    Every test here stubs the budget — none of them touch the network, which is
+    the point: measuring this against the live API is what exhausted it.
+    """
+
+    def setUp(self):
+        self._budget = bt.graphql_budget
+        self._gh = bt.gh
+        self.addCleanup(lambda: setattr(bt, "graphql_budget", self._budget))
+        self.addCleanup(lambda: setattr(bt, "gh", self._gh))
+
+    def _budget_is(self, remaining, limit=5000, reset_in_s=840):
+        import time
+
+        bt.graphql_budget = lambda: (remaining, limit, int(time.time()) + reset_in_s)
+
+    def test_preflight_passes_with_headroom(self):
+        self._budget_is(5000)
+        self.assertIsNone(bt.preflight(bt.MIN_GRAPHQL_BUDGET))
+
+    def test_preflight_refuses_when_exhausted(self):
+        self._budget_is(0)
+        banner = bt.preflight(bt.MIN_GRAPHQL_BUDGET)
+        self.assertIsNotNone(banner)
+        self.assertIn("EXHAUSTED", banner)
+        self.assertIn("NOTHING WAS READ", banner)
+        self.assertIn("0/5000", banner)
+        self.assertIn("resets", banner)
+        self.assertRegex(banner, r"resets \d{4}-\d\d-\d\d \d\d:\d\d UTC \(in \d+m\)")
+
+    def test_preflight_refuses_when_merely_too_low(self):
+        self._budget_is(50)
+        banner = bt.preflight(bt.MIN_GRAPHQL_BUDGET)
+        self.assertIn("TOO LOW", banner)
+        self.assertIn("50 point(s) left", banner)
+
+    def test_banner_names_the_misleading_gh_error(self):
+        # Anyone debugging this otherwise chases token scopes.
+        self._budget_is(0)
+        banner = bt.preflight(bt.MIN_GRAPHQL_BUDGET)
+        self.assertIn("unknown owner type", banner)
+        self.assertIn("gh api rate_limit", banner)
+
+    def test_preflight_proceeds_when_the_budget_is_unreadable(self):
+        bt.graphql_budget = lambda: None
+        self.assertIsNone(bt.preflight(bt.MIN_GRAPHQL_BUDGET))
+
+    def test_min_budget_zero_disables_the_gate(self):
+        self._budget_is(1)
+        self.assertIsNone(bt.preflight(0))
+
+    def test_cmd_tick_refuses_loudly_and_nonzero(self):
+        self._budget_is(0)
+        calls = []
+        bt.gh = lambda *a, **k: calls.append(a) or ""
+        ns = argparse.Namespace(
+            loop=None, repo=None, status=None, include_bots=False, body_limit=50,
+            projects_dir="/nonexistent", no_local=True, json=True,
+            min_budget=bt.MIN_GRAPHQL_BUDGET,
+        )
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = bt.cmd_tick(ns)
+        self.assertEqual(code, 75)  # EX_TEMPFAIL
+        self.assertEqual(calls, [])  # refused before touching the API
+        self.assertIn("EXHAUSTED", err.getvalue())
+        # Critically: no output on stdout, so --json cannot yield a valid-looking
+        # empty board that a caller would treat as "nothing to do".
+        self.assertEqual(out.getvalue(), "")
+
+    def test_a_rate_limited_gh_failure_raises_RateLimited(self):
+        self._budget_is(0)
+        original_run = bt.subprocess.run
+
+        class Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: API rate limit already exceeded for user ID 1."
+
+        bt.subprocess.run = lambda *a, **k: Proc()
+        try:
+            with self.assertRaises(bt.RateLimited):
+                bt.gh("api", "graphql", "-f", "query=x")
+        finally:
+            bt.subprocess.run = original_run
+
+    def test_the_misleading_error_is_classified_by_the_real_budget(self):
+        """`unknown owner type` is a rate limit when the budget says so."""
+        self._budget_is(0)
+        original_run = bt.subprocess.run
+
+        class Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "unknown owner type"
+
+        bt.subprocess.run = lambda *a, **k: Proc()
+        try:
+            with self.assertRaises(bt.RateLimited):
+                bt.gh("project", "item-list", "6")
+        finally:
+            bt.subprocess.run = original_run
+
+    def test_a_genuine_error_stays_a_plain_RuntimeError(self):
+        """A real bug must not be excused as a rate limit."""
+        self._budget_is(5000)
+        original_run = bt.subprocess.run
+
+        class Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "unknown owner type"
+
+        bt.subprocess.run = lambda *a, **k: Proc()
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                bt.gh("project", "item-list", "6")
+            self.assertNotIsInstance(ctx.exception, bt.RateLimited)
+        finally:
+            bt.subprocess.run = original_run
+
+    def test_a_rate_limited_graphql_payload_is_not_a_plain_query_error(self):
+        """The budget can run out *inside* a 200 response, in the errors array."""
+        bt.gh = lambda *a, **k: json.dumps(
+            {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}
+        )
+        with self.assertRaises(bt.RateLimited):
+            bt.gh_graphql("query {x}")
+
+    def test_an_ordinary_graphql_error_stays_a_plain_RuntimeError(self):
+        bt.gh = lambda *a, **k: json.dumps(
+            {"errors": [{"type": "NOT_FOUND", "message": "Could not resolve to an Issue"}]}
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            bt.gh_graphql("query {x}")
+        self.assertNotIsInstance(ctx.exception, bt.RateLimited)
+
+
+# ── the local (LOCAL / UNPUSHED) check ──────────────────────────────────────
+
+
+class TestLocalCheck(unittest.TestCase):
+    """`LOCAL -` must mean "I looked", never "I could not look".
+
+    LOCAL is what produces `UNPUSHED`, the only signal guarding against work lost
+    outright — so a silently-skipped local check is the most expensive false
+    reassurance the digest can give.
+    """
+
+    def _projects(self, *repos):
+        """A projects dir like a worktree's: real, but holding only .gitignore."""
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        (root / ".gitignore").write_text("*\n")
+        for repo in repos:
+            (root / repo).mkdir()
+        return root
+
+    def test_missing_clone_is_unknown_not_clean(self):
+        item = make_item(repo="goga")
+        bt.inspect_worktree(item, self._projects())  # dir exists, no clones
+        self.assertFalse(item.local_checked)
+        self.assertEqual(bt.local_cell(item), "?")
+
+    def test_present_clone_with_no_worktree_is_clean(self):
+        item = make_item(repo="goga")
+        bt.inspect_worktree(item, self._projects("goga"))
+        self.assertTrue(item.local_checked)
+        self.assertEqual(bt.local_cell(item), "-")
+
+    def test_run_level_warning_when_nothing_could_be_checked(self):
+        projects = self._projects()
+        items = [make_item(repo="goga"), make_item(repo="epos")]
+        for it in items:
+            bt.inspect_worktree(it, projects)
+        notice = bt.local_check_notice(items, projects, no_local=False)
+        self.assertIsNotNone(notice)
+        self.assertIn("ANY task", notice)
+        self.assertIn("UNPUSHED cannot fire", notice)
+        self.assertIn("git worktree", notice)
+        self.assertIn(str(projects), notice)
+
+    def test_no_run_level_warning_when_some_clone_was_found(self):
+        projects = self._projects("goga")
+        items = [make_item(repo="goga"), make_item(repo="epos")]
+        for it in items:
+            bt.inspect_worktree(it, projects)
+        self.assertIsNone(bt.local_check_notice(items, projects, no_local=False))
+        # …but the unchecked row still says so for itself.
+        self.assertEqual(bt.local_cell(items[1]), "?")
+
+    def test_no_local_flag_is_also_unknown(self):
+        items = [make_item(repo="goga")]
+        notice = bt.local_check_notice(items, "/anywhere", no_local=True)
+        self.assertIn("--no-local", notice)
+        self.assertIn("will NOT be reported", notice)
+        self.assertEqual(bt.local_cell(items[0]), "?")
+
+    def test_diagnose_empty_does_not_claim_a_missing_worktree(self):
+        unchecked = make_item(status="In progress")
+        self.assertIn("local state is unknown", bt.diagnose_empty(unchecked))
+
+        checked = make_item(status="In progress")
+        checked.local_checked = True
+        self.assertIn("no local worktree", bt.diagnose_empty(checked))
+
+    def test_workspace_root_resolves_the_main_worktree(self):
+        """The actual bug: from a linked worktree, projects/ lives in the main one."""
+        import subprocess
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        main = root / "main"
+        run = lambda *a, **k: subprocess.run(a, cwd=k.get("cwd", main),
+                                             capture_output=True, check=True)
+        main.mkdir()
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@t.t")
+        run("git", "config", "user.name", "t")
+        (main / "projects").mkdir()
+        # Exactly as the repo has it: everything ignored except the file itself,
+        # which is why git recreates the (empty) directory in every worktree.
+        (main / "projects" / ".gitignore").write_text("*\n!.gitignore\n")
+        (main / "projects" / "somerepo").mkdir()
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = root / "wt"
+        run("git", "worktree", "add", "-q", "-b", "task", str(wt))
+
+        # git materialises projects/ in the worktree from the tracked .gitignore,
+        # but with no clones — the trap an is_dir() check would walk straight into.
+        self.assertTrue((wt / "projects").is_dir())
+        self.assertEqual([p.name for p in (wt / "projects").iterdir() if p.is_dir()], [])
+
+        # The real resolution: --git-common-dir from the worktree → main root.
+        common = bt.git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        self.assertEqual(Path(common).parent.resolve(), main.resolve())
 
 
 if __name__ == "__main__":
