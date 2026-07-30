@@ -79,11 +79,22 @@ dropped.
 turned up a hole the merged design also had: with the flags scoping generation, a
 `--no-graph` run against a history that already creates a graph emits table DDL
 that runs against a live graph depending on the columns it alters. The owner's
-call was to generalise the fix symmetrically rather than special-case it — a flag
-may not change which halves a directory owns, in either direction (D4a) — and, on
-the second question drafting raised, that a generation carries one slug shared by
-all of its files (D2). Both are settled below, as decisions — nothing about either
-is left for implementation to choose.
+call was to generalise the fix rather than special-case it — a flag may not take
+away a half the directory's history owns, for either half (D4a) — and, on the
+second question drafting raised, that a generation carries one slug shared by all
+of its files (D2). Both are settled below, as decisions — nothing about either is
+left for implementation to choose.
+
+**Correction to D4a (spec review, 2026-07-30).** The paragraph above used to say
+the fix was symmetric and that a flag may not change which halves a directory owns
+"in either direction". It was not, and D4a's body and its scenarios only ever
+covered turning a half *off*. The on direction was left unspecified, so the
+implementation settled it unilaterally: it allowed every turn-on and tested only
+the safe one. A spec review caught that by running the code. **The rule is
+asymmetric**, and D4a below now states it in full — a directory that never owned
+the graph half may start owning it, a directory that never owned the tables half
+may not. This is a correction to an already-merged change, made so that the rule
+lives in the spec rather than in the code that guessed it.
 
 ## Goals / Non-Goals
 
@@ -214,31 +225,72 @@ the graph; it does not drop one. Dropping the graph is what happens when the gra
 half is *on* and the SDL stops declaring one: that generation emits a
 `_graph_down` file and no `_graph` file.
 
-### D4a: The flags scope a directory's first generation; after that its history decides
+### D4a: A directory never stops owning a half, and only the graph half may start
 
-**The rule, in the sentence the docs should carry: the flags scope a directory's
-first generation; after that the directory's own history decides, and a flag that
-contradicts it is an error.**
+**The rule, in the sentence the docs should carry: turning a half *off* over a
+history that owns it is refused, for either half; turning the *tables* half on
+over a history that never owned tables is refused; turning the *graph* half on is
+allowed.** A directory's ownership is a ratchet with one tooth — it can gain the
+graph half, and it can never lose either half.
 
-Which halves a directory owns is fixed by its first generation. Thereafter a flag
-contradicting the folded history is a **sentinel error at generate time** —
-sentinel because the CLI branches on it to print the guidance below:
+Every refusal is a **sentinel error at generate time** — sentinel because the CLI
+branches on it to print the guidance below — and nothing is written when one
+fires.
+
+**Off, either half — refused.** A flag that disowns a half the folded history owns
+contradicts what the directory demonstrably is:
 
 - `--no-graph` against a history that contains a `CREATE PROPERTY GRAPH` → error.
   The alternative is table DDL running against a live graph that may depend on the
   columns it alters.
 - `--no-tables` against a history that created tables → error, for the same
   reason read the other way round: subsequent table DDL would silently not be
-  emitted, and the graph half would eventually name a column nothing creates. The
-  case that *is* safe — a graph over tables gopgql does not own — is a directory
-  that never owned tables in the first place, which is exactly what this rule
-  pins down.
+  emitted, and the graph half would eventually name a column nothing creates.
 
-The error message must name the deliberate path for the one legitimate reason to
-want `--no-graph` on a graph-bearing directory: **to drop the graph, run an
-ordinary generation whose desired schema declares no graph.** That emits the
-`_graph_down` teardown and no rebuild — a graph transition the operator asked for,
-recorded in the history, and reviewable in the diff.
+**The graph half on, over a history that never owned one — allowed.** The graph is
+derivable from the SDL alone. gopgql needs nothing out of the history to render a
+`CREATE PROPERTY GRAPH`: the definition *is* what the SDL now describes. So the
+generation emits a lone `_graph` build — no teardown, because there is no graph in
+the history to tear down, and no `_tables` file, because the tables half is still
+off. Nothing about the directory's past has to be reconstructed for that to be
+correct, so nothing about it can be got wrong. This is the obviously-wanted
+transition: a project that used gopgql for its tables alone deciding it now wants
+the graph.
+
+**The tables half on, over a history that never owned tables — refused.** The
+tables are *not* derivable from the SDL, because a table migration is a **diff**
+and a diff needs a prior. A directory that never owned tables folds to a prior
+whose vertex and edge tables carry **nil columns** — that is the intended
+partial-schema fold of D6, intended precisely because the history does not
+describe those tables. `columnDiff` therefore reads every column the SDL declares
+as new and emits `ALTER TABLE … ADD COLUMN` for columns that already exist.
+Reproduced during the spec review: the apply fails with `column "id" of relation
+"documents" already exists`, and by then the same generation's `_graph_down`
+migration has already committed — so the database is left with no property graph
+*and* a directory that can never be applied forward again. Refusing at generate
+time costs nothing; discovering it at apply time costs the graph.
+
+**Why the two on-directions differ**, stated because without the reason the
+asymmetry reads as arbitrary and the next reader will "simplify" it back into
+symmetry: **the graph is derivable from the SDL and the tables are not.** A graph
+build is a rendering of the desired state; a tables migration is a diff against a
+prior, and for a half the history never owned there is no truthful prior to diff
+against.
+
+The error message must name the deliberate path in each case:
+
+- `--no-graph` on a graph-bearing directory. The one legitimate reason to want it
+  is **to drop the graph**, and the way to do that is an ordinary generation whose
+  desired schema declares no graph. That emits the `_graph_down` teardown and no
+  rebuild — a graph transition the operator asked for, recorded in the history,
+  and reviewable in the diff.
+- `--no-tables` on a tables-bearing directory. gopgql already owns those tables;
+  handing them to something else is a migration out of gopgql, not a flag.
+- The tables half on over a history that never owned tables. The way to have
+  gopgql own the tables is **a fresh `--dir`**, whose first generation owns both
+  halves and emits a full baseline the operator reviews and reconciles against the
+  database as it stands — rather than a partial diff that silently assumes the
+  columns are not there.
 
 This is **not** the mode-mismatch error of the first design returning (D1). That
 one compared a flag against a marker written inside the files, so the marker could
@@ -246,6 +298,16 @@ be lost or hand-edited into disagreeing with the SQL beside it. Here there is
 nothing recorded and nothing to drift: the evidence is the SQL in the directory,
 folded the same way generation folds it anyway.
 
+- *Rejected — allowing the tables half on and letting the apply fail.* This is what
+  shipped before this correction, because the merged D4a did not say. It is the
+  worst option available: the failure lands at apply time against a live database,
+  after the generation's `_graph_down` has committed, leaving a database without
+  its property graph and a directory that cannot go forward. It is the same
+  argument as the rejected alternative below, with a worse blast radius.
+- *Rejected — refusing both on-directions, for symmetry with the off-direction.*
+  Symmetry is not a reason on its own. It would forbid the one transition that is
+  both safe and obviously wanted, and buy nothing: the graph build reconstructs
+  nothing, so there is nothing for it to get wrong.
 - *Rejected — `--no-graph` suppresses only the `_graph` build and still emits the
   `_graph_down` teardown.* It makes a flag silently destroy a property graph. The
   principle is this change's own, stated in the spec-approval comment on
@@ -293,7 +355,9 @@ so they carry over verbatim:
 - **A graph over tables the history never created** (everything generated with
   `--no-tables`). The graph references tables Fold has never seen, and it failed
   resolving their columns. It now folds with nil columns — the partial-schema case
-  working as intended (D5), not a corruption.
+  working as intended (D5), not a corruption. Those nil columns are also the exact
+  reason D4a refuses to let the tables half start being owned later: a delta
+  against a prior with no columns is a delta that re-adds every column.
 
 One thing is new here: the history now contains `DROP PROPERTY GRAPH` statements
 *between* the creates, so Fold has to replay a drop as clearing the graph. Fold
@@ -354,6 +418,13 @@ why it is worth doing now rather than later.
   guarantee is about the graph half. Someone who turns tables *on* against a
   database holding tables the SDL does not mention is in the same position as
   today, which the docs should say plainly rather than leaving to be discovered.
+- **[The tables half cannot be adopted into an existing directory]** — D4a refuses
+  it, so a project that started with `--no-tables` and later wants gopgql to own
+  its tables has to start a fresh `--dir` rather than flipping a flag. That is a
+  real cost, accepted because the alternative is a generation that emits
+  `ALTER TABLE … ADD COLUMN` for columns that already exist and takes the property
+  graph down on its way to failing. The graph half, which needs no prior, has no
+  such restriction.
 - **[Hand-editing can still break the order]** — the design makes the correct
   order structural for everything gopgql generates, not for whatever a human
   writes into the directory afterwards. A graph migration renumbered below the
