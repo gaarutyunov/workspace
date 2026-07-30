@@ -163,14 +163,26 @@ broken by who has waited longest):
 | `WIP` | In progress with pushed work, nothing new | continue it |
 | `TRACKER` | legacy `tracker` label from before issues stopped being split | work the issue itself and drop the label |
 | `BLOCKED` | at least one blocker is **still open** | **skip** — do not touch |
+| `BLOCKED-UNRECORDED` | flagged blocked, but **no** blocker is recorded | record one with `board-tick.py block`, or move it out of Blocked |
 | `WAITING-OWNER` | needs the owner, nothing new since | **skip** — do not touch |
 
-`UNBLOCKED` and `BLOCKED` are the two halves of one state, split on a fact the
+`UNBLOCKED` and `BLOCKED` are two halves of one state, split on a fact the
 digest can check: whether any `blockedBy` issue is still open. Only the
 open-blocker half is a skip. The all-closed half is **work waiting to be picked
 up**, which is why it ranks second, immediately below `HUMAN-INPUT` — a blocker
 that cleared while nobody was looking used to be how a task sat forgotten for
 days.
+
+Both halves require at least one **recorded** blocker. A task flagged blocked
+with nothing recorded is the third state, `BLOCKED-UNRECORDED`, and it is neither
+of the other two: there is no dependency edge to watch, so it can never clear
+itself, and nothing names what it is waiting on. It is a **hygiene state, not a
+pickup** — the fix is to record the blocker or move the item out of Blocked.
+
+> Do not be tempted to fold it back into `UNBLOCKED`. It was there once, because
+> "every blocker has closed" over an *empty* blocker list is vacuously true, and
+> the digest duly told the loop to start work on genuinely blocked tasks while
+> printing `⚠ blocked with no recorded blocker` on the very same row.
 
 Rows also carry `⚠` **hygiene warnings**, each naming the command that fixes it:
 

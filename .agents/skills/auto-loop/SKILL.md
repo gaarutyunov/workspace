@@ -82,7 +82,7 @@ run once per repo so the loop labels exist.
 
 Work the top actionable row (`HUMAN-INPUT` → `UNBLOCKED` → `UNPUSHED` →
 `SPEC-MERGED` → `CI-RED` → `THREADS` → `READY` → `NOT-STARTED` → `WIP`), skipping
-`TRACKER`, `WAITING-OWNER` and `BLOCKED`. Capture the row's item id (in the
+`TRACKER`, `WAITING-OWNER`, `BLOCKED` and `BLOCKED-UNRECORDED`. Capture the row's item id (in the
 details block), issue (repo + number), and title. A Ready issue with
 no Loop value (or `Loop = hitl`) is **not** this loop's — leave it untouched. If
 nothing is actionable, stop (or idle on the next tick when looping).
@@ -91,7 +91,10 @@ nothing is actionable, stop (or idle on the next tick when looping).
 closed (`BLK` reads `n/n✓`), so it is work waiting to be resumed: run
 `board-tick.py unblock --repo <repo> --issue <N>`, move it back to **Ready**
 (`61e4505c`) and then take it through this tick like any other pickup. Only
-`BLOCKED` — at least one blocker still open — is a skip.
+`BLOCKED` — at least one blocker still open — is a skip. So is
+`BLOCKED-UNRECORDED`, which is flagged blocked with *nothing* recorded: it can
+never clear itself, so fix the bookkeeping in this tick (`board-tick.py block
+--repo <repo> --issue <N> --on <ref>`, or move it out of Blocked) and move on.
 
 Fix any `⚠` hygiene warning on the row in the same tick. If the chosen row is
 `READY`, move it to **In progress** (`47fc9ee4`) with the status-edit command in

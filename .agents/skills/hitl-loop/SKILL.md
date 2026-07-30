@@ -54,10 +54,17 @@ and the `approved:pr` merge gate.
 .claude/skills/loop-common/scripts/board-tick.py --loop hitl
 ```
 
-Work the top actionable row, skipping `WAITING-OWNER` and `BLOCKED` — but **not**
-`UNBLOCKED`, which ranks second and *is* actionable: every blocker it recorded has
-closed (`BLK` reads `n/n✓`), so run `board-tick.py unblock --repo <repo> --issue
-<N>`, move it back to **Ready** (`61e4505c`) and work it.
+Work the top actionable row, skipping `WAITING-OWNER`, `BLOCKED` and
+`BLOCKED-UNRECORDED` — but **not** `UNBLOCKED`, which ranks second and *is*
+actionable: every blocker it recorded has closed (`BLK` reads `n/n✓`), so run
+`board-tick.py unblock --repo <repo> --issue <N>`, move it back to **Ready**
+(`61e4505c`) and work it.
+
+`BLOCKED-UNRECORDED` is a skip *for pickup*, but not something to leave alone: it
+means the item is flagged blocked with no dependency recorded, so no tick can
+ever tell when it clears. Fix the bookkeeping in this tick — record the blocker
+with `board-tick.py block --repo <repo> --issue <N> --on <ref>`, or move the item
+out of Blocked — then carry on to the next row.
 The digest already contains every unaddressed owner comment for that task —
 **including comments on its spec PR in the workspace repo**, where approvals and
 scope changes usually live. Treat them as instructions that outrank the issue's
@@ -222,8 +229,10 @@ task:
 - A task waiting on the owner (`WAITING-OWNER`) or on a still-open blocker
   (`BLOCKED`) is **skipped** — never re-worked, never re-commented. The ack ledger
   keeps it quiet until the owner responds.
-- `UNBLOCKED` is **not** in that group: its blockers have closed, so it is a
-  pickup, not a skip. Never leave one sitting.
+- `BLOCKED-UNRECORDED` is skipped for pickup too, but its bookkeeping is fixed on
+  the spot: record the blocker, or move the item out of Blocked.
+- `UNBLOCKED` is **not** in either group: it recorded blockers and every one of
+  them has closed, so it is a pickup, not a skip. Never leave one sitting.
 - Never move a task to **In review** as finished work until its work is pushed.
 - Never leave a task **In progress** when it is waiting on a human (→ In review)
   or on another issue (→ Blocked).

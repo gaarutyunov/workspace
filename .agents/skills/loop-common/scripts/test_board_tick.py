@@ -192,11 +192,6 @@ class TestComputeSignalUnblocked(unittest.TestCase):
         self.assertIn("dep#10 closed", reason)
         self.assertIn("Ready", reason)
 
-    def test_blocked_label_with_no_recorded_blocker_is_unblocked(self):
-        """The three legacy label-only items — surfaced, not skipped."""
-        item = make_item(status="In review", labels=["blocked", "needs:review"])
-        self.assertEqual(signal_of(item), "UNBLOCKED")
-
     def test_unblocked_outranks_waiting_owner(self):
         item = make_item(
             status="Blocked",
@@ -227,6 +222,64 @@ class TestComputeSignalUnblocked(unittest.TestCase):
         item = make_item(status="Ready", blockers=[blocker(9)], blockers_total=1)
         self.assertEqual(signal_of(item), "READY")
         self.assertTrue(any("open blocker" in w for w in item.warnings))
+
+
+class TestUnblockedNeedsARecordedBlocker(unittest.TestCase):
+    """UNBLOCKED must never fire over an *empty* blocker set.
+
+    `all(b.closed for b in [])` is vacuously true, so a task flagged blocked with
+    nothing recorded used to rank UNBLOCKED — an actionable pickup the loops are
+    told to "never leave sitting". Both blocked items on the live board hit this,
+    each with a ⚠ on the same row saying no blocker was recorded: the digest
+    contradicted its own signal and sent the loop to start genuinely blocked work.
+    """
+
+    def test_blocked_status_with_no_recorded_blocker_is_not_unblocked(self):
+        item = make_item(status="Blocked")
+        self.assertNotEqual(signal_of(item), "UNBLOCKED")
+        self.assertEqual(item.signal, "BLOCKED-UNRECORDED")
+
+    def test_blocked_label_with_no_recorded_blocker_is_not_unblocked(self):
+        """The legacy label-only items — surfaced as hygiene, not as a pickup."""
+        item = make_item(status="In review", labels=["blocked", "needs:review"])
+        self.assertEqual(signal_of(item), "BLOCKED-UNRECORDED")
+
+    def test_the_signal_and_the_row_warning_now_agree(self):
+        """The contradiction itself: signal said "go", the ⚠ said "nothing recorded"."""
+        item = make_item(status="Blocked")
+        signal_of(item)
+        self.assertTrue(
+            any("no recorded blocker" in w for w in item.warnings), item.warnings
+        )
+        self.assertNotEqual(item.signal, "UNBLOCKED")
+        self.assertTrue(any("no blocker is recorded" in r for r in item.reasons), item.reasons)
+
+    def test_the_reason_names_the_fix_rather_than_offering_a_pickup(self):
+        item = make_item(status="Blocked")
+        signal_of(item)
+        reason = " ".join(item.reasons)
+        self.assertIn("board-tick.py block", reason)
+        self.assertNotIn("move it back to Ready", reason)
+
+    def test_one_recorded_blocker_that_closed_still_unblocks(self):
+        """The guard must not cost the real case its actionable signal."""
+        item = make_item(status="Blocked", blockers=[blocker(9, "CLOSED")], blockers_total=1)
+        self.assertEqual(signal_of(item), "UNBLOCKED")
+
+    def test_unrecorded_is_a_skip_not_a_pickup_in_the_sort(self):
+        """It ranks with the skips: there is no edge to watch, so no work to start."""
+        self.assertGreater(
+            bt.SIGNAL_ORDER.index("BLOCKED-UNRECORDED"), bt.SIGNAL_ORDER.index("READY")
+        )
+        self.assertGreater(
+            bt.SIGNAL_ORDER.index("BLOCKED-UNRECORDED"), bt.SIGNAL_ORDER.index("UNBLOCKED")
+        )
+
+    def test_the_row_is_never_suppressed_from_details(self):
+        item = make_item(status="Blocked")
+        signal_of(item)
+        out = bt.render_details([item], include_bots=False, body_limit=500)
+        self.assertIn("BLOCKED-UNRECORDED", out)
 
 
 class TestComputeSignalOtherBranches(unittest.TestCase):
@@ -288,8 +341,8 @@ class TestComputeSignalOtherBranches(unittest.TestCase):
         """Sanity: the branch tests above cover the whole chain."""
         covered = {
             "HUMAN-INPUT", "UNBLOCKED", "PR-APPROVED", "SPEC-APPROVED", "UNPUSHED",
-            "SPEC-MERGED", "CI-RED", "THREADS", "BLOCKED", "WAITING-OWNER",
-            "TRACKER", "READY", "NOT-STARTED", "WIP", "IDLE",
+            "SPEC-MERGED", "CI-RED", "THREADS", "BLOCKED", "BLOCKED-UNRECORDED",
+            "WAITING-OWNER", "TRACKER", "READY", "NOT-STARTED", "WIP", "IDLE",
         }
         self.assertEqual(set(chain_signals()), covered)
 

@@ -1162,19 +1162,21 @@ def compute_signal(item: Item) -> None:
             note += f" ({n_draft} in an unsubmitted review)"
         reasons.append(note)
         item.signal = "HUMAN-INPUT"
-    elif item.blocked_flagged and not item.open_blockers:
-        # Marked blocked, but nothing is blocking it any more. This is the one
-        # blocked state that is *actionable*, so it outranks everything except a
-        # waiting owner — and it must never be silently skipped.
-        if item.closed_blockers:
-            reasons.append(
-                f"unblocked — {'; '.join(f'{b.slug} closed' for b in item.closed_blockers)}; "
-                "move it back to Ready"
-            )
-        else:
-            reasons.append(
-                "marked blocked but no blocker is recorded — record one or move it to Ready"
-            )
+    elif item.blocked_flagged and item.blockers and not item.open_blockers:
+        # Marked blocked, and every blocker it *recorded* has closed. This is the
+        # one blocked state that is *actionable*, so it outranks everything except
+        # a waiting owner — and it must never be silently skipped.
+        #
+        # `item.blockers` is load-bearing, not redundant with `not open_blockers`:
+        # over an empty blocker list `not open_blockers` is vacuously true, so
+        # without it a task marked blocked with *nothing recorded* ranked
+        # UNBLOCKED — telling the loop to start work on a genuinely blocked task
+        # while its own ⚠ said no blocker was recorded. That state is hygiene,
+        # not a pickup; it falls through to BLOCKED-UNRECORDED below.
+        reasons.append(
+            f"unblocked — {'; '.join(f'{b.slug} closed' for b in item.closed_blockers)}; "
+            "move it back to Ready"
+        )
         item.signal = "UNBLOCKED"
     elif "approved:pr" in labels:
         reasons.append("owner approved the PR")
@@ -1205,11 +1207,22 @@ def compute_signal(item: Item) -> None:
     elif item.unresolved_threads:
         reasons.append(f"{item.unresolved_threads} unresolved review thread(s)")
         item.signal = "THREADS"
-    elif item.blocked_flagged:
-        # blocked_flagged with at least one OPEN blocker — the UNBLOCKED branch
-        # above already claimed the all-closed case, so this is a real skip.
+    elif item.blocked_flagged and item.open_blockers:
+        # The UNBLOCKED branch above already claimed "recorded, and all closed",
+        # so this is a real skip: something open is genuinely in the way.
         reasons.append("blocked by " + blocker_list(item.open_blockers, with_age=True))
         item.signal = "BLOCKED"
+    elif item.blocked_flagged:
+        # Flagged blocked with nothing recorded. Not a pickup — there is no edge
+        # to watch, so this can never clear itself and would sit here forever;
+        # and not BLOCKED either, since nothing names what it waits on. Its own
+        # signal so the row reads as the hygiene fix it needs, which
+        # check_blocked_hygiene has already spelled out in a ⚠.
+        reasons.append(
+            "marked blocked but no blocker is recorded — record one with "
+            "`board-tick.py block`, or move it out of Blocked"
+        )
+        item.signal = "BLOCKED-UNRECORDED"
     elif labels & set(WAITING_LABELS):
         reasons.append("waiting on owner: " + ", ".join(sorted(labels & set(WAITING_LABELS))))
         item.signal = "WAITING-OWNER"
@@ -1247,8 +1260,8 @@ def compute_signal(item: Item) -> None:
 # (BLOCKED/WAITING-OWNER/TRACKER) here — a task you can pick up outranks one you
 # cannot, even though a `blocked` label outranks "status says In progress" when
 # classifying. Within the skip block the order matches the chain: BLOCKED before
-# WAITING-OWNER (they used to disagree), and UNBLOCKED sits immediately after
-# HUMAN-INPUT in both.
+# BLOCKED-UNRECORDED before WAITING-OWNER (the first two used to disagree with
+# the chain), and UNBLOCKED sits immediately after HUMAN-INPUT in both.
 SIGNAL_ORDER = [
     "HUMAN-INPUT",
     "UNBLOCKED",
@@ -1262,6 +1275,7 @@ SIGNAL_ORDER = [
     "NOT-STARTED",
     "WIP",
     "BLOCKED",
+    "BLOCKED-UNRECORDED",
     "WAITING-OWNER",
     "TRACKER",
     "IDLE",
