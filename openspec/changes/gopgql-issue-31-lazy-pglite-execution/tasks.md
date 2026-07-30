@@ -1,10 +1,21 @@
+## 0. Blocked until `postgres-pglite#28` publishes
+
+**Nothing below can start until #28 ships a release.** There is no artifact
+today — `postgres-pglite` has no releases, and #6's GO verdict produced nothing
+downloadable.
+
+- [ ] 0.1 Wait for #28's release. Do **not** hard-code a guessed tag, filename or checksum in the meantime; a pin that resolves to unverified bytes is worse than no pin (design D1).
+- [ ] 0.2 Read #28's release notes and confirm the published shape matches D1's assumption — a package tarball carrying the PGlite JS runtime, not bare `.wasm` + FS assets. If it is bare assets, D1 and every import site in section 5/6 change; raise that before writing code.
+- [ ] 0.3 Confirm #28's acceptance demo actually ran `GRAPH_TABLE` in a browser. If it did not, this change is still blocked regardless of a release existing.
+
 ## 1. Prove SQL/PGQ executes on the pinned build — before anything else
 
-The release verified `select version()`, DDL/DML and aggregates under Node. It
-did **not** verify SQL/PGQ, workers, or browser targets. Discharge that first, so
-a negative answer costs one task instead of the whole change.
+#28 proves this for its own artifact; task 1 re-proves it for the exact pin this
+repo ends up with, which is cheap and catches a pin that differs from what #28
+validated. Discharge it before any UI work, so a negative answer costs one task
+instead of the whole change.
 
-- [ ] 1.1 Pin the build in `docs/package.json`: `"@electric-sql/pglite": "https://github.com/gaarutyunov/pglite/releases/download/pglite-v0.5.4-pg19.1/electric-sql-pglite-0.5.4-pg19.1.tgz"`. Run `npm install` and commit the resulting `package-lock.json` with its integrity hash.
+- [ ] 1.1 Pin the build in `docs/package.json` using the release-asset URL from #28's release notes, verbatim. Run `npm install` and commit the resulting `package-lock.json` with its integrity hash. Record the pinned tag and the published checksum in the PR description.
 - [ ] 1.2 Add `optimizeDeps: { exclude: ['@electric-sql/pglite'] }` to `docs/vite.config.js` (required by the fork's `docs/docs/bundler-support.md`; without it Vite's pre-bundling breaks the wasm asset URLs in dev).
 - [ ] 1.3 Smoke test, in a **real browser worker**, not Node: fresh in-memory `PGlite`, apply `playground.Schema(ExampleSDL)` output including `CREATE PROPERTY GRAPH`, insert a couple of rows, run the compiled `GRAPH_TABLE` query with bind parameters, assert rows come back.
 - [ ] 1.4 Assert no COOP/COEP: the smoke test runs against a static server setting no isolation headers, and `crossOriginIsolated` is false.
@@ -73,8 +84,8 @@ seed data in the repo today; without it the whole feature demonstrates nothing.
 ## 8. Documentation
 
 - [ ] 8.1 `SPEC.md` §8: the playground executes; where the runtime comes from; in-memory only; the lazy-load contract.
-- [ ] 8.2 Record the pin — release tag, package version, PostgreSQL version, and both fork commits — where a reader updating it can find all four.
-- [ ] 8.3 Note that PostgreSQL 19beta2 is a beta and that `postgres-pglite#10` (re-pin to `REL_19_0` at GA) will produce a newer build; upgrading is then a pin bump plus `npm install`.
+- [ ] 8.2 Record the pin — `postgres-pglite#28`'s release tag, the package version, the PostgreSQL version, and the fork ref built from — where a reader updating it can find all four.
+- [ ] 8.3 Note the PostgreSQL version's stability (19beta2 at the time of writing) and that `postgres-pglite#10` (re-pin to `REL_19_0` at GA) will produce a newer build; upgrading is then a pin bump plus `npm install`.
 - [ ] 8.4 Note what this build has *not* been exercised for — extensions, `pg_dump`, the socket server, persistence — so nobody builds on an untested surface.
 
 ## 9. Out of scope — do not do these here

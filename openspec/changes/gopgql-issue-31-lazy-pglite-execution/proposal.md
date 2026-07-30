@@ -6,16 +6,24 @@ check it. That is the weakest part of the whole demo: the one thing gopgql is
 for — turning a GraphQL query into SQL/PGQ that a real server executes — is the
 one thing the page cannot show.
 
-The obstacle was that no PostgreSQL with SQL/PGQ ran in a browser. That is no
-longer true. `gaarutyunov/pglite` release `pglite-v0.5.4-pg19.1` ships
-`@electric-sql/pglite@0.5.4-pg19.1` built against PostgreSQL 19beta2 from the
-`gaarutyunov/postgres-pglite` fork, and the SQL/PGQ catalogs
-(`pg_propgraph_element`, `pg_propgraph_label`, `pg_propgraph_property`) are
-present both in the compiled `pglite.wasm` and in the bootstrapped `pglite.data`
-template. The blocking spike (`postgres-pglite#6`) closed GO, and the artifact it
-implied exists and is downloadable.
+The obstacle is that no PostgreSQL with SQL/PGQ has been proven to run in a
+browser, and there is no artifact to load. The spike (`postgres-pglite#6`)
+answered the *feasibility* question — "GO" — and produced nothing downloadable.
+`postgres-pglite` has no releases and no published build.
 
-So the playground can stop claiming and start executing.
+**`postgres-pglite#28` is what produces the artifact this change consumes**: a
+tagged release carrying the wasm32 build of the fork, anonymously downloadable,
+whose own acceptance test is a PR preview running a real `GRAPH_TABLE` query in
+the browser. gopgql#31 is formally blocked on it.
+
+This change specifies the **consumption** side, which is independent of when
+#28 lands: how the playground pins that release, loads it lazily, isolates it in
+a worker, feeds it generated DDL and a compiled query, and renders the rows. It
+also states what the release has to contain for any of that to work — which is
+useful to #28 as a description of what to publish.
+
+So the playground can stop claiming and start executing, the moment there is
+something to execute against.
 
 ## What Changes
 

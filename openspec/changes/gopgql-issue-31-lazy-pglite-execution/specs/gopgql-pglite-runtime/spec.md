@@ -1,5 +1,11 @@
 ## ADDED Requirements
 
+<!-- No such build exists today: `postgres-pglite` has no releases, and the #6
+     spike produced a GO verdict rather than an artifact. The requirements below
+     are therefore requirements *on the release `postgres-pglite#28` produces*,
+     stated from the consumer's side — they say what the playground needs in
+     order to load it at all. gopgql#31 is blocked on #28. -->
+
 ### Requirement: The PostgreSQL runtime is a pinned, immutable, verifiable build
 
 The playground SHALL obtain its in-browser PostgreSQL from one named, immutable
@@ -29,11 +35,34 @@ bytes or fails.
 - **THEN** the pin and the lockfile change together in a reviewable commit, and
   nothing about the site changes until they do
 
+### Requirement: The published build carries a loadable JavaScript runtime
+
+The release SHALL carry, alongside the compiled PostgreSQL and its filesystem
+bundle, the JavaScript runtime that instantiates them — the Emscripten
+instantiation, the wire protocol and result decoding. Bare `.wasm` plus
+filesystem data SHALL NOT be treated as sufficient, because nothing in the
+playground can load it.
+
+#### Scenario: The build is loadable without hand-written glue
+- **WHEN** the playground consumes the release
+- **THEN** it obtains a runnable PostgreSQL by importing the published package,
+  without reimplementing module instantiation or the wire protocol
+
+#### Scenario: The filesystem bundle accompanies the engine
+- **WHEN** a fresh database is created
+- **THEN** the template it initialises from is part of the same release as the
+  engine, at the same version
+
+#### Scenario: A browser and worker entry point exist
+- **WHEN** the runtime is loaded inside a Web Worker in a browser
+- **THEN** it initialises there, without a Node-only code path
+
 ### Requirement: The runtime provides SQL/PGQ
 
 The pinned build SHALL be able to create a property graph and evaluate a
 `GRAPH_TABLE` query. This SHALL be demonstrated by execution against the pinned
-build, not inferred from its provenance.
+build, not inferred from its provenance — neither from the fork branch it was
+built from nor from symbols present in the binary.
 
 #### Scenario: A property graph can be created
 - **WHEN** the generated schema, including its `CREATE PROPERTY GRAPH`
@@ -70,6 +99,15 @@ cross-origin-isolation service worker, or `SharedArrayBuffer`.
 - **THEN** they do so without any shared memory buffer between them
 
 ### Requirement: The runtime's provenance is recorded where a reader can find it
+
+The release SHALL state the PostgreSQL version, the fork ref it was built from,
+its SQL/PGQ support level and its emscripten flags, so that a consumer knows
+what it pinned and a later re-pin knows what to re-cut.
+
+#### Scenario: The release says what it is
+- **WHEN** the release notes are read
+- **THEN** they state the PostgreSQL version, the ref built from, the SQL/PGQ
+  support level, and the emscripten flags used
 
 #### Scenario: The page states what it is running
 - **WHEN** a reader has run a query

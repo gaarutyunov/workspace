@@ -2,63 +2,77 @@
 
 The issue was written while `postgres-pglite#6` was still open and says "Blocked
 by B8 (wasm32 spike). Do not start until B8 resolves positively." B8 resolved
-positively on 2026-07-28, and — this is the part the issue could not know — the
-work did not stop at a verdict. A packaged build was published the same day.
+positively on 2026-07-28 — but a GO verdict is a feasibility answer, not a file.
+It produced no downloadable artifact, and `postgres-pglite` has no releases.
 
-### What exists, and the evidence for it
+### The artifact does not exist yet — `postgres-pglite#28` produces it
 
-`gaarutyunov/pglite`, release `pglite-v0.5.4-pg19.1` (pre-release, 2026-07-28):
+This change **consumes** a build that is being produced under
+`postgres-pglite#28`, and gopgql#31 is formally blocked on it. Everything below
+about *how* the playground obtains and runs that build is independent of when
+#28 lands; only the concrete pin has to wait for it (D1).
 
-| asset | size |
-|---|---|
-| `electric-sql-pglite-0.5.4-pg19.1.tgz` | 7,968,775 B |
-| `build-info.txt` | 347 B |
-| `SHA256SUMS` | 103 B |
+#28's own acceptance test is a PR preview that loads the bundle in a browser and
+runs a real `GRAPH_TABLE` query against it with visible results. That is exactly
+the guarantee this change needs and would otherwise have had to establish for
+itself, so this spec does not duplicate it — it depends on it.
 
-`sha256(tgz) = b4d0531251bc90f17e5e113605b6540b9e7585a0265bfd3e8456f7ec7999f9fb`,
-matching `SHA256SUMS`, verified against a fresh download. The tarball is
-`@electric-sql/pglite@0.5.4-pg19.1` — the package *name* is unchanged, so
-`import { PGlite } from '@electric-sql/pglite'` works untouched and the
-`-pg19.N` suffix is how an installed copy identifies itself as a fork build.
+### What the release has to contain for this design to hold
 
-`build-info.txt` pins the provenance: PostgreSQL 19beta2, wasm32, emcc 3.1.74,
-pglite commit `a9ec5f1`, postgres-pglite commit `f13a3a5`. `f13a3a5` is reachable
-only from `origin/REL_19_BETA2-pglite` in `gaarutyunov/postgres-pglite` and is
-its tip ("Call sigsetjmp, not the undefined pgl_sigsetjmp (#27)").
+This list is a **requirement on #28**, not a description of something that
+exists. It is what "consumable by the playground" means:
 
-**SQL/PGQ is in the shipped artifact, not merely in the branch.** The source at
-`f13a3a5` carries `src/backend/parser/parse_graphtable.c`, the four
-`pg_propgraph_*` catalog headers, and the `GRAPH_TABLE` / `GRAPH` / `PROPERTY`
-keywords in `kwlist.h`. More decisively, the *built* files carry it too:
-`dist/pglite.wasm` contains `CreatePropGraph`, `AlterPropGraph`,
-`pg_get_propgraphdef`, `propgraph_edge_get_ref_keys`; and `dist/pglite.data` —
-the bootstrapped template database — contains the system-view SQL that selects
-`FROM pg_propgraph_element`, `pg_propgraph_label`, `pg_propgraph_property`. A
-database initialised from that template has the SQL/PGQ catalogs.
+- **The wasm plus its FS bundle** — the compiled PostgreSQL and the `initdb`
+  template that a fresh database is created from. The SQL/PGQ catalogs must be
+  in *both*: compiled into the engine, and bootstrapped into the template, or
+  `CREATE PROPERTY GRAPH` has no catalogs to write to.
+- **The JS runtime that instantiates them.** Raw `.wasm` + FS data is not
+  loadable on its own; something has to own the Emscripten instantiation, the
+  wire protocol and the result decoding. Publishing the PGlite package built
+  against the fork gives this for free and keeps
+  `import { PGlite } from '@electric-sql/pglite'` working unchanged.
+- **A browser and Web Worker entry point**, and an in-memory filesystem. OPFS
+  and IndexedDB backends are unnecessary here (D3).
+- **Built `-sUSE_PTHREADS=0`**, so `SharedArrayBuffer` is unused and consumers
+  need no COOP/COEP headers and no `coi-serviceworker`.
+- **Anonymous download over plain HTTPS**, with a published checksum, so a
+  static site build can fetch it with no credentials and pin it by hash (D1).
+- **Release notes stating the PostgreSQL version, the ref built from, the
+  SQL/PGQ support level and the emscripten flags** — enough that a consumer
+  knows what it pinned, and that `postgres-pglite#10` knows what to re-cut at
+  PG19 GA.
 
-**The dist is browser- and worker-capable.** `dist/` contains `pglite.js`
-(457 KB), `pglite.wasm` (9,379,167 B), `pglite.data` (5,434,131 B),
-`initdb.wasm`, `dist/worker/`, and `dist/fs/{base,nodefs,opfs-ahp}`. The package
-`exports` map has `.`, `./worker`, `./live`, `./nodefs`, `./opfs-ahp`,
-`./basefs`, `./template`, `./contrib/*`.
+### Prior art #28 should not have to rediscover
 
-**No cross-origin isolation is required.** `dist/pglite.js` contains zero
-occurrences of `SharedArrayBuffer`, consistent with the issue's claim that the
-fork is built `-sUSE_PTHREADS=0`. No COOP/COEP headers, no `coi-serviceworker`.
+There is an **unproven prerelease** in the sibling repo `gaarutyunov/pglite`,
+tag `pglite-v0.5.4-pg19.1`, packaging `@electric-sql/pglite@0.5.4-pg19.1` built
+from `postgres-pglite` at `f13a3a5` (tip of `REL_19_BETA2-pglite`, which is
+where PG19 + SQL/PGQ is fully ported — the default branch `REL_18_3-pglite` has
+none of it). It is **not** what this spec pins, and it does not satisfy the
+requirements above, because:
 
-### What the release does *not* claim
+- It was packed by a **local run** of `scripts/pack-pg19-release.sh`. The repo's
+  `publish-pg19-release.yml` — which builds from source and gates publication on
+  a `GRAPH_TABLE` smoke test — has **never executed**, nor has the monthly
+  `fork-rot-check.yml`. Reproducibility, which #28 requires, is absent.
+- Its own notes list what was verified under Node — `select version()`, DDL/DML,
+  aggregates — and **SQL/PGQ execution is not on that list**, nor are browser
+  targets, workers, extensions, `pg_dump` or persistence.
 
-Its own caveats: verified under Node are `select version()`, DDL/DML and
-aggregates. **Not** exercised: the PGlite test suite, `CREATE EXTENSION`,
-`pg_dump`, the socket server, worker/OPFS/IDBFS backends, browser targets, and
-persistence. SQL/PGQ execution is not on the verified list either — the catalogs
-are provably present, but nobody has run a `GRAPH_TABLE` against this build.
+Two things in it are still worth reusing rather than re-deriving: the packaging
+shape (an npm tarball of the unchanged package name, so the import is a drop-in)
+and the measured footprint below, which is the best available estimate of what
+#28 will publish.
 
-That is a risk to *discharge with a test*, not a reason to block: the first task
-of this change is a smoke test that runs `CREATE PROPERTY GRAPH` and a
-`GRAPH_TABLE` query against the pinned build in a real browser worker, and it
-runs before any UI work. Also note `select version()` does not carry a
-`PGlite x.y.z` suffix on this build — nothing may assert that pattern.
+One trap it already documents: `select version()` on a fork build carries **no**
+`PGlite x.y.z` suffix. Nothing may assert that pattern.
+
+### Measured footprint (from the prerelease; expect #28 to be close)
+
+`pglite.wasm` 9,379,167 B and `pglite.data` 5,434,131 B — **14.8 MB on disk,
+~4.7 MB gzipped** (3,126,403 + 1,560,207). The issue's "roughly 6 MB" is the
+wire figure at best and understates disk by about 2.5x. D8 depends on these
+numbers, so they should be re-measured against #28's actual release.
 
 ### What Phase A actually gives us
 
@@ -113,30 +127,47 @@ Two things there are load-bearing for this change and are easy to get wrong:
 `docs/package.json` depends on the release asset URL directly:
 
 ```
-"@electric-sql/pglite":
-  "https://github.com/gaarutyunov/pglite/releases/download/pglite-v0.5.4-pg19.1/electric-sql-pglite-0.5.4-pg19.1.tgz"
+"@electric-sql/pglite": "<the release asset URL that postgres-pglite#28 publishes>"
 ```
 
-`npm install` records the resolved URL *and* an integrity hash in
-`package-lock.json`; `npm ci` then reproduces exactly those bytes and fails
-loudly if the asset ever changes. The release's own policy is that assets are
-never replaced in place — a new build gets a new tag — so the URL is immutable
-by convention and the lockfile enforces it by hash.
+**The URL and its checksum cannot be written until #28 publishes.** Do not
+hard-code a guessed tag, a guessed filename, or a checksum copied from anywhere
+else — a pin that resolves to bytes nobody verified is worse than no pin. The
+version pinned here must be the version #28 ships, and the implementer's first
+act is to read #28's release notes and copy the URL and the published checksum
+from them. Two consequences worth stating because they are easy to miss:
+
+- If #28 ships **raw `.wasm` + FS assets rather than a package**, this decision
+  changes shape: there is then no npm dependency to pin, and the assets have to
+  be fetched and instantiated by hand. That is strictly more work here and is
+  why the "JS runtime included" bullet is on the requirements list above. Settle
+  the published shape with #28 before implementing.
+- If #28 publishes under a different package name, the drop-in
+  `import { PGlite } from '@electric-sql/pglite'` no longer holds and every
+  import site in this design changes with it.
+
+Given a package tarball URL, the mechanism is: `npm install` records the
+resolved URL *and* an integrity hash in `package-lock.json`; `npm ci` then
+reproduces exactly those bytes and fails loudly if the asset ever changes. This
+requires that #28 never replace an asset in place — a new build must get a new
+tag — so that the URL is immutable by convention and the lockfile enforces it by
+hash.
 
 `deploy-docs.yml` and `pr-preview.yml` already run `npm ci` in `docs/` with the
 lockfile cached. **No workflow change is needed.** That is the main reason to
 prefer this over the alternatives.
 
-*Rejected — vendoring `dist/` into the repo.* ~23 MB of build output committed to
-`main` forever, with a hand-rolled integrity story strictly worse than npm's.
+*Rejected — vendoring `dist/` into the repo.* Tens of MB of build output
+committed to `main` forever, with a hand-rolled integrity story strictly worse
+than npm's.
 
-*Rejected — building the fork in CI.* Requires emscripten plus a full PostgreSQL
-wasm build. The release exists precisely so that no downstream site has to do
-this.
+*Rejected — building the fork in CI here.* Requires emscripten plus a full
+PostgreSQL wasm build, in the wrong repo. #28 exists precisely so that no
+downstream site has to do this.
 
 *Rejected — publishing to npm under a scope.* Needs registry credentials in CI
 and a package name divergent from `@electric-sql/pglite`, which would break the
-drop-in import. The release notes call this out as the reason for the URL form.
+drop-in import.
 
 ### D2: Lazy means a dynamic `import()` inside the Run handler
 
@@ -241,7 +272,11 @@ feature.
 ### D8: `gh-pages` cost is not the problem the issue expects
 
 The issue estimates ~6 MB and asks whether the assets should be production-only.
-The measurements say otherwise, in both directions:
+The measurements say otherwise, in both directions. They are taken from the
+prerelease named in the Context and should be re-checked against #28's release —
+but the *shape* of the conclusion does not depend on the exact figures, and it
+applies equally to the preview infrastructure #28 is building for its own
+acceptance demo:
 
 - The raw figure is bigger than stated: `pglite.wasm` 9,379,167 B +
   `pglite.data` 5,434,131 B = **14.8 MB on disk**, ~4.7 MB gzipped over the wire
@@ -266,16 +301,21 @@ running. Worth its own issue.)
 
 ## Risks / Trade-offs
 
-- **SQL/PGQ has never been executed on this build.** Catalogs are provably
-  present; execution is not proven. Mitigated by making the browser smoke test
-  task 1, before any UI work, so a negative result costs one task instead of the
-  whole change.
-- **Browser targets are unexercised by the release.** Same mitigation; the smoke
-  test runs in a real browser worker, not Node.
+- **The artifact does not exist yet.** This is the blocking risk and it is not
+  mitigable from here: nothing in this change can be implemented until
+  `postgres-pglite#28` publishes. The design is written so the wait costs
+  nothing — every decision except D1's concrete pin is settled independently.
+- **#28 may publish a different shape than assumed.** D1 assumes a package
+  tarball carrying the JS runtime. Raw `.wasm` + FS assets would require hand
+  instantiation and would change D1 and every import site. Settle this with #28
+  before implementing, not after.
+- **SQL/PGQ execution in a browser is unproven.** #28's acceptance test is
+  exactly this, so it should be proven before this change starts. Task 1 repeats
+  it against the pinned build anyway — cheap, and it catches a pin that differs
+  from what #28 validated.
 - **PostgreSQL 19beta2 is a beta.** `postgres-pglite#10` will re-pin the fork to
-  `REL_19_0` at GA, which will produce a new pglite release tag. The upgrade is
-  then a one-line version bump plus `npm install`, which is the point of pinning
-  by URL.
+  `REL_19_0` at GA, which will produce a new release. The upgrade is then a
+  one-line pin bump plus `npm install`, which is the point of pinning by URL.
 - **A ~4.7 MB download on first Run.** Deliberate and bounded to people who
   asked for it. The Run button states the cost before it is paid.
 - **Vite could regress the laziness on upgrade.** Asserted by the build-output
