@@ -1,5 +1,13 @@
 ## ADDED Requirements
 
+**Milestone: M13 (the skill), last of the delivered milestones — it routes to
+entry points, so it needs entry points to route to, and a routing table written
+before the packages exist would name things that do not. The exception is the
+last requirement, *Guidance does not contradict itself*: the contradiction it
+describes is live in already-merged workspace guidance, so it is fixed alongside
+the milestones rather than after them, because every adoption PR is written by an
+agent reading that guidance.**
+
 ### Requirement: One skill, describing entry points rather than tools
 
 There SHALL be a single skill for goga, and it SHALL NOT re-teach the wrapped
@@ -58,6 +66,8 @@ to the reader's discipline.
 
 The workspace's Go guidance SHALL present one position on any question an agent
 must decide.
+
+*Not gated on any milestone: this repairs guidance already in force on `main`.*
 
 #### Scenario: Layout guidance is consistent
 - **WHEN** an agent reads the available Go guidance on package layout

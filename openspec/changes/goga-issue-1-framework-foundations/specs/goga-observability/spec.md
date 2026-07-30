@@ -1,5 +1,10 @@
 ## ADDED Requirements
 
+**Milestone: M1 (`goga/telemetry`), the first package delivered — the owner's
+*"telemetry first, every project needs it"*. Adopters: gopgql, then epos. The
+exception is the last requirement below, *Operational endpoints stay out of
+request traces*, which is `goga/serve`'s to satisfy and lands at M2.**
+
 ### Requirement: Telemetry is configured in one call
 
 Tracing, metrics and structured logging SHALL be established together, so that a
@@ -71,7 +76,7 @@ module uses, so that instrumentation is uniform and its presence is checkable.
 
 #### Scenario: A handle obtained before telemetry is configured still records
 - **WHEN** a module obtains its instrumentation handle during package
-  initialisation, as every adapter registry does, and telemetry is configured
+  initialisation, as every module's adapter table does, and telemetry is configured
   later during startup
 - **THEN** operations recorded after configuration are exported — the handle
   resolves through the global providers rather than capturing whichever
@@ -91,6 +96,9 @@ module uses, so that instrumentation is uniform and its presence is checkable.
 
 Health, readiness and metrics endpoints SHALL NOT be recorded as application
 requests.
+
+*Delivered at M2 with `goga/serve`, not at M1: there is no request to keep out of
+a trace until there is a server.*
 
 #### Scenario: Probes do not appear as traced requests
 - **WHEN** a liveness or readiness probe is served

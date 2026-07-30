@@ -1,5 +1,10 @@
 ## ADDED Requirements
 
+**Milestone: M3 (`goga/config`) — the owner's *"config for all of them too"*.
+Adopters: epos, whose flag callback inverts its own precedence today, then
+skill-test/go-service and mcp-anything, which between them exercise every source
+arrangement the survey found.**
+
 ### Requirement: Configuration loads with a stated precedence
 
 Configuration SHALL be loaded from defaults, a file, the environment and flags in

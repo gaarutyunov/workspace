@@ -1,5 +1,13 @@
 ## ADDED Requirements
 
+**Milestone: split. The pinned tool directives land at M0 with the repo; the
+generation-freshness check and its enforcement of generated wiring land at M9
+with `goga/di`; the oapi-codegen and mockgen halves and the attribute-registry
+pattern land at M12 with skill-test/go-service as adopter. The sqlc, buf and gRPC
+requirements — the ones whose only consumer is codiq — **do not start until codiq
+exists**, which it did not on 2026-07-30. That is the milestone rule applied to
+the one part of the design with no project to validate it.**
+
 ### Requirement: Generator versions are pinned by the module graph
 
 Every code generator a project uses SHALL be pinned as a module tool dependency
@@ -91,6 +99,8 @@ compiles against, so the generated output inherits framework behaviour unmodifie
 
 Where a project defines a wire protocol, the framework SHALL provide the lint and
 compatibility configuration.
+
+*No milestone yet: the only anticipated consumer is codiq, which does not exist.*
 
 #### Scenario: A protocol definition is linted
 - **WHEN** a protocol definition changes

@@ -1,5 +1,16 @@
 ## ADDED Requirements
 
+**Milestone: none yet — this capability is deliberately unscheduled. It stays in
+scope on the owner's instruction that Service Weaver matters, but the owner's
+other instruction gates every milestone on a real project adopting it, and no
+project consumes this today; its upstream is archived, and it carries the largest
+invented surface in the change. The two instructions pull against each other
+here, and the resolution is a schedule rather than a scope change: the
+requirements below are specified now so that whichever deployment technology
+arrives first is an adapter and not a rewrite, and the milestone opens when a
+consumer exists. When it does, the in-process deployer comes first, then
+Kubernetes, and the Service Weaver deployer with the consumer that asks for it.**
+
 ### Requirement: Components are defined against the framework, deployed by an adapter
 
 An application SHALL express its units of deployment against a framework
@@ -47,10 +58,11 @@ interface, and the deployment mechanism SHALL be a replaceable adapter.
 - **THEN** the change is confined to a deployer adapter, and no component or
   caller changes
 
-#### Scenario: Deployers resolve through the shared registry
+#### Scenario: Deployers resolve through this module's own adapter table
 - **WHEN** a deployer is selected by name
-- **THEN** it resolves through the framework's adapter registry, and an unknown
-  name fails naming the supported ones
+- **THEN** it resolves through the module's own name-keyed table, on the same
+  terms as every other module's, and an unknown name fails naming the supported
+  ones
 
 ### Requirement: Component interaction is observable regardless of deployer
 

@@ -164,7 +164,7 @@ sub-packages of their module (`goga/database/pgxdb`) because Go's import graph
 gives no other way to make an adapter's dependency optional.
 
 - *Rejected — hexagonal-first.* go-service's config-driven adapter registry is
-  genuinely good and is generalised here as D7's registry, but shipping the
+  genuinely good and is generalised here as D7's per-module tables, but shipping the
   *directory structure* as mandatory makes goga an all-or-nothing adoption, which
   D2 rejects for stronger reasons.
 
@@ -172,11 +172,16 @@ gives no other way to make an adapter's dependency optional.
 
 Modules: `goga/config`, `goga/telemetry`, `goga/serve`, `goga/client`,
 `goga/database`, `goga/migrate`, `goga/mcp`, `goga/cli`, `goga/grpc`,
-`goga/components`, `goga/semconv`, `goga/registry`, `goga/di`, `goga/lint`,
-`goga/gogatest`. Plus exported wire ProviderSets per module (D9), plus a thin
-`goga/app` that composes them — separate from the root `goga` package, which
-holds only `Option` and `Apply` and must stay a leaf (see the pseudocode's
-opening note).
+`goga/components`, `goga/semconv`, `goga/di`, `goga/lint`, `goga/gogatest`. Plus
+exported wire ProviderSets per module (D9), plus a thin `goga/app` that composes
+them — separate from the root `goga` package, which holds only `Option` and
+`Apply` and must stay a leaf (see the pseudocode's opening note). (`goga/registry`
+was a fifteenth; the owner has deferred it — D8.)
+
+**Independence is also the unit of delivery.** D16 makes each module a milestone
+of its own, delivered and adopted before the next one starts, which is only
+possible because the modules are independent packages. A framework object would
+have made the owner's sequencing rule unimplementable.
 
 The evidence: `sysgo` needs none of the runtime wrappers. `epos` needs config and
 a metrics-only telemetry subset. `gopgql` is a library that needs database,
@@ -245,9 +250,12 @@ anticipated.** Being anticipated changes *sequencing*, never *scope*.
 | **OTel Weaver** | `goga/semconv` | go-service | **current** |
 | **Service Weaver** | `goga/components` | — | **anticipated** (owner); upstream archived (D12) |
 
-Sequencing follows the consumer, so an anticipated tool ships its *surface and
-its config/CI half* in v1 and its adapter body when the consumer lands. That is
-recorded per-module in `tasks.md`, not as an exclusion here.
+Sequencing follows the consumer. Under D16 that is now sharper than "later":
+scope still comes from the tool list, but a module gets a **milestone** only when
+a named project can adopt it, so an anticipated tool waits for its consumer
+rather than shipping a surface nobody exercises. `goga/components` and the
+sqlc/buf halves of `goga/codegen` are the cases; `tasks.md` records where each
+sits.
 
 ### D5: every house convention is enforced by goga; there is no "not enforced" list
 
@@ -259,35 +267,72 @@ Enforcement has three mechanisms, in order of preference:
 
 1. **Compile time — the API leaves no other shape available.** Two techniques do
    most of the work.
-   - *Settings types are opaque, not unexported.* Each module declares
-     `type Settings struct{…}` whose **fields are all unexported**, with
-     read-only accessors for the values an adapter needs, plus
-     `type Option = goga.Option[Settings]`. There is no exported constructor and
-     no exported field, so a caller can obtain a populated `Settings` **only**
-     from `goga.Apply` over its options, and **no exported goga constructor
-     accepts a `Settings`** — every one takes `...Option`. A caller can write
-     `database.Settings{}`; it is a zero value that no goga entry point will
-     take, so it buys nothing.
+   - *Settings structs are unexported, and unspellable outside their module.*
+     Each module declares `type settings struct{…}` — **unexported**, so no
+     other package can name it, construct it, or embed it — plus
+     `type Option = goga.Option[settings]`, an exported alias over that
+     unexported type. A caller can hold and pass a `database.Option`; it cannot
+     write the type the option mutates. Every exported goga entry point takes
+     `...Option` and none takes a settings value, so `goga.Apply` over the
+     caller's options is the only way a populated `settings` ever comes into
+     existence. **There is no exported struct anywhere in goga's option
+     surface**, which is what makes D14 a compile-time property rather than a
+     review one.
 
-     *Why exported at all, since an earlier revision said unexported.* Because
-     an adapter lives in its own package (`goga/database/pgxdb`) and must **name
-     the type in its `Open` method signature** to satisfy
-     `registry.Opener[driver.DB, database.Settings]`. An unexported `settings`
-     is unnameable from `pgxdb`, so with it the adapter registry — D7 and D8,
-     the owner's own requirement — cannot compile at all. The earlier revision
-     asserted the unexported form while its own adapter pseudocode already wrote
-     `database.Settings`; this reconciles them in the only direction that
-     compiles. **The honest consequence:** D14 is enforced at compile time *at
-     every goga entry point* (there is no parameter to pass a struct to) and by
-     `gogaparamstruct` in project code — not by the type being unnameable.
+     *What an adapter names instead.* An adapter lives in its own package
+     (`goga/database/pgxdb`) and may need the caller's resolved values — pool
+     size, timeouts. It reads them through an exported **read-only interface**
+     carrying nothing but accessors. The unexported `settings` struct implements
+     it. So the house rule is one line: **`Settings` is always an interface;
+     `settings` is always the unexported struct.** An adapter names the
+     interface, never the struct, and cannot construct a populated one; it could
+     write its own implementation of the interface, but no goga entry point
+     accepts a `Settings`, so there is nowhere to pass it.
+
+     Two placement rules, so an adapter author never has to guess. **Where:** the
+     `Settings` interface is declared in the same package as the port interface
+     the adapter implements — `driver.Settings` beside `driver.DB`,
+     `mcp.Settings` beside `mcp.Transport` — which is a package the adapter
+     already imports. **Whether:** a module's opener takes a `Settings` **only if
+     an adapter reads one.** `goga/database` does (pool sizing, timeouts);
+     `goga/mcp` does (the HTTP transport needs its endpoint); `goga/components`
+     does (the deployer's config path). `goga/serve` and `goga/telemetry` do
+     **not** — a router adapter builds an engine and a trace exporter delegates
+     to `autoexport`, and neither reads a single setting, so their openers take
+     `(ctx)` alone. An opener parameter that no adapter reads is an abstraction
+     with no user, which is the thing D8's removal was for; a shared registry
+     forced one signature on every module, and nothing does now.
+
+     *This is the owner's doing.* A previous revision shipped an **exported
+     opaque `Settings` struct** and recorded the lost claim, because the shared
+     generic registry made the module's concrete settings type a type parameter
+     that adapter packages had to name. The owner removed the registry (D8), and
+     with it the reason: an adapter now satisfies an opener declared by its own
+     module, and what that opener passes is the module's choice. The stronger
+     claim — that the compiler makes a parameter struct unspellable — is true
+     again.
+
+     *One correction owed to the record.* The earlier revision said the
+     unexported form and the generic registry were "not jointly satisfiable in
+     Go". That was true of the shape it had chosen — `S` bound to the concrete
+     settings struct — and not true in general: `S` could have been this same
+     read-only interface. The registry's removal is what makes the interface
+     seam obviously cheap (one small interface per module, in a package the
+     adapter already imports) rather than a second cross-module seam threaded
+     through a shared generic; it is not what makes it *possible*. Recording the
+     narrower truth, because the wider claim is what justified giving the
+     enforcement up.
    - *Portable types have no exported constructor and unexported fields.* An
      adapter returns a `driver.X`; only the module's `Open`/`New` can wrap one
      into the portable type, and it always attaches instrumentation. So D6 holds
      for every object goga hands a caller: **no exported goga constructor
-     produces an uninstrumented portable object.** The one path around it is
-     calling an exported registry (`database.Drivers.Open`) directly to get a
-     raw `driver.DB` — which exists because a project must be able to register
-     its own adapter, and which `goga/lint`'s `gogatelemetry` reports.
+     produces an uninstrumented portable object.** Removing the shared registry
+     closed the one hole here too. Each module now exports `Register`, so a
+     project can still supply its own adapter, but it exports **no lookup** —
+     there is no `Drivers.Open` returning a raw `driver.DB`, because nothing
+     outside the module needs one. What remains is a project calling the opener
+     it wrote itself, which is its own code rather than a goga entry point, and
+     which `goga/lint`'s `gogatelemetry` reports.
 2. **Lint time — `goga/lint`, a golangci-lint plugin module.** `mcp-anything`
    already depends on `golangci/plugin-module-register`, so the mechanism is
    proven in-house. Rules: `gogaparamstruct` (an exported constructor whose final
@@ -320,7 +365,7 @@ way to turn telemetry off.** `WithTelemetry(*telemetry.Instrumentation)`
 *replaces* the instrumentation; there is no `WithoutTelemetry`.
 
 *The qualifier is not an exemption clause; it is the boundary of what the words
-can mean.* Three of the fifteen modules perform no runtime operation at all:
+can mean.* Three of the fourteen modules perform no runtime operation at all:
 `goga/semconv` is generated constants, `goga/lint` is a set of
 `analysis.Analyzer`s that run inside golangci-lint, and `goga/di` is
 `wire.ProviderSet` values consumed at generation time. There is nothing in them
@@ -328,9 +373,12 @@ to start a span around, and inventing one would be exactly the API contortion
 the invariant exists to avoid. So the invariant is stated over *operations*, and
 made checkable rather than asserted: `telemetry.For` records each module name it
 is called with, and `TestEveryModuleIsInstrumented` asserts that the recorded set
-is **exactly** the module list minus `{semconv, lint, di}` — a new module with
-runtime behaviour and no instrumentation fails the test, and so does an attempt
-to quietly add a fourth name to the exclusion list.
+is **exactly** the list of modules **shipped so far** minus `{semconv, lint, di}`
+— a new module with runtime behaviour and no instrumentation fails the test, and
+so does an attempt to quietly add a fourth name to the exclusion list. "Shipped
+so far" is load-bearing under D16: the test lands at M1 with one entry and each
+milestone adds its own, so it is a live check from the first package rather than
+a red test waiting fourteen milestones for the list to be complete.
 
 The pattern is taken from `gocloud.dev` (D7): **instrumentation lives in the
 portable type, never in the adapter.** In `gocloud.dev/blob`, `Bucket` holds the
@@ -342,19 +390,21 @@ Concretely, per module: a span per operation named `goga.<module>.<op>`, a
 `goga.<module>.duration` histogram, an `error.type` attribute from the official
 conventions on failure, and a module-scoped `*slog.Logger`. `goga/mcp` is
 included — it gets a span per tool call, per resource read and per prompt render
-(see the pseudocode). So is `goga/registry` itself: `Open` is instrumented,
-because "which adapter did this process actually resolve" is an operational
-question.
+(see the pseudocode). **Adapter resolution is an operation too**: each module
+that has adapters emits `goga.<module>.resolve` when it selects one, because
+"which adapter did this process actually resolve" is an operational question. In
+the previous revision that span belonged to the shared registry; with the
+registry gone (D8) it belongs to each module, which is where its
+`Instrumentation` already is.
 
 **`telemetry.For` must resolve through OTel's global delegating providers**
 (`otel.Tracer`, `otel.Meter`, `global.Logger`), never by snapshotting a concrete
 provider, and its instruments are created on the handle's first use. This is
-load-bearing rather than an implementation note: every adapter registry is a
-package-level `var` initialised **before** `Setup` runs, so a handle that
-snapshotted a no-op provider at init would leave exactly the modules D6 names —
-the registries — permanently unobserved, while every test passed. OTel's global
-providers are designed to delegate once the real provider is installed; goga
-depends on that.
+load-bearing rather than an implementation note: adapter tables are package-level
+`var`s and adapters self-register from `init()`, both **before** `Setup` runs, so
+a handle that snapshotted a no-op provider at init would leave exactly those code
+paths permanently unobserved while every test passed. OTel's global providers are
+designed to delegate once the real provider is installed; goga depends on that.
 
 ### D7: `goga/database` is a portable API plus drivers, after `gocloud.dev`
 
@@ -373,10 +423,12 @@ pointed at go-cloud. Reading `gocloud.dev/blob/blob.go` at HEAD, the pattern is:
 - `RegisterBucket` **panics** on a duplicate scheme, because a duplicate is a
   programming error in an `init()`, not a runtime condition.
 
-goga mirrors all four. The one deliberate divergence: `blob.URLMux` is backed by
-`gocloud.dev/internal/openurl`, which is `internal` and pre-generics. goga's
-equivalent is **exported and generic** (D8), because goga has many adapter-bearing
-modules and one registry should serve all of them.
+goga mirrors all four, including the fourth thing an earlier revision diverged
+from: `blob.URLMux` is **per portable type**, lives in the module it serves, and
+is backed by `gocloud.dev/internal/openurl` — one table per module, not one
+shared generic. The earlier revision made goga's equivalent exported and generic;
+the owner has removed it (D8), so goga now follows `gocloud.dev`'s arrangement
+exactly rather than improving on it.
 
 pgx is the first driver, `goga/database/pgxdb`, registering `postgres://` and
 `pgx://`. It uses `github.com/exaring/otelpgx` for wire-level spans — already the
@@ -390,41 +442,91 @@ a query; otelpgx's tells you what the connection did.
   `database/sql` is instead available *through* the module, because goose needs
   it (D10).
 
-### D8: one generic registry, used by every adapter-bearing module
+### D8: no shared registry in v1 — each module owns its adapter table
 
-The owner: *"There should be a generic registry implementation that will be used
-for adapters."* One implementation, `goga/registry`, instantiated per portable
-type. Not a hand-rolled map per module.
+**Reversed on the owner's instruction**, in two comments three minutes apart. The
+first refines the registry's shape:
 
-It is generic over two parameters: `T`, the thing an adapter produces, and `S`,
-the module's resolved settings. `S` exists because an adapter needs the caller's
-options (pool size, timeouts, the instrumentation handle) and a registry keyed
-only on URL cannot carry them. `S` is always a module's **opaque exported**
-`Settings` (D5): the adapter must be able to *name* the type, and its fields are
-unexported and reachable only through accessors, so the adapter seam does not
-reintroduce a caller-facing parameter struct (D14).
+> *"Registry is generic with interface not concrete type. Because an adapter is
+> for a port which is the generic for the registry and the adapter satisfies the
+> interface."*
 
-**Two lookup keys, because two shapes of module use it.** `goga/database` and
-`goga/client` select an adapter from a *connection URL*, where the scheme is the
-key and the rest of the URL is the adapter's input. `goga/serve`,
-`goga/telemetry`, `goga/mcp` and `goga/components` select by a *plain name*
-("gin", "otlp", "stdio", "local") with no URL to carry. The registry therefore
-exposes both `Open(ctx, rawURL, s)` and `OpenNamed(ctx, name, s)`, the latter
-synthesising `&url.URL{Scheme: name}` so an adapter still sees one signature. An
-earlier revision had `serve.New` call `Routers.Open(ctx, "router://"+s.router, s)`
-— which resolves the scheme `router`, not `gin`, and could never have found an
-adapter. Name-keyed modules use `OpenNamed`.
+The second withdraws it:
 
-**The registry does not import `goga/telemetry`.** It declares the two-method
-instrumentation interface it needs at the point of use, satisfied by
-`*telemetry.Instrumentation`, and takes one in `New`. Otherwise `registry` →
-`telemetry` → `registry` (the exporter registries) is an import cycle.
+> *"I think we should skip the registry because go doesn't ship generic methods
+> yet. Once it does — which is proposed and the proposal seems to be approved —
+> we will add registry that will stores structs satisfying interfaces and
+> returning concrete types."*
 
-Modules that instantiate it in v1: `goga/database` (drivers),
-`goga/serve` (routers: mux, gin, chi), `goga/telemetry` (exporters, delegating to
-`autoexport` for the standard names), `goga/mcp` (transports: stdio, streamable
-HTTP, SSE), `goga/components` (deployers: local, weaver, k8s), `goga/client`
-(transports).
+The second supersedes the first: it removes the thing the first was refining. So
+**`goga/registry` is not in v1.** Both comments are recorded, because together
+they say what the registry is when it comes back and why it cannot be built now.
+
+**The shape it takes when it returns** (the owner's first comment): the registry
+is generic over the **port** — the interface an adapter satisfies — not over a
+concrete type. `Registry[P]` where `P` is `driver.DB`, `serve.Router`,
+`mcp.Transport`; an adapter is a struct that satisfies `P`, and it registers
+itself for that port. The owner's second comment adds the half Go cannot express
+today: it *stores* structs satisfying the interface and *returns* the concrete
+type, so a caller that knows which adapter it asked for gets that adapter's own
+type back rather than the port.
+
+**Why it cannot be built now.** That return type has to vary per call while the
+registry value stays one value, which is a **method** type parameter — Go has
+none. `Registry[P]` fixes `P` at construction, so a method on it cannot introduce
+a second type parameter for the concrete result. The proposal for generic methods
+exists and the owner reads its prospects as good; a registry written against
+today's language would have to fake the concrete return with a type assertion at
+every call site, which is the thing the parameter was for. Deferring costs
+nothing that cannot be recovered: the module tables below are the registry's
+future call sites, and collapsing five of them into one generic type is a
+mechanical change behind unchanged public surfaces.
+
+**What v1 does instead.** Each adapter-bearing module keeps its own table, in its
+own package — which is exactly `gocloud.dev`'s arrangement (D7), where
+`blob.URLMux` serves `blob` and nothing else. Concretely, per module: a
+package-level `map[string]Opener` under an `sync.RWMutex`, an exported
+`Register` that panics on a duplicate, an unexported lookup, and `Schemes()` for
+diagnostics. About thirty lines each, all of it obvious.
+
+| module | key | opener takes `Settings`? | adapters in scope |
+|---|---|---|---|
+| `goga/database` | URL scheme | yes — pool sizing, timeouts | `pgxdb` (`postgres`, `pgx`), `sqldb` |
+| `goga/serve` | plain name | no — a router adapter reads nothing | `muxrouter` (default), `ginrouter`, `chirouter` |
+| `goga/telemetry` | plain name | no — standard names delegate to `autoexport` | standard names via `autoexport`; house names additive |
+| `goga/mcp` | plain name | yes — the HTTP transport's endpoint | `stdio` (default), `http`, `sse` |
+| `goga/components` | plain name | yes — the deployer's config path | `local` (default), `weaver`, `k8s` |
+
+`goga/client` is deliberately absent: it has one transport and no second
+candidate, so it gets no table until it does. A one-entry adapter table is the
+abstraction D7 warns about.
+
+**Three things get simpler, and they are the reason to record the removal rather
+than just perform it.**
+
+- *The two-lookup-key problem disappears.* A shared registry had to serve both
+  URL-keyed modules and name-keyed ones, which is why it grew `Open` **and**
+  `OpenNamed`, and why an earlier revision's `Routers.Open(ctx, "router://"+name)`
+  resolved the scheme `router` and could never have found the gin adapter. A
+  URL-keyed module now parses a URL; a name-keyed module now looks up a string.
+  Neither knows the other exists.
+- *One of the two import cycles the review found goes away.* `registry` →
+  `telemetry` → `registry` existed because the exporter tables lived in
+  `telemetry` and the registry wanted `telemetry`'s instrumentation. Each table
+  now sits in the module whose `Instrumentation` it uses, so there is nothing to
+  break. (The other cycle — root `goga` versus the composition root — is
+  unrelated and still fixed by `goga/app`.)
+- *Settings go back to unexported* (D5). The type parameter `S` was what forced
+  an adapter package to name the module's settings type; with the opener declared
+  by the module itself, what it passes is the module's choice, and it passes a
+  read-only interface.
+
+**The cost, stated.** Five near-identical thirty-line tables instead of one
+generic type — `database`, `serve`, `telemetry`, `mcp`, `components` — and a
+duplicate-registration panic implemented five times. That is
+the trade the owner has chosen, and it is a small one at this size: the
+duplication is visible, mechanical, and collapses into `goga/registry` the day
+generic methods land.
 
 ### D9: wire is the house DI mechanism, and it is enforced
 
@@ -450,7 +552,7 @@ var Core = wire.NewSet(config.Set, telemetry.Set, cli.Set)
 var Service = wire.NewSet(Core, serve.Set, client.Set)
 
 // Data adds persistence. database.Set requires a driver blank-import; the
-// missing-driver failure is a clear registry error at startup, not a nil pool.
+// missing-driver failure is a clear unknown-scheme error at startup, not a nil pool.
 var Data = wire.NewSet(database.Set, migrate.Set)
 
 // MCP is additive to either, because a project may be MCP-only (gopgql).
@@ -577,8 +679,8 @@ are now in scope, separately:
   framework. It lands as `goga/components`.
 
 `goga/components` gives a component interface, a `Ref[T]` for typed references,
-and a **deployer registry** (D8) with three adapters: `local` (in-process, the
-default and what tests use), `weaver` (Service Weaver), `k8s`.
+and a **deployer table** of its own (D8) with three adapters: `local`
+(in-process, the default and what tests use), `weaver` (Service Weaver), `k8s`.
 
 This shape is the answer to the risk that Service Weaver is **archived upstream**
 (verified 2026-07-30, last push 2025-11-20). Putting the interface in goga and
@@ -587,6 +689,15 @@ Weaver behind an adapter is precisely the framework property the issue asks for 
 interface."* If Weaver stays archived, `weaver` is replaced by another deployer
 and no consumer changes. **The fact is flagged, not used as an exclusion.** See
 Open Questions.
+
+**Sequencing, and a tension worth naming.** D16 gates every milestone on a real
+project adopting it, and `goga/components` has no project to adopt it — no
+current consumer, an archived upstream, and the largest invented surface in the
+design. So it is the **last** milestone and, unlike every other, it does not
+start on a date: it starts when a consumer exists. That keeps both of the owner's
+instructions intact — Weaver stays in scope, and nothing ships unvalidated — but
+they do pull against each other here, and the resolution is a schedule rather
+than a design change.
 
 ### D13: the skill shrinks; and the guidance contradiction is now live on `main`
 
@@ -653,7 +764,7 @@ saying out loud rather than leaving implicit:
    adapter-bearing modules by D8, that is a decided position: **ports sit next to
    what they serve, adapters are technology-named leaves, and there is no `port/`
    or `adapter/` layer directory.** A project adopting goga inherits that shape
-   for everything it registers into a goga registry, which is a direct answer to
+   for everything it registers into a goga adapter table, which is a direct answer to
    the sub-question `internal/port` / `internal/adapter` was trying to answer —
    and it happens to land on the spf13 skill's side, by concern rather than by
    layer.
@@ -688,6 +799,8 @@ type Option[S any] func(*S) error
 
 // Apply folds options over a module's defaults. It is the only way an S is ever
 // produced, which is what keeps S unexported and D14 enforced by the compiler.
+// S being unexported is restored by D8's removal of the shared registry; the
+// previous revision had to export it so adapter packages could name it.
 func Apply[S any](defaults S, opts ...Option[S]) (S, error) {
 	for _, opt := range opts {
 		if err := opt(&defaults); err != nil {
@@ -703,19 +816,17 @@ Each module then writes:
 ```go
 package database
 
-// Settings is opaque: exported so an adapter in database/pgxdb can name it in
-// its Opener signature (D5), with every field unexported and no exported
-// constructor, so the only populated Settings in existence is one goga.Apply
-// produced — and no exported goga entry point accepts one.
-type Settings struct{ maxConns int; queryTimeout time.Duration /* … */ }
+// settings is UNEXPORTED, so no other package can name it, construct it or
+// embed it. Option is an exported alias over it: a caller can hold and pass a
+// database.Option and cannot write the type it mutates. Every exported entry
+// point in this package takes ...Option and none takes a settings, so
+// goga.Apply over the caller's options is the only way a populated one exists.
+type settings struct{ maxConns int; queryTimeout time.Duration /* … */ }
 
-func (s Settings) MaxConns() int              { return s.maxConns }
-func (s Settings) QueryTimeout() time.Duration { return s.queryTimeout }
-
-type Option = goga.Option[Settings]
+type Option = goga.Option[settings]
 
 func WithMaxConns(n int) Option {
-	return func(s *Settings) error {
+	return func(s *settings) error {
 		if n < 1 {
 			return fmt.Errorf("goga/database: max conns must be >= 1, got %d", n)
 		}
@@ -723,7 +834,18 @@ func WithMaxConns(n int) Option {
 		return nil
 	}
 }
+
+// settings satisfies driver.Settings, the read-only accessor interface an
+// adapter in its own package reads (D5). The interface is exported; the struct
+// behind it is not.
+func (s *settings) MaxConns() int               { return s.maxConns }
+func (s *settings) QueryTimeout() time.Duration { return s.queryTimeout }
 ```
+
+**The house rule this establishes, once, for every module: `Settings` is always
+an interface — accessors only, no way to construct a populated one that goga will
+accept — and `settings` is always the unexported struct behind it.** There is no
+exported struct anywhere in goga's option surface.
 
 Naming rules, so options read the same across modules: `With<Noun>` sets,
 `With<Noun>s(...T)` appends, `Without<Noun>` removes — and `WithoutTelemetry`
@@ -784,6 +906,92 @@ operation, `%w`. Where a caller must branch, the error is a type with an `Is`
 (`UnknownSchemeError`, `MissingKeysError`, `ErrNoSQLDB`, `ErrNotPgx`). Adapters
 return errors and never log; the portable type owns both the log and the span.
 
+### D16: delivery is by milestone — one package, one adopter, one review
+
+The owner:
+
+> *"We shouldn't deliver everything at once. Split the spec into clear
+> milestones. Each milestone we will deliver one package. I will carefully review
+> it. We will migrate gopgql and some other project to it and then continue to the
+> next."*
+
+and, on ordering:
+
+> *"For example postgres which could land to gopgql and codiq. Telemetry first,
+> every project needs it. Http with telemetry for gopgql and epos. Config for all
+> of them too."*
+
+This is a decision about delivery, not about design: no module changes shape, no
+capability is dropped. What changes is that **`tasks.md` is ordered by milestone
+rather than by module**, and that each milestone carries the name of the project
+that adopts it.
+
+**The rule, in three parts.**
+
+1. **One package per milestone.** The unit of review is a package, because a
+   package is what a project can adopt on its own (D2). Where a milestone carries
+   more than one directory, the extra is something the package cannot be used
+   without and nobody adopts separately — `goga/semconv`'s generated constants
+   under `goga/telemetry`, the adapter sub-packages under their module — and the
+   milestone table says so.
+2. **A named adopter per milestone.** Not "a project could use this" but a repo,
+   named, with the reason it is the right one. A milestone with no adopter does
+   not get a slot.
+3. **Adoption is the gate.** A milestone is not finished when the package
+   compiles and its tests pass. It is finished when the adopting project's
+   migration is merged, and the next milestone does not start until then. That is
+   the owner's sentence — *"We will migrate gopgql and some other project to it
+   and then continue to the next"* — read literally, because read any other way
+   it enforces nothing.
+
+**The order, and where it comes from.** Telemetry first is the owner's, stated
+with its reason (*"every project needs it"*), and it is also the module every
+other module depends on for D6. HTTP-with-telemetry, config and postgres are the
+owner's, in the owner's sequence. The rest are ordered by consumer evidence from
+the survey: a module with a current consumer outranks one with an anticipated
+consumer, and a module with neither goes last or waits.
+
+| # | package | adopter, then second | why this one |
+|---|---|---|---|
+| M0 | *(repo, not a package)* — `go.mod`, flat layout, root `goga` (`Option`/`Apply`), `.golangci.yml` / `Makefile` / `.goreleaser.yaml`, and the three actions goga's own CI needs | goga itself | nothing can be delivered from an empty repo; the root package is ~40 lines and is nobody's adoption |
+| M1 | `goga/telemetry` (+ generated `goga/semconv`) | **gopgql**, then **epos** | the owner's *"telemetry first"*; gopgql has none at all, epos has metrics only and never installs its meter provider |
+| M2 | `goga/serve` (+ `muxrouter`, `ginrouter`, `chirouter`) | **epos**, then **gopgql** | the owner's *"http with telemetry for gopgql and epos"*; three router positions across three projects is the survey's strongest seam evidence |
+| M3 | `goga/config` | **epos**, then **skill-test/go-service**, then **mcp-anything** | the owner's *"config for all of them too"*; three koanf consumers with three incompatible arrangements, and epos's flag callback inverts its own precedence |
+| M4 | `goga/database` (+ `driver`, `pgxdb`, `sqldb`) | **gopgql**; **codiq** when it exists | the owner's *"postgres which could land to gopgql and codiq"* |
+| M5 | `goga/migrate` | **gopgql** | already requires goose v3.26.0 and ships its own `migrate/` package |
+| M6 | `goga/mcp` | **gopgql**, then **mcp-anything** | two hand-rolled servers at two SDK versions, neither instrumented |
+| M7 | `goga/gogatest` | **gopgql**, then **epos** | the godog bootstrap is copy-pasted 5× and 8×; three incompatible container strategies |
+| M8 | `goga/cli` | **epos**, then **gopgql** | epos calls `Execute()` and has no signal handling at all |
+| M9 | `goga/di` + `goga/app` (+ the `go-generate-check` action) | **skill-test/go-service**, then **sysgo** | the pair is one deliverable: `di`'s sets exist to build `app.App`, and the action is what enforces them |
+| M10 | `goga/client` | **skill-test/go-service**, then **mcp-anything** | retryablehttp in one, gobreaker in the other, neither shared |
+| M11 | `goga/lint` (+ `go-vuln`, `go-release`, `pages-deploy`) | **gopgql**, then **epos** | needs modules to enforce against, so it follows them; the actions have no Go dependency and ride along |
+| M12 | `goga/codegen` templates + `goga/grpc` | **skill-test/go-service** (oapi-codegen); **codiq** for sqlc and buf | the only milestone whose main tools have no current consumer |
+| M13 | the skill | every adopting project | it routes to entry points, so it needs entry points to route to |
+| — | `goga/components` | **none today** | last, and it does not start until a consumer exists (D12) |
+| — | `goga/registry` | deferred | until Go ships generic methods (D8) |
+
+**This was already the review's conclusion, reached independently.** The
+`go-spec-reviewer` pass that ran before these comments recommended approving the
+spec and **not building it as one unit**, on the ground that *seven of the fifteen
+module surfaces have no consumer that can validate them*, while it found five
+defects — three compile-level, two runtime-level — in the eight that do, which are
+the surfaces that got the most design attention. Its expectation was that the
+defect rate in the unvalidated half would not be lower. The owner arrived at the
+same place from the other direction, and this design records the agreement rather
+than presenting milestones as its own idea. Where the two differ, the owner's is
+finer: the review proposed one gopgql-shaped slice of eight packages, the owner
+one package at a time.
+
+**What the milestones cost, so it is not discovered later.** A module adopted
+before its neighbours exists in a project that does not yet have the rest of goga,
+so some invariants are only reachable later. The sharpest case: D15 puts the
+process's single signal handler in `goga/cli`, which is M8, while `goga/serve`
+lands at M2 — so between M2 and M8 an adopting project keeps its own signal
+handling and `serve.Run` merely takes the context it is given. The requirement
+that *exactly one* handler exists is delivered with `cli`, not with `serve`. Every
+capability that spans milestones this way names the milestone per requirement in
+its delta spec.
+
 ## Package surfaces: Go interfaces and pseudocode
 
 The issue requires this and the review requires it again: *"I also don't see any
@@ -797,7 +1005,7 @@ Import aliases used throughout: `sdkmcp` for
 the OTel SDK packages, `wire` for `github.com/goforj/wire`.
 
 **The root package is a leaf, and the composition root is `goga/app`.** Every
-module writes `type Option = goga.Option[Settings]` and calls `goga.Apply`, so
+module writes `type Option = goga.Option[settings]` and calls `goga.Apply`, so
 every module imports the root package. The composition root holds fields of type
 `*serve.Server`, `*database.DB`, `*mcp.Server`, so it imports every module. Those
 two cannot be the same package — that is an import cycle across the whole
@@ -806,101 +1014,76 @@ contains `Option` and `Apply` and imports nothing but the standard library;
 `goga/app` contains `App` and `Run`. sysgo's `main.go.tmpl` (D3) emits
 `app.Run(ctx, a)`.
 
-### `goga/registry` — the generic adapter registry (D8)
+### Adapter tables — one per module, no shared registry (D8)
+
+There is no `goga/registry` in v1. Each adapter-bearing module keeps its own
+table, in its own package, following `gocloud.dev/blob`'s `URLMux`. The shape is
+given once here, for `goga/database`; `serve`, `telemetry`, `mcp`, `client` and
+`components` repeat it with their own port type and their own key.
 
 ```go
-package registry
+package database
 
-// Opener builds a T from a parsed URL and the module's resolved settings.
-// Adapters implement this and nothing else; every cross-cutting concern lives in
-// the portable type that wraps the T (D6).
-type Opener[T, S any] interface {
-	Open(ctx context.Context, u *url.URL, s S) (T, error)
-}
-
-// OpenerFunc adapts a function to Opener.
-type OpenerFunc[T, S any] func(context.Context, *url.URL, S) (T, error)
-
-func (f OpenerFunc[T, S]) Open(ctx context.Context, u *url.URL, s S) (T, error) {
-	return f(ctx, u, s)
-}
-
-// Instrumentation is declared here, at the point of use, rather than imported
-// from goga/telemetry: telemetry declares its exporter registries with this
-// package, so a dependency the other way is an import cycle (D8).
-// *telemetry.Instrumentation satisfies it.
-type Instrumentation interface {
-	Start(ctx context.Context, op string, attrs ...attribute.KeyValue) (context.Context, func(error))
-}
-
-// Registry maps a scheme — or a plain adapter name — to an Opener. One
-// instantiation per portable type:
+// Register adds an adapter. Adapters call it from init() and are selected by
+// blank import, as in gocloud.dev:
 //
-//	var Drivers = registry.New[driver.DB, Settings]("goga/database", telemetry.For("database"))
+//	import _ "github.com/gaarutyunov/goga/database/pgxdb"
 //
-// S is always a module's opaque exported Settings, populated only by goga.Apply,
-// so the adapter seam does not reintroduce a caller-facing parameter struct (D5).
-type Registry[T, S any] struct {
-	name    string
-	mu      sync.RWMutex
-	openers map[string]Opener[T, S]
-	instr   Instrumentation
-}
+// It PANICS on a duplicate scheme, following gocloud.dev's URLMux: a duplicate
+// registration is a programming error in an init(), not a runtime condition.
+//
+// There is no exported lookup. A project can add an adapter; it cannot ask this
+// package for a raw driver.DB, because that would be a goga entry point handing
+// back an uninstrumented object (D5, D6).
+func Register(scheme string, o driver.Opener)
 
-func New[T, S any](name string, instr Instrumentation) *Registry[T, S]
+// Schemes reports what is registered, for diagnostics and for the error below.
+func Schemes() []string
 
-// Register panics on a duplicate scheme, following gocloud.dev's URLMux: a
-// duplicate is a programming error in an init(), not a runtime condition.
-func (r *Registry[T, S]) Register(scheme string, o Opener[T, S])
+var (
+	driversMu sync.RWMutex
+	drivers   = map[string]driver.Opener{}
+)
 
-// Open resolves rawURL's scheme. Named results, because the deferred end() must
-// observe the error the return statement produces (D15). The error on an unknown
-// scheme names the registered ones, so a typo is self-diagnosing rather than a
-// silent no-op:
+// resolve is unexported and instrumented: "which adapter did this process
+// actually resolve" is an operational question (D6). Named results, because the
+// deferred end() must observe the error the return statement produced (D15).
+//
+// The error on an unknown scheme names the registered ones and points at the
+// likely cause, so a typo is self-diagnosing rather than a silent no-op:
 //
 //	goga/database: no adapter for scheme "mysql" (registered: pgx, postgres);
 //	did you forget a blank import of github.com/gaarutyunov/goga/database/pgxdb?
-func (r *Registry[T, S]) Open(ctx context.Context, rawURL string, s S) (t T, err error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return t, fmt.Errorf("%s: parsing %q: %w", r.name, rawURL, err)
-	}
-	return r.open(ctx, u, s)
-}
-
-// OpenNamed selects by plain adapter name, for the modules with no URL to carry
-// one — routers, exporters, MCP transports, deployers. Synthesising the URL here
-// keeps a single Opener signature for every adapter author.
-func (r *Registry[T, S]) OpenNamed(ctx context.Context, name string, s S) (T, error) {
-	return r.open(ctx, &url.URL{Scheme: name}, s)
-}
-
-func (r *Registry[T, S]) open(ctx context.Context, u *url.URL, s S) (t T, err error) {
-	// D6: the registry instruments itself, because "which adapter did this
-	// process resolve" is an operational question. end() owns the duration, so
-	// no caller can pass the wrong start time (D15).
-	ctx, end := r.instr.Start(ctx, "resolve",
-		semconv.RegistryName(r.name), semconv.AdapterScheme(u.Scheme))
+func resolve(ctx context.Context, u *url.URL, s *settings) (db driver.DB, err error) {
+	ctx, end := s.instr.Start(ctx, "resolve", semconv.AdapterScheme(u.Scheme))
 	defer func() { end(err) }()
 
-	o, ok := r.lookup(u.Scheme)
+	driversMu.RLock()
+	o, ok := drivers[u.Scheme]
+	driversMu.RUnlock()
 	if !ok {
-		return t, &UnknownSchemeError{Registry: r.name, Scheme: u.Scheme, Known: r.Schemes()}
+		return nil, &UnknownSchemeError{Module: "goga/database", Scheme: u.Scheme, Known: Schemes()}
 	}
 	return o.Open(ctx, u, s)
 }
-
-func (r *Registry[T, S]) Schemes() []string
-func (r *Registry[T, S]) Has(scheme string) bool
 ```
+
+Two keys, two shapes, and neither module knows the other exists — which is the
+simplification the removal buys (D8). `database` and `client` are **URL-keyed**:
+they `url.Parse` the caller's connection string and use its scheme.
+`serve`, `telemetry`, `mcp` and `components` are **name-keyed**: their tables are
+`map[string]Opener` over a plain adapter name (`"gin"`, `"otlp"`, `"stdio"`,
+`"local"`) with no URL anywhere. The earlier revision's
+`Routers.Open(ctx, "router://"+name)` — which resolved the scheme `router` and
+could never have found the gin adapter — is not expressible here.
 
 ### `goga/telemetry` — the module every other module depends on (D6)
 
 ```go
 package telemetry
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type settings struct{ /* unexported (D5); Settings below is the read-only view */ }
+type Option = goga.Option[settings]
 
 func WithServiceName(name string) Option
 func WithServiceVersion(v string) Option
@@ -912,14 +1095,29 @@ func WithPrometheus(enabled bool) Option     // reader attached by default
 func WithShutdownTimeout(d time.Duration) Option
 func WithPropagators(names ...string) Option // delegates to contrib/autoprop
 
-// Exporter registries (D8). The standard names delegate to
-// contrib/exporters/autoexport, which mcp-anything already depends on; house
-// names are additive.
-var (
-	TraceExporters  = registry.New[sdktrace.SpanExporter, Settings]("goga/telemetry/trace", For("telemetry"))
-	MetricExporters = registry.New[sdkmetric.Exporter, Settings]("goga/telemetry/metric", For("telemetry"))
-	LogExporters    = registry.New[sdklog.Exporter, Settings]("goga/telemetry/log", For("telemetry"))
-)
+// Exporter tables — this module's own, name-keyed (D8). The standard names
+// delegate to contrib/exporters/autoexport, which mcp-anything already depends
+// on; house names are additive. Each Register panics on a duplicate name, and
+// there is no exported lookup.
+//
+// With the shared registry gone, this is also where an import cycle went: the
+// tables now live in the package whose Instrumentation they use.
+func RegisterTraceExporter(name string, o TraceExporterOpener)
+func RegisterMetricExporter(name string, o MetricExporterOpener)
+func RegisterLogExporter(name string, o LogExporterOpener)
+
+func TraceExporters() []string  // registered names, for diagnostics
+func MetricExporters() []string
+func LogExporters() []string
+
+// No settings parameter: an exporter reads its endpoint, headers and protocol
+// from the environment through autoexport, and the resource is built by Setup
+// and attached to the provider, not to the exporter. There is no
+// telemetry.Settings, per D5's rule that a module passes settings to an opener
+// only where an adapter reads them.
+type TraceExporterOpener interface {
+	Open(ctx context.Context) (sdktrace.SpanExporter, error)
+}
 
 // Telemetry is returned as well as installed globally, because epos needs a
 // metrics-only subset and go-service passes providers into libraries.
@@ -974,9 +1172,10 @@ type Instrumentation struct {
 
 // For returns the instrumentation for a module. It resolves through OTel's
 // GLOBAL delegating providers (otel.Tracer / otel.Meter), never by snapshotting
-// a concrete provider — every adapter registry is a package-level var built
-// before Setup runs, and a snapshot would leave those registries permanently
-// no-op while every test passed (D6). It never fails: before Setup the globals
+// a concrete provider — every module's adapter table is a package-level var and
+// adapters self-register from init(), both before Setup runs, and a snapshot
+// would leave those paths permanently no-op while every test passed (D6). It
+// never fails: before Setup the globals
 // are no-ops, so a library like gopgql can call goga/database without
 // configuring telemetry, and telemetry appears the moment the consuming binary
 // calls Setup.
@@ -1020,8 +1219,8 @@ var Set = wire.NewSet(Setup, wire.Bind(...))
 ```go
 package config
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type settings struct{ /* unexported, unnameable outside this package (D5) */ }
+type Option = goga.Option[settings]
 
 func WithDefaults(m map[string]any) Option
 func WithFile(path string) Option          // absent file is not an error
@@ -1089,8 +1288,8 @@ var Set = wire.NewSet(...)
 ```go
 package cli
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type settings struct{ /* unexported, unnameable outside this package (D5) */ }
+type Option = goga.Option[settings]
 
 func WithName(name string) Option
 func WithVersion(v string) Option
@@ -1153,6 +1352,27 @@ type Rows interface {
 	Err() error
 	Close()
 }
+
+// Settings is the read-only view of goga/database's resolved settings that an
+// adapter reads. It lives here because an adapter imports this package anyway
+// for driver.DB, and because it is the whole reason database's own settings
+// struct can stay unexported (D5): the adapter names this interface, never the
+// struct. Accessors only — there is nothing here that populates one, and no goga
+// entry point accepts one.
+type Settings interface {
+	MaxConns() int
+	MinConns() int
+	ConnMaxLifetime() time.Duration
+	QueryTimeout() time.Duration
+	SQLCommenter() bool
+}
+
+// Opener is what an adapter implements — declared by the module it serves, not
+// by a shared generic registry (D8), which is what lets Settings be an interface
+// of this module's choosing.
+type Opener interface {
+	Open(ctx context.Context, u *url.URL, s Settings) (DB, error)
+}
 ```
 
 **Does this split admit a second adapter?** Every method above is expressible on
@@ -1167,8 +1387,8 @@ there and returns `ErrNoSQLDB` for any future adapter that has no such handle.
 ```go
 package database
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type settings struct{ /* unexported, unnameable outside this package (D5) */ }
+type Option = goga.Option[settings]
 
 // URL is a named type so wire's type-keyed graph can supply it (D9).
 type URL string
@@ -1180,11 +1400,12 @@ func WithQueryTimeout(d time.Duration) Option
 func WithSQLCommenter(on bool) Option // injects trace context into SQL comments
 func WithTelemetry(i *telemetry.Instrumentation) Option // replaces; never disables
 
-// Drivers is exported so a project can register an adapter goga does not ship.
-// Calling Drivers.Open directly yields a raw driver.DB, which is the one path
-// around D6's instrumentation — it exists for adapter authors, and goga/lint's
-// gogatelemetry reports it in project code (D5).
-var Drivers = registry.New[driver.DB, Settings]("goga/database", telemetry.For("database"))
+// Register and Schemes are this module's adapter table, shown in full above
+// (D8). Register exists so a project can add an adapter goga does not ship;
+// there is deliberately no exported lookup, so no goga entry point hands back a
+// raw driver.DB.
+func Register(scheme string, o driver.Opener)
+func Schemes() []string
 
 // DB is the portable type. Its fields are unexported and Open is its only
 // exported constructor, so no exported goga entry point produces an
@@ -1193,11 +1414,11 @@ var Drivers = registry.New[driver.DB, Settings]("goga/database", telemetry.For("
 type DB struct {
 	drv   driver.DB
 	instr *telemetry.Instrumentation
-	s     Settings
+	s     *settings
 }
 
-// Open resolves the URL scheme through Drivers. Adapters are selected by blank
-// import, as in gocloud.dev:
+// Open resolves the URL's scheme against this module's table. Adapters are
+// selected by blank import, as in gocloud.dev:
 //
 //	import _ "github.com/gaarutyunov/goga/database/pgxdb"
 //	db, err := database.Open(ctx, cfg.Value.DatabaseURL, database.WithMaxConns(20))
@@ -1206,11 +1427,17 @@ func Open(ctx context.Context, u URL, opts ...Option) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	drv, err := Drivers.Open(ctx, string(u), s) // adapter returns driver.DB, never *DB
+	parsed, err := url.Parse(string(u))
+	if err != nil {
+		return nil, fmt.Errorf("goga/database: parsing %s: %w", redact(u), err)
+	}
+	// resolve passes s — the unexported struct — where the adapter sees only
+	// driver.Settings, the accessor interface it satisfies (D5).
+	drv, err := resolve(ctx, parsed, &s) // adapter returns driver.DB, never *DB
 	if err != nil {
 		return nil, fmt.Errorf("goga/database: opening %s: %w", redact(u), err)
 	}
-	return &DB{drv: drv, instr: s.instr, s: s}, nil
+	return &DB{drv: drv, instr: s.instr, s: &s}, nil
 }
 
 // Query returns a STREAMING result, so neither the timeout nor the span may be
@@ -1285,17 +1512,18 @@ var Set = wire.NewSet(openWithCleanup)
 package pgxdb // goga/database/pgxdb
 
 func init() {
-	database.Drivers.Register("postgres", opener{})
-	database.Drivers.Register("pgx", opener{})
+	database.Register("postgres", opener{})
+	database.Register("pgx", opener{})
 }
 
 type opener struct{}
 
-// database.Settings is named here, which is exactly why it is exported rather
-// than unexported (D5) — an adapter in its own package cannot satisfy
-// registry.Opener otherwise. Its fields remain unreachable; MaxConns() is an
-// accessor.
-func (opener) Open(ctx context.Context, u *url.URL, s database.Settings) (driver.DB, error) {
+// The type named here is driver.Settings — an INTERFACE of accessors, not the
+// module's settings struct, which stays unexported and unnameable from this
+// package (D5). That is what the removal of the shared registry bought: the
+// opener is declared by goga/database, so what it passes is that module's
+// choice rather than a type parameter this package has to spell.
+func (opener) Open(ctx context.Context, u *url.URL, s driver.Settings) (driver.DB, error) {
 	cfg, err := pgxpool.ParseConfig(u.String())
 	if err != nil {
 		return nil, fmt.Errorf("goga/database/pgxdb: parsing config: %w", err)
@@ -1342,8 +1570,8 @@ func New(db *database.DB) (DBTX, error)
 ```go
 package migrate
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type settings struct{ /* unexported, unnameable outside this package (D5) */ }
+type Option = goga.Option[settings]
 
 func WithFS(fsys fs.FS) Option              // embedded is the house default
 func WithDir(dir string) Option
@@ -1410,8 +1638,8 @@ var Set = wire.NewSet(New)
 ```go
 package serve
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type settings struct{ /* unexported, unnameable outside this package (D5) */ }
+type Option = goga.Option[settings]
 
 // Addr is a named type so wire can supply it unambiguously (D9).
 type Addr string
@@ -1449,9 +1677,22 @@ type Router interface {
 	Unwrap() any // *gin.Engine, *chi.Mux, *http.ServeMux
 }
 
-// Routers is name-keyed, so it is resolved with OpenNamed rather than by
-// synthesising a URL (D8).
-var Routers = registry.New[Router, Settings]("goga/serve/router", telemetry.For("serve"))
+// RouterOpener is what a router adapter implements. Declared here, by the module
+// it serves (D8), and taking NO settings: gin, chi and mux each build an engine
+// and read nothing the caller configured — serve.New applies the middleware, the
+// handlers and the timeouts itself. There is no serve.Settings, because an
+// opener parameter no adapter reads is an abstraction with no user (D5). A
+// shared registry would have forced one signature on every module; nothing does.
+type RouterOpener interface {
+	Open(ctx context.Context) (Router, error)
+}
+
+// RegisterRouter adds a router adapter under a plain NAME — "gin", "chi", "mux"
+// — because there is no URL here to carry a scheme. This module's table is
+// name-keyed; goga/database's is URL-keyed; neither knows about the other (D8).
+// Panics on a duplicate name; no exported lookup.
+func RegisterRouter(name string, o RouterOpener)
+func RouterNames() []string
 
 // Server is the portable type; app and ops are deliberately different muxes.
 type Server struct {
@@ -1467,10 +1708,11 @@ type Server struct {
 func New(ctx context.Context, opts ...Option) (*Server, error) {
 	s, err := goga.Apply(defaults(), opts...)
 	...
-	// OpenNamed, not Open: "gin" is a name, not a URL scheme. An earlier
-	// revision passed "router://"+s.router, which resolves the scheme "router"
-	// and could never have found the gin adapter (D8).
-	app, err := Routers.OpenNamed(ctx, s.router, s)
+	// A plain name lookup: "gin" is a name, not a URL scheme. An earlier
+	// revision passed "router://"+s.router to a shared registry, which resolves
+	// the scheme "router" and could never have found the gin adapter; with a
+	// name-keyed table of this module's own there is no URL to get wrong (D8).
+	app, err := resolveRouter(ctx, s.router)
 	...
 	app.Use(s.middleware...) // before any Handle — the Router contract requires it
 	for _, h := range s.handlers {
@@ -1529,15 +1771,17 @@ var Set = wire.NewSet(New)
 ```go
 package ginrouter // goga/serve/ginrouter — sysgo's current router; the owner's target for skill-test
 
-func init() { serve.Routers.Register("gin", registry.OpenerFunc[serve.Router, serve.Settings](open)) }
+func init() { serve.RegisterRouter("gin", opener{}) }
 
-// serve.Settings, again exported for exactly the reason database.Settings is:
-// this package cannot name an unexported type from serve (D5).
+type opener struct{}
 
+// No settings parameter: this adapter reads nothing the caller configured, and
+// serve's settings struct is unexported and unnameable here anyway (D5).
+//
 // The adapter holds no telemetry: serve.Server wraps whatever Router it gets in
 // otelhttp exactly once, so gin, chi and mux are instrumented identically and no
 // adapter author can forget (D6).
-func open(ctx context.Context, u *url.URL, s serve.Settings) (serve.Router, error) {
+func (opener) Open(ctx context.Context) (serve.Router, error) {
 	gin.SetMode(gin.ReleaseMode)
 	e := gin.New()
 	e.Use(gin.Recovery()) // gin's own logger is omitted: slog is the house logger
@@ -1570,8 +1814,8 @@ project pays for no router dependency it did not ask for.
 ```go
 package client
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type settings struct{ /* unexported, unnameable outside this package (D5) */ }
+type Option = goga.Option[settings]
 
 func WithBaseURL(u string) Option
 func WithTimeout(d time.Duration) Option
@@ -1603,8 +1847,8 @@ var Set = wire.NewSet(New)
 ```go
 package mcp
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type settings struct{ /* unexported, unnameable outside this package (D5) */ }
+type Option = goga.Option[settings]
 
 func WithName(name string) Option
 func WithVersion(v string) Option
@@ -1614,15 +1858,29 @@ func WithToolTimeout(d time.Duration) Option
 func WithAuthenticator(a Authenticator) Option
 func WithTelemetry(i *telemetry.Instrumentation) Option
 
-// Name-keyed, so resolved with OpenNamed (D8).
-var Transports = registry.New[Transport, Settings]("goga/mcp/transport", telemetry.For("mcp"))
+// This module's own name-keyed transport table (D8): "stdio", "http", "sse".
+//
+// Settings is declared beside Transport, the port these adapters implement, and
+// carries only what a transport actually reads — the HTTP and SSE transports
+// need an endpoint, stdio needs nothing. mcp's settings struct stays unexported
+// and implements this (D5).
+type Settings interface {
+	Endpoint() string
+}
+
+type TransportOpener interface {
+	Open(ctx context.Context, s Settings) (Transport, error)
+}
+
+func RegisterTransport(name string, o TransportOpener)
+func TransportNames() []string
 
 // Server is the portable type. srv is unexported and New is its only
 // constructor, so a tool cannot be registered on an uninstrumented server.
 type Server struct {
 	srv   *sdkmcp.Server
 	instr *telemetry.Instrumentation
-	s     Settings // resolved settings; AddTool reads the tool timeout from it
+	s     *settings // resolved settings; AddTool reads the tool timeout from it
 }
 
 func New(opts ...Option) (*Server, error) {
@@ -1731,8 +1989,8 @@ module.
 ```go
 package grpc
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type settings struct{ /* unexported, unnameable outside this package (D5) */ }
+type Option = goga.Option[settings]
 
 func WithAddr(addr string) Option
 func WithReflection(on bool) Option        // on by default; grpcurl against any service
@@ -1765,7 +2023,7 @@ func NewClient(target string, opts ...DialOption) (*grpc.ClientConn, error)
 var Set = wire.NewSet(New)
 ```
 
-### `goga/components` — Service Weaver behind a deployer registry (D12)
+### `goga/components` — Service Weaver behind a deployer table (D12)
 
 ```go
 package components
@@ -1802,11 +2060,21 @@ type Deployer interface {
 	Unwrap() any
 }
 
-// Name-keyed, so resolved with OpenNamed (D8).
-var Deployers = registry.New[Deployer, Settings]("goga/components", telemetry.For("components"))
+// This module's own name-keyed deployer table (D8): "local", "weaver", "k8s".
+// Settings is the accessor interface a deployer adapter reads.
+type Settings interface {
+	ConfigPath() string
+}
 
-type Settings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type Option = goga.Option[Settings]
+type DeployerOpener interface {
+	Open(ctx context.Context, s Settings) (Deployer, error)
+}
+
+func RegisterDeployer(name string, o DeployerOpener)
+func DeployerNames() []string
+
+type settings struct{ /* unexported, unnameable outside this package (D5) */ }
+type Option = goga.Option[settings]
 
 func WithDeployer(name string) Option // "local" (default) | "weaver" | "k8s"
 func WithConfig(path string) Option   // weaver.toml for the weaver deployer
@@ -1830,8 +2098,8 @@ package gogatest
 
 // Fixtures take testing.TB, not *testing.T, so a benchmark or a shared helper
 // can use them.
-type PostgresSettings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type PostgresOption = goga.Option[PostgresSettings]
+type postgresSettings struct{ /* unexported, per D5 */ }
+type PostgresOption = goga.Option[postgresSettings]
 
 func WithMigrations(fsys fs.FS) PostgresOption
 func WithSeed(fsys fs.FS) PostgresOption         // always after migrations, by construction
@@ -1866,8 +2134,8 @@ func Telemetry(t testing.TB, opts ...TelemetryOption) *RecordedTelemetry
 func (r *RecordedTelemetry) Spans() []sdktrace.ReadOnlySpan
 func (r *RecordedTelemetry) RequireSpan(t testing.TB, name string) sdktrace.ReadOnlySpan
 
-type FeatureSettings struct{ /* opaque: unexported fields, accessors only (D5) */ }
-type FeatureOption = goga.Option[FeatureSettings]
+type featureSettings struct{ /* unexported, per D5 */ }
+type FeatureOption = goga.Option[featureSettings]
 
 func WithFeaturePaths(paths ...string) FeatureOption
 func WithTags(expr string) FeatureOption          // default excludes @wip
@@ -1907,7 +2175,7 @@ const (
 
 // goga-specific attributes exist only where no official convention does.
 func OperationName(v string) attribute.KeyValue     // goga.operation
-func RegistryName(v string) attribute.KeyValue      // goga.registry.name
+func ModuleName(v string) attribute.KeyValue        // goga.module
 func AdapterScheme(v string) attribute.KeyValue     // goga.adapter.scheme
 func MigrationVersion(v int64) attribute.KeyValue   // goga.migration.version
 func MigrationName(v string) attribute.KeyValue     // goga.migration.name
@@ -2016,8 +2284,9 @@ is no "not enforced" column, by decision.
 
 | Convention | Mechanism | Kind |
 |---|---|---|
-| Variadic options, no param structs | every goga entry point takes `...Option` and none takes a `Settings`; `Settings` has no exported field and no exported constructor; `goga/lint` `gogaparamstruct` for project code | compile + lint |
-| Every module with runtime operations has telemetry | portable types have unexported fields and no exported constructor; no `WithoutTelemetry`; `TestEveryModuleIsInstrumented` asserts the instrumented set is exactly the module list minus `{semconv, lint, di}` | compile + test |
+| Variadic options, no param structs | the settings struct is **unexported**, so no other package can name it; `Settings` is an accessor interface with no way to produce one goga accepts; every goga entry point takes `...Option`; `goga/lint` `gogaparamstruct` for project code | compile + lint |
+| Every module with runtime operations has telemetry | portable types have unexported fields and no exported constructor; no module exports an adapter lookup, so there is no goga call returning a raw driver type; no `WithoutTelemetry`; `TestEveryModuleIsInstrumented` asserts the instrumented set is exactly the module list minus `{semconv, lint, di}` | compile + test |
+| Delivery is one package per milestone, gated on adoption | `tasks.md` is milestone-ordered and each milestone names its adopter; a milestone closes on a merged adoption PR, not on a green build | process (D16) |
 | DI is wire | `app.App` fields unexported; `go generate` + `go-generate-check`; `goga/lint` `gogawire` | merge + lint |
 | A streaming result outlives the call that returned it | `Rows` owns the cancel and the span; `Query` has no `defer cancel()` | compile (API shape) |
 | One signal handler per process | only `cli.App.Run` calls `signal.NotifyContext`; `serve`/`mcp`/`grpc` `Run` take a ctx | compile (API shape) |
@@ -2036,45 +2305,50 @@ is no "not enforced" column, by decision.
 
 ## Risks / Trade-offs
 
-- **[Scope is now the full tool list, which is a lot of surface]** — this is the
-  owner's decision and the sequencing in `tasks.md` is what manages it: modules
-  with current consumers first (config, telemetry, database, migrate, mcp,
-  gogatest, CI), anticipated-consumer modules ship surface + config/CI first and
-  adapter bodies when the consumer lands.
+- **[Scope is the full tool list, which is a lot of surface]** — this is the
+  owner's decision, and D16 is what manages it: one package per milestone, each
+  gated on a named project adopting it. A module whose consumer is anticipated
+  rather than current does not get a milestone slot until the consumer exists.
+- **[Milestones stretch delivery, and that is the point]** — fourteen gated
+  milestones is slower than one branch, and the owner has chosen it knowingly
+  (*"I will carefully review it"*). The cost that is not obvious: a module adopted
+  before its neighbours ships into a project without the rest of goga, so some
+  invariants land later than the module that names them — signal handling is the
+  worked example in D16. Each capability that spans milestones says so per
+  requirement.
 - **[Service Weaver's upstream is archived]** — mitigated by D12's deployer
-  registry, so replacing it is a driver swap. Still a live question: see below.
+  table, so replacing it is a driver swap. Still a live question: see below.
 - **[A wrapper hides upstream and must track its churn]** — mitigated by D2's
   rule that every wrapper exposes its underlying object, so the escape hatch is
   one call away. The riskiest is `goga/database`, whose driver interface has to
   stay narrow enough to be cheap and wide enough that pgx's `CopyFrom` and
   `SendBatch` are reachable — hence `Unwrap()` and `sqlcdb`'s `DBTX`.
-- **[The generic registry's second type parameter is unusual]** — `Registry[T,S]`
-  is more than gocloud's `URLMux` needs. It exists so adapters receive the
-  caller's options without a public parameter struct (D14). The cost is that
-  `S` appears in adapter signatures; the alternative was per-module registries,
-  which the owner ruled out. **And `S` appearing in adapter signatures is what
-  forces `Settings` to be exported** (D5) — the second type parameter and the
-  "settings are unnameable" enforcement story cannot both be had. Keeping the
-  parameter and opening the type is the trade this design makes, because the
-  owner asked for the generic registry explicitly and the alternative claim was
-  never compilable.
-- **[Two enforcement claims were weakened by this review, deliberately]** — the
-  earlier text said the type system made a parameter struct unconstructible and
-  made an uninstrumented goga object unreachable. Neither is literally true once
-  adapters live in their own packages and the registries are exported for
-  third-party adapters. What survives is stronger than a convention and weaker
-  than an impossibility: no goga entry point accepts a settings struct, no goga
-  constructor returns an uninstrumented portable object, and the two remaining
-  paths (a zero-value `Settings`, a direct `Drivers.Open`) are lint-reported.
-  Recording it rather than restating the stronger claim, because a claim that a
-  reader can disprove by writing four lines of Go costs more than it buys.
+- **[Five adapter tables instead of one generic registry]** — the cost of D8.
+  About thirty lines each of `map` + `RWMutex` + `Register` + lookup, and the
+  duplicate-registration panic written five times. Accepted on the owner's
+  instruction, and cheap at this size: the duplication is mechanical and visible,
+  and it collapses into `goga/registry` the day Go ships generic methods. The
+  risk worth watching is the five drifting — different panic messages, different
+  unknown-adapter errors — which is why the error text and the panic condition
+  are specified once in `goga-adapter-resolution` rather than per module.
+- **[Two enforcement claims: one restored, one still bounded]** — the previous
+  revision gave up both the claim that a parameter struct is unconstructible and
+  the claim that an uninstrumented goga object is unreachable. **The first is
+  restored** by D8: the settings struct is unexported again, so a caller cannot
+  name it, and no goga entry point accepts one. The second is nearly restored —
+  no module exports an adapter lookup any more, so goga hands back no raw driver
+  type — but it stays bounded rather than absolute, because a project that
+  registers its own adapter can call the opener it wrote itself. That path is
+  the project's own code, and `goga/lint`'s `gogatelemetry` reports it. Stated
+  at its real strength, because a claim a reader can disprove in four lines of Go
+  costs more than it buys.
 - **[`goga/components` is the least evidenced module in the design]** — no
   current consumer, an archived upstream, and the largest invented surface
   (`Component`, `Ref[T]`, `Deployer`, `Graph`, three adapters). It is in scope on
-  the owner's instruction and stays in scope; the mitigation is the sequencing in
-  `tasks.md` (interface plus `local` in v1) and the constraint that `Ref[T]`'s `T`
-  is an interface, so the local deployer cannot certify a shape the distributed
-  one will reject.
+  the owner's instruction and stays in scope, but under D16 it has **no milestone
+  slot until a consumer exists**, because the owner's own gate is a real
+  adoption. The constraint that `Ref[T]`'s `T` is an interface still stands, so
+  the local deployer cannot certify a shape the distributed one will reject.
 - **[Two span levels in the database module could double-count]** — the portable
   span is the logical operation and otelpgx's is the wire call. They nest, so
   latency is not double-counted, but the span count per query rises. Sampling
@@ -2096,36 +2370,29 @@ Answered by the review, recorded here so the trail is legible:
 
 - *Does the owner accept D4's narrowing?* **No** — D4 is reversed. gin, sqlc, buf
   and Service Weaver are in scope.
-- *Which project adopts goga first?* **gopgql.** It is the only project that
-  today has pgx, goose and the MCP SDK all three, all uninstrumented, plus the
-  5× duplicated godog bootstrap — so it exercises `database`, `migrate`, `mcp`
-  and `gogatest` at once, and D6 becomes visible rather than asserted.
+- *Which project adopts goga first?* **gopgql**, and it now adopts it one package
+  at a time (D16). It is the only project with pgx, goose and the MCP SDK all
+  three, all uninstrumented, plus the 5× duplicated godog bootstrap, so it is the
+  named adopter for `telemetry`, `database`, `migrate`, `mcp` and `gogatest`.
+
+- **Unconstructible settings versus the generic registry — closed by the owner.**
+  This design previously put the question to the owner: the two were not jointly
+  satisfiable in the shape chosen, and it recommended keeping an opaque exported
+  `Settings` while noting that literal unconstructibility would cost the registry.
+  **The owner chose to drop the registry** (D8), for an unrelated and better
+  reason — Go has no generic methods yet. The consequence is recorded in D5:
+  settings structs are unexported again, and the compile-time claim holds. The
+  question is closed; nothing here is waiting on an answer.
+
+- **Service Weaver's archived upstream — closed by D16.** The question was
+  whether to build the `weaver` deployer in v1 against an archived dependency.
+  Under the owner's milestone rule it does not arise: `goga/components` has no
+  adopting project, so it has no milestone, and the deployer is written when a
+  consumer for it exists. The interface is still designed (D12) so that whichever
+  deployer arrives first is an adapter and not a rewrite.
 
 Still open:
 
-- **Two of the owner's instructions pull against each other, and the design has
-  picked a side that the owner may want to re-pick.** *"Settings structs are
-  unexported so a caller cannot construct one"* and *"there should be a generic
-  registry implementation used for adapters"* are not jointly satisfiable in Go:
-  an adapter in `goga/database/pgxdb` has to name the settings type in its
-  `Opener` method signature, and an unexported type from `goga/database` is
-  unnameable there. D5 resolves it by exporting an **opaque** `Settings` (no
-  exported fields, no exported constructor, no goga entry point that accepts
-  one), which preserves the *behaviour* the owner asked for and gives up only the
-  claim that the compiler makes the alternative unspellable. The other two exits
-  are worse and are named so the choice is visible: put every adapter in its
-  module's own package (kills the optional-dependency property that blank imports
-  buy), or drop the settings type parameter and pass adapters an interface
-  (adds a second seam to keep in sync). **Recommendation: keep the opaque
-  exported `Settings`.** If the owner would rather have literal
-  unconstructibility, the generic registry has to go, and that is their call.
-
-- **Service Weaver's archived upstream.** D12 puts it behind a deployer so the
-  interface survives, but should the `weaver` deployer be *built* in v1 against
-  an archived dependency, or should v1 ship `local` + `k8s` and add `weaver` when
-  a consumer exists? The design is unaffected either way; only the task
-  sequencing is. Recommendation: build the interface and `local` in v1, and the
-  `weaver` deployer with its first consumer.
 - **The default home for a service's own non-adapter code** — the surviving half
   of the layout contradiction (D13), now live in merged guidance on `main` rather
   than pending in workspace#31. The widened scope settles adapter organisation

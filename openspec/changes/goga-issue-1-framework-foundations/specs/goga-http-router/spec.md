@@ -1,5 +1,11 @@
 ## ADDED Requirements
 
+**Milestone: M2 (`goga/serve`, with the `mux`, `gin` and `chi` adapters) — the
+owner's *"http with telemetry for gopgql and epos"*. Adopters: epos, then gopgql.
+The last requirement, *Generated server code mounts on any adapter*, is satisfied
+by the router interface here but is only exercised once generation lands at
+M12.**
+
 ### Requirement: The HTTP router is a replaceable adapter
 
 Routing SHALL be expressed through one framework interface with interchangeable
@@ -22,7 +28,9 @@ rewrite.
 
 #### Scenario: The full-featured routers are available as adapters
 - **WHEN** a project names one of the supported third-party routers
-- **THEN** that adapter is used, resolved through the framework's adapter registry
+- **THEN** that adapter is used, resolved through this module's own adapter table
+  by the plain name the project gave — there is no URL and no scheme in the
+  lookup
 
 #### Scenario: The interface stays narrow
 - **WHEN** a new router adapter is written

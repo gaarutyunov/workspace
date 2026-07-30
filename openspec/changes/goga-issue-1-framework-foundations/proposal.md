@@ -38,13 +38,21 @@ the house rules today.
   whether its consumer is **current** or **anticipated** (design D4).
 - **`goga` is a set of independent packages, not a framework object** (design
   D2): `config`, `telemetry`, `serve`, `client`, `database`, `migrate`, `mcp`,
-  `cli`, `grpc`, `components`, `semconv`, `registry`, `di`, `lint`, `gogatest`,
-  plus a thin `app` that composes them. The root `goga` package is a leaf holding
+  `cli`, `grpc`, `components`, `semconv`, `di`, `lint`, `gogatest`, plus a thin
+  `app` that composes them. The root `goga` package is a leaf holding
   only `Option` and `Apply`: every module imports it and the composition root
   imports every module, so those two cannot be the same package.
   Every wrapper **exposes its underlying object**, so a project that needs the
   raw `*koanf.Koanf`, the `*pgxpool.Pool` or the real SDK server is never
-  trapped.
+  trapped. Independence is also what makes the milestones below possible: a
+  package is the unit of delivery because it is the unit a project can adopt.
+- **Delivery is one package per milestone, gated on a real adoption** (design
+  D16), which is the owner's instruction: *"We shouldn't deliver everything at
+  once… Each milestone we will deliver one package. I will carefully review it.
+  We will migrate gopgql and some other project to it and then continue to the
+  next."* `tasks.md` is ordered by milestone, not by module, and each milestone
+  names the project that adopts it. A milestone closes when that adoption is
+  merged — not when the package builds.
 - **Every module that does anything at runtime has telemetry, with no
   exemptions** (design D6). This is the
   owner's rule — *"Every part of the framework must have telemetry"* — and it is
@@ -56,11 +64,17 @@ the house rules today.
   `lint` (analysers) and `di` (provider sets) have no operation to instrument,
   and a test asserts the instrumented set is exactly the rest.
 - **Variadic functional options everywhere; no parameter structs** (design D14).
-  Each module declares an **opaque** `Settings` — exported so an adapter in its
-  own package can name it in an `Opener` signature, with no exported field and no
-  exported constructor — plus an exported `Option` alias. No goga entry point
-  accepts a `Settings`, so options are the only form that does anything, and a
-  lint rule covers project code.
+  Each module declares an **unexported** `settings` struct — no other package can
+  name it, construct it or embed it — plus an exported `Option` alias over it. An
+  adapter in its own package reads what it needs through an exported **accessor
+  interface** (`driver.Settings`, `mcp.Settings`) declared beside the port it
+  implements — and only where an adapter reads anything at all: router and
+  exporter openers take none. Never through the struct. No
+  goga entry point accepts a settings value, so options are the only form that
+  does anything, and a lint rule covers project code. *The previous revision had
+  to export an opaque struct here; dropping the registry is what restored the
+  unexported form, and with it the claim that the compiler makes a parameter
+  struct unspellable.*
 - **A database module with multiple adapters, built on pgx** (design D7),
   following `gocloud.dev`'s portable-API/driver split: a portable `*database.DB`
   that owns the telemetry, a narrow `driver.DB` that adapters implement, and
@@ -68,10 +82,17 @@ the house rules today.
   `exaring/otelpgx` — already the house choice in mcp-anything — and a
   `database/sql`-backed `sqldb` adapter is the second, in v1, because a portable
   API with one implementation is an untested claim.
-- **One generic registry for all adapters** (design D8). `goga/registry` is a
-  single generic implementation instantiated per portable type — database
-  drivers, HTTP routers, telemetry exporters, MCP transports, component
-  deployers — instead of a hand-rolled map per module.
+- **No shared registry in v1; each module owns its adapter table** (design D8),
+  on the owner's instruction: *"we should skip the registry because go doesn't
+  ship generic methods yet."* Every adapter-bearing module keeps its own
+  ~30-line table — `Register` panicking on a duplicate, an unexported lookup,
+  `Schemes()` — which is exactly `gocloud.dev/blob`'s arrangement. The registry
+  returns when Go can express it: generic over the **port interface** an adapter
+  satisfies, storing structs and returning concrete types, per the owner's other
+  comment. Removing it settles three things at once — settings go back to
+  unexported, one of the two import cycles the Go review found disappears, and
+  the URL-versus-name lookup split that produced a real bug in an earlier
+  revision cannot recur.
 - **goose is the migration engine** (design D10), pinned as a house decision,
   with embedded migrations by default, a boot-time advisory lock so two replicas
   cannot both migrate, and `Pending()` as a readiness input.
@@ -101,43 +122,91 @@ the house rules today.
   There is no such list: if a convention cannot be enforced, that is a goga
   defect (design D5).
 
+## Delivery: the milestones
+
+Design D16 has the reasoning and the full table; this is the order and the
+adopter, because that is what the owner has to agree to. Every milestone is one
+package, and none starts until the previous one's adoption is merged.
+
+| # | package | adopter, then second |
+|---|---|---|
+| M0 | *(the repo itself — `go.mod`, layout, root `goga`, lint/release config, three actions)* | goga |
+| M1 | `goga/telemetry` (+ generated `goga/semconv`) | **gopgql**, then **epos** |
+| M2 | `goga/serve` (+ `muxrouter`, `ginrouter`, `chirouter`) | **epos**, then **gopgql** |
+| M3 | `goga/config` | **epos**, then **skill-test/go-service**, **mcp-anything** |
+| M4 | `goga/database` (+ `driver`, `pgxdb`, `sqldb`) | **gopgql**; **codiq** later |
+| M5 | `goga/migrate` | **gopgql** |
+| M6 | `goga/mcp` | **gopgql**, then **mcp-anything** |
+| M7 | `goga/gogatest` | **gopgql**, then **epos** |
+| M8 | `goga/cli` | **epos**, then **gopgql** |
+| M9 | `goga/di` + `goga/app` (+ `go-generate-check`) | **skill-test/go-service**, then **sysgo** |
+| M10 | `goga/client` | **skill-test/go-service**, then **mcp-anything** |
+| M11 | `goga/lint` (+ `go-vuln`, `go-release`, `pages-deploy`) | **gopgql**, then **epos** |
+| M12 | `goga/codegen` templates + `goga/grpc` | **skill-test/go-service**; **codiq** for sqlc/buf |
+| M13 | the skill | every adopting project |
+| — | `goga/components` | **no consumer today** — does not start until there is one |
+| — | `goga/registry` | deferred until Go ships generic methods |
+
+Telemetry, HTTP, config and postgres are in the owner's own order, with the
+owner's own adopters. The rest follow the survey's consumer evidence.
+
+**The Go spec review reached this independently, before the owner said it.** It
+recommended approving the spec but not building it as one unit, because *seven of
+the fifteen module surfaces have no consumer that can validate them* while it
+found five defects — three compile-level, two runtime-level — in the eight that
+do, which are the surfaces that had the most design attention. This proposal
+records the agreement rather than claiming the idea; where they differ the
+owner's is finer, one package rather than one eight-package slice.
+
 ## Capabilities
 
 ### New Capabilities
 
-- `goga-api-conventions`: the spec-wide invariants — variadic functional options
-  with no parameter structs, telemetry in every module with no exemptions, and an
-  escape hatch to the underlying object from every wrapper.
-- `goga-adapter-registry`: one generic registry implementation used by every
-  adapter-bearing module.
-- `goga-config`: configuration loading with an explicit, documented precedence,
-  returning both a typed struct and the raw koanf.
-- `goga-observability`: telemetry and logging wired once, plus the per-module
-  instrumentation handle that makes the telemetry invariant checkable.
-- `goga-service-lifecycle`: the cobra command-line entry point, HTTP server and
-  client construction, signal handling, graceful shutdown, and the probe/metrics
-  endpoints kept **off** the traced router.
-- `goga-http-router`: the router seam, so the standard library, gin and chi are
-  interchangeable adapters and instrumentation is attached once, above them.
-- `goga-database`: the portable database API with pluggable adapters, pgx as the
-  PostgreSQL adapter, and the `database/sql` bridge the migration engine needs.
-- `goga-migrations`: goose as the house migration engine, with embedded
+Each capability names the milestone that delivers it, at the top of its delta
+spec. Where a capability spans milestones — service lifecycle, code generation,
+CI actions, the spec-wide conventions — each requirement names its own.
+
+- `goga-api-conventions` *(spec-wide; each requirement lands with the first
+  module that has it)*: variadic functional options with no parameter structs,
+  telemetry in every module with no exemptions, and an escape hatch to the
+  underlying object from every wrapper.
+- `goga-adapter-resolution` *(with each adapter-bearing module, from M2)*: how a
+  module selects an adapter — self-registration, one duplicate rule, one
+  unknown-adapter error, optional dependencies, instrumented resolution — now
+  that each module owns its own table rather than sharing a generic registry.
+- `goga-config` *(M3)*: configuration loading with an explicit, documented
+  precedence, returning both a typed struct and the raw koanf.
+- `goga-observability` *(M1, and one requirement at M2)*: telemetry and logging
+  wired once, plus the per-module instrumentation handle that makes the telemetry
+  invariant checkable.
+- `goga-service-lifecycle` *(M2, M8, M9, M10)*: the cobra command-line entry
+  point, HTTP server and client construction, signal handling, graceful shutdown,
+  and the probe/metrics endpoints kept **off** the traced router.
+- `goga-http-router` *(M2)*: the router seam, so the standard library, gin and chi
+  are interchangeable adapters and instrumentation is attached once, above them.
+- `goga-database` *(M4)*: the portable database API with pluggable adapters, pgx
+  as the PostgreSQL adapter, and the `database/sql` bridge the migration engine
+  needs.
+- `goga-migrations` *(M5)*: goose as the house migration engine, with embedded
   migrations, a boot lock, and pending-migration reporting for readiness.
-- `goga-mcp`: the MCP server and client wrapper, with every tool call, resource
-  read and prompt render instrumented by the wrapper.
-- `goga-dependency-injection`: wire as the house DI mechanism, with exported
-  ProviderSets per module and a stated enforcement path.
-- `goga-code-generation`: the generation contract for oapi-codegen, sqlc, buf and
-  OTel Weaver — pinned tool directives, config templates, one `go:generate` entry
-  point, and the runtime seams the generated code compiles against.
-- `goga-components`: the component and deployment surface, with Service Weaver as
-  one deployer behind the registry.
-- `goga-testing`: testcontainers fixtures, an MCP test harness, recorded
+- `goga-mcp` *(M6)*: the MCP server and client wrapper, with every tool call,
+  resource read and prompt render instrumented by the wrapper.
+- `goga-dependency-injection` *(M9)*: wire as the house DI mechanism, with
+  exported ProviderSets per module and a stated enforcement path.
+- `goga-code-generation` *(M9 for wiring freshness, M12 for the rest)*: the
+  generation contract for oapi-codegen, sqlc, buf and OTel Weaver — pinned tool
+  directives, config templates, one `go:generate` entry point, and the runtime
+  seams the generated code compiles against.
+- `goga-components` *(no milestone yet — starts when a consumer exists)*: the
+  component and deployment surface, with Service Weaver as one deployer behind
+  the module's own deployer table.
+- `goga-testing` *(M7)*: testcontainers fixtures, an MCP test harness, recorded
   telemetry, and a godog harness, replacing the copy-paste.
-- `goga-ci-actions`: the composite actions, including the generation-freshness
-  check that **no repo has today** and that is the enforcement point for wire,
-  sqlc, buf, oapi-codegen, Weaver and mockgen alike.
-- `goga-skill`: the single skill — the routing table and the enforcement matrix.
+- `goga-ci-actions` *(M0, M9, M11)*: the composite actions, including the
+  generation-freshness check that **no repo has today** and that is the
+  enforcement point for wire, sqlc, buf, oapi-codegen, Weaver and mockgen alike.
+- `goga-skill` *(M13)*: the single skill — the routing table and the enforcement
+  matrix.
 
 ### Modified Capabilities
 
@@ -150,13 +219,18 @@ the house rules today.
 - **New repo content**: `goga` is currently empty. Everything here is additive.
 - **`.github/actions/*`** in the goga repo, referenced as
   `gaarutyunov/goga/.github/actions/<name>@v1`.
-- **Existing projects are not migrated by this change.** Adoption is per-project
-  and per-issue; goga must be adoptable one package at a time, which is the main
-  argument for D2.
-- **`gopgql` is the first adopter**, per the owner. It is the only project with
-  pgx, goose and the MCP SDK all three — all uninstrumented today — plus the 5×
-  duplicated godog bootstrap, so it exercises `database`, `migrate`, `mcp` and
-  `gogatest` at once.
+- **Existing projects are migrated one package at a time, and that migration is
+  the gate** (D16). Each milestone's adoption is its own PR in the adopting
+  project's repo, and the next milestone does not start until it is merged. This
+  is a change from the previous revision, which scheduled adoption as a final
+  section of work after fifteen modules were built.
+- **`gopgql` is the first adopter**, per the owner, and the most frequent one. It
+  is the only project with pgx, goose and the MCP SDK all three — all
+  uninstrumented today — plus the 5× duplicated godog bootstrap, so it is the
+  named adopter for `telemetry`, `database`, `migrate`, `mcp` and `gogatest`.
+- **`epos` is the second**, and the owner named it for HTTP and config. It has
+  metrics-only telemetry with no meter provider installed, calls `Execute()` with
+  no signal handling, and its flag callback inverts its own config precedence.
 - **`skill-test/go-service`** gains gin as its router adapter, per the owner. It
   serves on the standard library today — while **`sysgo` already requires gin
   directly** and generates gin handlers from the same code generator. Two
@@ -179,9 +253,12 @@ the house rules today.
   `github.com/goforj/wire`, already used by `skill-test/go-service`. Any project
   told to "add wire" must be told which one.
 - **`ServiceWeaver/weaver` is archived** (checked 2026-07-30). It stays in scope
-  behind `goga/components`' deployer registry, so replacing it is an adapter
-  swap; whether the `weaver` deployer is built in v1 is an open question in the
-  design.
+  behind `goga/components`' deployer table, so replacing it is an adapter swap.
+  Under D16 the module has no milestone until a project adopts it, which also
+  closes the question of whether to write a deployer against an archived
+  dependency with nobody to use it. **This is the one place the owner's two
+  instructions pull against each other** — Weaver is in scope by one and gate-less
+  by the other — and the resolution is a schedule, not a scope change.
 - **The workspace's own Go guidance contradicts itself on `main` right now**
   (design D13). Both skills are merged — the spf13 `go` skill landed in
   `37bd574` (workspace#31) — so this is a defect in guidance already in force,

@@ -1,5 +1,11 @@
 ## ADDED Requirements
 
+**Milestone: spec-wide. The option and settings shape is fixed at M0 with the
+root package and is binding on every module from M1 onward; the telemetry
+invariant becomes checkable at M1 and is re-checked by every later milestone; the
+escape-hatch and error requirements apply to each module as it lands. No
+requirement here waits for a milestone of its own.**
+
 ### Requirement: Construction is by variadic options, never by a parameter struct
 
 Every exported constructor and every exported entry point SHALL accept a variadic
@@ -11,17 +17,28 @@ for a caller to populate.
 - **THEN** it passes option functions, and the call site reads as a list of named
   choices rather than as a struct literal
 
-#### Scenario: A settings type cannot be populated by a caller
+#### Scenario: A settings type cannot be named by a caller
 - **WHEN** a caller looks for a settings type to fill in
-- **THEN** the type is visible — an adapter in its own package has to name it —
-  but it has no exported field and no exported constructor, and no entry point
-  accepts one, so the only populated instance in existence is the one the
-  framework builds from the caller's options
+- **THEN** there is none to find: the type is unexported, so no other package can
+  name it, construct it or embed it, and the only populated instance in existence
+  is the one the framework builds from the caller's options
 
-#### Scenario: An adapter receives the caller's settings without a public struct
-- **WHEN** an adapter in its own package implements the registry's opener
-- **THEN** it can name the settings type in its signature and read the values it
-  needs through accessors, and still cannot construct or mutate one
+#### Scenario: There is no exported struct in the option surface
+- **WHEN** any module's public surface is examined for a struct a caller could
+  populate and pass
+- **THEN** none exists, so the alternative to options is unspellable rather than
+  merely unaccepted
+
+#### Scenario: An adapter receives the caller's settings without naming the struct
+- **WHEN** an adapter in its own package implements its module's opener
+- **THEN** it names a read-only interface of accessors, reads the values it needs
+  through it, and can neither construct nor mutate the settings behind it —
+  which is what allows the struct itself to stay unexported
+
+#### Scenario: An option can be held and passed without naming what it mutates
+- **WHEN** a caller stores or forwards a module's options
+- **THEN** the option type is exported and usable on its own terms, even though
+  the type it mutates is not
 
 #### Scenario: An option validates its own input
 - **WHEN** an option is given a value outside its permitted range
@@ -71,9 +88,15 @@ to disable it.
   point can wrap that into the portable type — so no framework constructor
   returns an uninstrumented object
 
+#### Scenario: No framework entry point returns an adapter-level object
+- **WHEN** a caller looks for a way to ask the framework for an adapter rather
+  than the portable object that wraps it
+- **THEN** none exists: registration is exported so a project can supply its own
+  adapter, and lookup is not
+
 #### Scenario: The remaining route to an uninstrumented object is reported
-- **WHEN** code calls an adapter registry directly to obtain an adapter-level
-  object, which must stay possible so a project can register its own adapter
+- **WHEN** a project that registered its own adapter calls that adapter's own
+  constructor directly, which is its own code and outside the framework's reach
 - **THEN** the linter reports it, because the guidance states the strength of
   each mechanism honestly rather than claiming an impossibility
 

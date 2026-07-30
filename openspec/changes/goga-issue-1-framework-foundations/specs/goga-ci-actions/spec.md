@@ -1,5 +1,12 @@
 ## ADDED Requirements
 
+**Milestone: split, because the actions are not a package and each one lands with
+the milestone whose enforcement it carries. `setup-go`, `go-lint` and `go-test`
+at M0, for goga's own CI. `go-test-integration` at M7 with the test fixtures.
+`go-generate-check` at M9, where it is the enforcement for generated wiring.
+`go-vuln`, `go-release` and `pages-deploy` at M11, adopted by gopgql and epos —
+they have no Go dependency and ride with the lint plugin.**
+
 ### Requirement: Shared actions encapsulate how the tooling is launched
 
 The invocation of each tool SHALL be provided as a composite action, so projects

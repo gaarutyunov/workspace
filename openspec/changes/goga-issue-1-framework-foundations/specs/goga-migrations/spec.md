@@ -1,5 +1,10 @@
 ## ADDED Requirements
 
+**Milestone: M5 (`goga/migrate`). Adopter: gopgql, which already requires goose
+and ships its own migration package. It follows M4 because the migrator takes the
+portable database handle, and its readiness reporting plugs into the check shape
+M2 shipped.**
+
 ### Requirement: One migration engine for the house
 
 Schema migrations SHALL be applied through a single framework module wrapping one

@@ -1,5 +1,11 @@
 ## ADDED Requirements
 
+**Milestone: M6 (`goga/mcp`). Adopters: gopgql, which hand-rolls a server today,
+then mcp-anything, which hand-rolls another at a different SDK version. The
+scenario about sharing a port with an HTTP service depends on M2, and the one
+about shutdown on a termination signal is fully satisfied once M8 gives the
+process a single signal handler.**
+
 ### Requirement: MCP servers are built through the framework
 
 An MCP server SHALL be constructed through a framework module rather than against

@@ -1,5 +1,13 @@
 ## ADDED Requirements
 
+**Milestone: M9 (`goga/di` + `goga/app`, with the `go-generate-check` action).
+Adopters: skill-test/go-service, which already pins the maintained wire fork,
+then sysgo, whose templates are retargeted to emit framework calls. The two
+directories are one deliverable — the provider sets exist to build the
+composition root, and the root's unexported fields are what make a generated
+injector the only practical route — and the action is the enforcement rather than
+an extra.**
+
 ### Requirement: Compile-time dependency injection is the house mechanism
 
 Wiring SHALL be generated at compile time, and every framework module SHALL

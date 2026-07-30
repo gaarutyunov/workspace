@@ -1,5 +1,10 @@
 ## ADDED Requirements
 
+**Milestone: M4 (`goga/database`, with `driver`, `pgxdb` and `sqldb`) — the
+owner's *"postgres which could land to gopgql and codiq"*. Adopter: gopgql; codiq
+when it exists. The last scenario, *Generated query code runs on the portable
+handle*, depends on the sqlc seam and lands at M12 with the generators.**
+
 ### Requirement: Database access goes through a portable API with pluggable adapters
 
 Database access SHALL be provided as a portable API whose backend is a

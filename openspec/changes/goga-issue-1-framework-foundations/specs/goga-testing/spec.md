@@ -1,5 +1,10 @@
 ## ADDED Requirements
 
+**Milestone: M7 (`goga/gogatest`). Adopters: gopgql (godog bootstrap copied 5×),
+then epos (copied 8×). It follows the modules it provides fixtures for; the
+scenario about generated test doubles depends on the generation check that lands
+at M9.**
+
 ### Requirement: Container fixtures with a stated lifecycle
 
 Integration tests SHALL obtain real dependencies through a shared fixture whose

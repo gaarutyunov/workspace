@@ -1,9 +1,23 @@
 ## ADDED Requirements
 
+**Milestone: this capability spans four, and each requirement below names its
+own. M2 delivers the server and its graceful shutdown; M8 (`goga/cli`) delivers
+the single signal handler; M9 (`goga/app`) delivers the ordering across several
+surfaces; M10 (`goga/client`) delivers the outbound client. That split is a
+consequence of the owner's one-package-per-milestone rule, and it is stated
+rather than left to be discovered: between M2 and M8 an adopting project keeps
+its own signal handling.**
+
 ### Requirement: A server starts and stops on a signal, gracefully
 
 Running a service SHALL install signal handling and shut down in-flight work
 within a bounded grace period.
+
+*Delivered across M2, M8 and M9. The scenarios about draining, grace periods and
+timeouts are M2's — `goga/serve` takes a context and stops when it is cancelled.
+The scenarios about a signal-aware entry point and about exactly one handler
+existing are M8's, with `goga/cli`. The scenarios about several surfaces stopping
+together and about shutdown order are M9's, with `goga/app`.*
 
 #### Scenario: A termination signal starts shutdown
 - **WHEN** the process receives an interrupt or termination signal
@@ -63,6 +77,9 @@ within a bounded grace period.
 
 The HTTP client SHALL be constructed with retry behaviour and instrumentation
 rather than each project assembling its own.
+
+*Delivered at M10 (`goga/client`), adopters skill-test/go-service and
+mcp-anything.*
 
 #### Scenario: Retries are configurable, not hardcoded
 - **WHEN** retry counts and backoff are supplied by configuration
