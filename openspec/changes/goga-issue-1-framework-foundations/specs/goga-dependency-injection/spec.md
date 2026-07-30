@@ -30,6 +30,34 @@ publish the provider set needed to construct it.
 - **WHEN** a required provider is absent from the wiring
 - **THEN** the failure occurs while building, not on the first request
 
+### Requirement: Provider shapes match what the injection tool can consume
+
+Every framework provider SHALL have a shape the generator recognises, so that
+wiring a module does what its author intended.
+
+#### Scenario: Teardown actually runs
+- **WHEN** a module needs to release something at shutdown — flushing telemetry,
+  closing a pool
+- **THEN** its provider exposes that in the form the generator recognises as a
+  cleanup, so the generated wiring calls it; a shutdown function of any other
+  shape would be provided as an ordinary value that nothing ever calls
+
+#### Scenario: A module's options can be supplied through the wiring
+- **WHEN** a project wires a module and wants to configure it
+- **THEN** there is a stated way to supply that module's options through the
+  graph, and configuring one module does not require restating every other
+
+#### Scenario: Provider inputs are unambiguous
+- **WHEN** a provider takes a value such as an address or a connection string
+- **THEN** that value has its own named type, because the generator matches
+  providers by type and two plain strings in one graph are indistinguishable
+
+#### Scenario: A generic constructor is instantiated by the project
+- **WHEN** a framework constructor is generic over the project's own type, as
+  configuration loading is
+- **THEN** the guidance states that the project supplies the instantiation, so
+  this is a documented one-liner rather than a generation failure to debug
+
 ### Requirement: Generated wiring is enforced, not offered
 
 Hand-written wiring in place of generated wiring SHALL be detected and rejected.

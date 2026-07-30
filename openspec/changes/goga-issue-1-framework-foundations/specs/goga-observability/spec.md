@@ -64,8 +64,23 @@ module uses, so that instrumentation is uniform and its presence is checkable.
 
 #### Scenario: Every module's instrumentation is verified to exist
 - **WHEN** the framework's own test suite runs
-- **THEN** a test enumerates the modules and fails if any module has no
-  instrumentation handle
+- **THEN** a test compares the modules that obtained an instrumentation handle
+  against the module list, and fails both on a module that performs runtime
+  operations without one and on an addition to the set declared to have no
+  operations
+
+#### Scenario: A handle obtained before telemetry is configured still records
+- **WHEN** a module obtains its instrumentation handle during package
+  initialisation, as every adapter registry does, and telemetry is configured
+  later during startup
+- **THEN** operations recorded after configuration are exported — the handle
+  resolves through the global providers rather than capturing whichever
+  providers were installed when it was created
+
+#### Scenario: The duration belongs to the framework, not the call site
+- **WHEN** a module records an operation's duration
+- **THEN** the elapsed time is measured by the instrumentation handle itself, so
+  no call site can supply a wrong start time
 
 #### Scenario: Tests can assert on emitted telemetry
 - **WHEN** a module's tests exercise an operation

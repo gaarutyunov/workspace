@@ -38,25 +38,36 @@ the house rules today.
   whether its consumer is **current** or **anticipated** (design D4).
 - **`goga` is a set of independent packages, not a framework object** (design
   D2): `config`, `telemetry`, `serve`, `client`, `database`, `migrate`, `mcp`,
-  `cli`, `grpc`, `components`, `semconv`, `registry`, `di`, `lint`, `gogatest`.
+  `cli`, `grpc`, `components`, `semconv`, `registry`, `di`, `lint`, `gogatest`,
+  plus a thin `app` that composes them. The root `goga` package is a leaf holding
+  only `Option` and `Apply`: every module imports it and the composition root
+  imports every module, so those two cannot be the same package.
   Every wrapper **exposes its underlying object**, so a project that needs the
   raw `*koanf.Koanf`, the `*pgxpool.Pool` or the real SDK server is never
   trapped.
-- **Every module has telemetry, with no exemptions** (design D6). This is the
+- **Every module that does anything at runtime has telemetry, with no
+  exemptions** (design D6). This is the
   owner's rule — *"Every part of the framework must have telemetry"* — and it is
   an invariant of this spec, not a feature of some modules. It is enforced
   structurally: portable types have unexported fields and no exported
-  constructor, so no code path produces an uninstrumented goga object, and there
-  is no `WithoutTelemetry` option anywhere.
+  constructor, so no goga constructor returns an uninstrumented object, and there
+  is no `WithoutTelemetry` option anywhere. The invariant is stated over the
+  modules that perform a runtime operation; `semconv` (generated constants),
+  `lint` (analysers) and `di` (provider sets) have no operation to instrument,
+  and a test asserts the instrumented set is exactly the rest.
 - **Variadic functional options everywhere; no parameter structs** (design D14).
-  Each module declares an unexported `settings` struct and an exported
-  `Option` alias, so a caller *cannot construct* a parameter struct — the
-  convention is enforced by the type system rather than by review.
+  Each module declares an **opaque** `Settings` — exported so an adapter in its
+  own package can name it in an `Opener` signature, with no exported field and no
+  exported constructor — plus an exported `Option` alias. No goga entry point
+  accepts a `Settings`, so options are the only form that does anything, and a
+  lint rule covers project code.
 - **A database module with multiple adapters, built on pgx** (design D7),
   following `gocloud.dev`'s portable-API/driver split: a portable `*database.DB`
   that owns the telemetry, a narrow `driver.DB` that adapters implement, and
   URL-scheme selection by blank import. pgx is the first adapter, using
-  `exaring/otelpgx` — already the house choice in mcp-anything.
+  `exaring/otelpgx` — already the house choice in mcp-anything — and a
+  `database/sql`-backed `sqldb` adapter is the second, in v1, because a portable
+  API with one implementation is an untested claim.
 - **One generic registry for all adapters** (design D8). `goga/registry` is a
   single generic implementation instantiated per portable type — database
   drivers, HTTP routers, telemetry exporters, MCP transports, component
@@ -70,9 +81,12 @@ the house rules today.
   by the tool author.
 - **DI is wire, and it is enforced** (design D9). `github.com/goforj/wire` — the
   live fork; `google/wire` is archived. Every module exports a `ProviderSet`;
-  `goga.App`'s fields are unexported so the practical way to build one is a
+  `app.App`'s fields are unexported so the practical way to build one is a
   generated injector; and `go-generate-check` makes a stale `wire_gen.go` a red
-  build.
+  build. The design settles the four wire mechanics that otherwise bite on day
+  one — cleanups must be `func()`, wire cannot supply variadic options, providers
+  take named types rather than bare `string`, and a generic constructor is
+  instantiated by the project.
 - **Composite GitHub Actions**, the half nothing in the ecosystem ships:
   `setup-go`, `go-lint`, `go-test`, `go-test-integration`, **`go-generate-check`**,
   `go-vuln`, `go-release`, `pages-deploy`. Today golangci-lint alone is invoked

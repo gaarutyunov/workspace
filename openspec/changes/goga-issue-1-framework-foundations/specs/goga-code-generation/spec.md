@@ -61,6 +61,13 @@ compiles against, so the generated output inherits framework behaviour unmodifie
 - **THEN** it compiles against the framework's database handle and inherits its
   instrumentation, with no generated line edited
 
+#### Scenario: A seam constrained by its generator says which adapter it needs
+- **WHEN** a generator's runtime interface is expressed in one backend driver's
+  own types, so no other adapter could satisfy it
+- **THEN** the seam requires that adapter explicitly and fails with a
+  distinguishable error under any other, rather than being presented as working
+  on every adapter
+
 #### Scenario: Generated protocol services are instrumented
 - **WHEN** a service is generated from a protocol definition
 - **THEN** the framework's server construction instruments it on the same terms as

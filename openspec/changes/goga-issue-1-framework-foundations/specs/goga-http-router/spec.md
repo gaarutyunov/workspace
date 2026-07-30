@@ -38,6 +38,18 @@ rewrite.
 - **THEN** the adapter translates it to its router's own syntax, so one pattern
   works on every adapter
 
+#### Scenario: Middleware is registered before routes
+- **WHEN** middleware is registered after a route has already been registered
+- **THEN** the adapter rejects it as a programming error rather than accepting
+  it, because the underlying routers disagree about what it means — one applies
+  it to every route, one only to later routes, one refuses — and silent
+  divergence is the failure the seam exists to prevent
+
+#### Scenario: The same middleware covers the same routes on every adapter
+- **WHEN** an application registers middleware through the framework and then
+  registers its routes
+- **THEN** every route is covered, identically on each adapter
+
 ### Requirement: Instrumentation is attached above the router, exactly once
 
 Request instrumentation SHALL be applied by the server to whichever router is in

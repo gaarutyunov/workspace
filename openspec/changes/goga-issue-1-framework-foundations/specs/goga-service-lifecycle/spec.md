@@ -43,6 +43,22 @@ within a bounded grace period.
 - **THEN** a termination signal shuts them all down on the same terms, and the
   errors are reported together
 
+#### Scenario: One signal handler exists in the process
+- **WHEN** the framework's surfaces are started
+- **THEN** signal handling is installed once, by the command-line entry point,
+  and no individual surface installs its own — otherwise a process with two
+  surfaces has two shutdowns racing with no ordering between them
+
+#### Scenario: A surface stops because its context is cancelled
+- **WHEN** a runnable surface is started
+- **THEN** it takes a context and stops when that context is cancelled, which is
+  what lets one entry point sequence every surface
+
+#### Scenario: Shutdown order is defined
+- **WHEN** shutdown runs
+- **THEN** the surfaces drain first, then the resources they used are released,
+  and telemetry is flushed last, so the shutdown itself is observable
+
 ### Requirement: An outbound client carries retries and instrumentation
 
 The HTTP client SHALL be constructed with retry behaviour and instrumentation

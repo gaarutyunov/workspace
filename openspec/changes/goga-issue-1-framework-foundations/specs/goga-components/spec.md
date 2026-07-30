@@ -15,6 +15,18 @@ interface, and the deployment mechanism SHALL be a replaceable adapter.
 - **THEN** it holds a typed reference that the deployer resolves, rather than
   constructing the other component itself
 
+#### Scenario: A reference's type is one a distributed deployer can satisfy
+- **WHEN** a reference is declared to a concrete implementation type rather than
+  to an interface
+- **THEN** it is rejected where it is declared, because a distributing deployer
+  hands back a stand-in rather than the stored implementation — so the in-process
+  deployer must not accept a shape the distributed one will refuse
+
+#### Scenario: A mismatched resolution is an error, not a crash
+- **WHEN** a reference resolves to something that is not the referenced type
+- **THEN** the caller receives an error identifying the component and the types
+  involved
+
 #### Scenario: The same components run in one process
 - **WHEN** the in-process deployer is used
 - **THEN** the components run in a single process and references resolve to direct

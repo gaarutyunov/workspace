@@ -17,23 +17,24 @@ goga is empty — one commit, a one-line README.
 
 The two spec-wide invariants. Everything below depends on these landing first.
 
-- [ ] 2.1 `goga.Option[S]` and `goga.Apply` (design D14) — variadic options that can validate and fail at the call site.
-- [ ] 2.2 Every module declares an **unexported** `settings` struct plus an exported `type Option = goga.Option[settings]`, so a caller cannot construct a parameter struct. **No exported parameter struct anywhere in goga's public surface.**
+- [ ] 2.1 `goga.Option[S]` and `goga.Apply` (design D14) — variadic options that can validate and fail at the call site. The root `goga` package holds **only** these and imports nothing but the standard library; the composition root is `goga/app`, because every module imports the root and the composition root imports every module (design, pseudocode preamble).
+- [ ] 2.2 Every module declares an **opaque** `Settings` — exported (an adapter in its own package must name it in an `Opener` signature), every field unexported, accessors for what adapters read, no exported constructor — plus `type Option = goga.Option[Settings]`. **No goga entry point accepts a `Settings`; every one takes `...Option`** (design D5).
 - [ ] 2.3 Option naming: `With<Noun>` sets, `With<Noun>s(...T)` appends, `Without<Noun>` removes. **`WithoutTelemetry` does not exist** (design D6).
 - [ ] 2.4 Every wrapper exposes its underlying object — `Unwrap()` where the type is opaque, a named accessor otherwise (`Config.K`, `Server.HTTP()`, `Migrator.Provider()`, `mcp.Server.SDK()`).
-- [ ] 2.5 `TestEveryModuleIsInstrumented` — walks the module list, fails on a module with no registered `Instrumentation`. This is what makes the telemetry invariant checkable rather than asserted.
+- [ ] 2.5 `TestEveryModuleIsInstrumented` — asserts the set of modules that called `telemetry.For` is **exactly** the module list minus `{semconv, lint, di}`, the three that perform no runtime operation. Failing in both directions is the point: a new uninstrumented runtime module fails, and so does quietly adding a fourth name to the exclusion list (design D6).
+- [ ] 2.6 The cross-cutting Go conventions of design D15, stated once and applied in every module: named result parameters on any method that opens a span; `Instrumentation.Start` returns the closer, never a `(span, start)` pair; a method returning a streaming result never cancels that result's context; one signal handler per process, owned by `cli`; errors wrapped `fmt.Errorf("goga/<module>: <op>: %w", err)` with a typed error wherever a caller must branch.
 
 ## 3. `goga/registry` — the generic adapter registry
 
 One generic implementation used by every adapter-bearing module (design D8), not
 a hand-rolled map per module.
 
-- [ ] 3.1 `Registry[T, S]` with `Register`, `Open`, `Schemes`, `Has`; `Opener[T, S]` and `OpenerFunc[T, S]`.
+- [ ] 3.1 `Registry[T, S]` with `Register`, `Open`, `OpenNamed`, `Schemes`, `Has`; `Opener[T, S]` and `OpenerFunc[T, S]`. **`OpenNamed` is not optional**: routers, exporters, MCP transports and deployers are keyed by a plain name with no URL to carry it, and forcing them through a synthesised URL is what made an earlier revision's `"router://"+name` resolve the scheme `router` and never find the `gin` adapter.
 - [ ] 3.2 `Register` **panics** on a duplicate scheme, following `gocloud.dev`'s `URLMux` — a duplicate is a programming error in an `init()`, not a runtime condition.
 - [ ] 3.3 `UnknownSchemeError` names the registered schemes **and** hints at the missing blank import, so a typo is self-diagnosing.
-- [ ] 3.4 `Open` is instrumented (design D6) — "which adapter did this process resolve" is an operational question.
+- [ ] 3.4 `Open` is instrumented (design D6) — "which adapter did this process resolve" is an operational question. `registry` declares the one-method instrumentation interface it needs **at the point of use** rather than importing `goga/telemetry`, which declares its exporter registries with this package: the import must not go both ways.
 - [ ] 3.5 Adapters are selected by blank import and self-register from `init()`, as in `gocloud.dev`.
-- [ ] 3.6 Instantiated by: `database` (drivers), `serve` (routers), `telemetry` (exporters), `mcp` (transports), `components` (deployers), `client` (transports).
+- [ ] 3.6 Instantiated by: `database` (drivers, URL-keyed), `serve` (routers, name-keyed), `telemetry` (exporters, name-keyed), `mcp` (transports, name-keyed), `components` (deployers, name-keyed), `client` (transports, URL-keyed).
 
 ## 4. `goga/telemetry`
 
@@ -47,8 +48,9 @@ unobserved today, and so is every handler sysgo generates. That is the argument.
 - [ ] 4.4 Ordered shutdown flushing every provider, errors **joined** rather than first-wins.
 - [ ] 4.5 Prometheus reader attached by default; a push exporter additive. Propagators via `contrib/propagators/autoprop`.
 - [ ] 4.6 `otel.SetMeterProvider` is always called — epos omits it today and the wrapper must make that unreachable.
-- [ ] 4.7 **`Instrumentation`** — the per-module handle: `For(module)`, `Start`, `End` (span status + duration histogram + `error.type`), `Logger()`. This is the type every other module holds, and the mechanism behind design D6.
-- [ ] 4.8 `For` returns no-op providers when `Setup` was never called, so a *library* (gopgql) can use goga modules without configuring telemetry — while the call sites still exist, so telemetry appears the moment the consuming binary calls `Setup`.
+- [ ] 4.7 **`Instrumentation`** — the per-module handle: `For(module)`, `Start` returning `(ctx, func(error))` which records span status, the duration histogram and `error.type`, and `Logger()`. **`Start` returns the closer rather than a span the caller ends with a start time it captured itself** (design D15): the earlier three-argument `End(ctx, span, err, start)` was already mis-called in this design's own `migrate.Up`, recording zero duration for every migration.
+- [ ] 4.8 `For` resolves through OTel's **global delegating providers** (`otel.Tracer` / `otel.Meter`), never by snapshotting a concrete one, and creates its instruments lazily. Before `Setup` those globals are no-ops, so a *library* (gopgql) can use goga modules without configuring telemetry and telemetry appears the moment the consuming binary calls `Setup`. This is load-bearing: every adapter registry is a package-level `var` built **before** `Setup`, and a snapshot would leave exactly those registries permanently unobserved while every test passed.
+- [ ] 4.9 `Setup`'s cleanup return is `func()` — the only cleanup shape wire recognises (design D9) — calling `(*Telemetry).Shutdown(ctx)` under the configured timeout.
 
 ## 5. `goga/config`
 
@@ -77,11 +79,13 @@ no house guidance. Design D7 follows `gocloud.dev`'s portable-API/driver split.
 
 - [ ] 7.1 `driver.DB`, `driver.Tx`, `driver.Rows` — narrow, and carrying **no** telemetry, exactly as `gocloud.dev/blob` keeps the tracer on `Bucket` and not on `s3blob`.
 - [ ] 7.2 Portable `*database.DB` with unexported fields and `Open` as its **only** constructor — so no code path can produce an uninstrumented `*DB`. This is design D6 enforced structurally.
-- [ ] 7.3 Adapters return `driver.DB`, never `*DB`; `Drivers = registry.New[driver.DB, settings]("goga/database")`.
+- [ ] 7.3 Adapters return `driver.DB`, never `*DB`; `Drivers = registry.New[driver.DB, Settings]("goga/database", telemetry.For("database"))`. `Drivers` is exported so a project can register its own adapter, which is also the one path around design D6 — `goga/lint`'s `gogatelemetry` reports it in project code.
 - [ ] 7.4 Portable methods `Query`, `Exec`, `Tx`, `Close` — each a span (`goga.database.query`) plus duration and `error.type`, with the query timeout applied from settings.
+- [ ] 7.4a **`Query` returns a streaming result, so the portable `Rows` owns the cancel and the span** and closes both — once, idempotently — in `Rows.Close`. A `defer cancel()` in `Query` hands the caller rows that fail on the first `Next()` with `context canceled`, and a `defer end(err)` records a query duration that excludes the query (design D15). `Exec` is non-streaming and keeps the plain deferred shape; `Tx`'s timeout bounds the whole callback rather than each statement in it.
 - [ ] 7.5 `Tx` commits on nil, rolls back on error **and on panic**. Three projects would otherwise each write this.
 - [ ] 7.6 `SQLDB()` — the `database/sql` bridge, `stdlib.OpenDBFromPool` for pgx, so no caller learns that goose needs it.
 - [ ] 7.7 `Unwrap()` returning the native handle (`*pgxpool.Pool`), because pgx's `CopyFrom`, `Batch` and `LISTEN/NOTIFY` must stay reachable.
+- [ ] 7.7a **A second adapter in v1: `goga/database/sqldb`**, over any `database/sql` driver (`sqlite://` for tests, `mysql://`). ~100 lines, and the only way to learn whether `driver.DB` is portable before three projects depend on it — a portable API with one implementation is an untested claim. It also gives `gogatest` a container-free path.
 - [ ] 7.8 `pgxdb` registering `postgres://` and `pgx://`, using **`exaring/otelpgx`** for wire-level spans plus `otelpgx.RecordStats` — already the house choice in mcp-anything. Two span levels on purpose; check they nest rather than double-count (Risks).
 - [ ] 7.9 `WithSQLCommenter` injecting trace context into SQL comments.
 - [ ] 7.10 Read gopgql's `migrate/` package (`diff.go`, `fold.go`, `rename.go`) before finalising the surface — it is the most PostgreSQL-specific code in the house.
@@ -96,17 +100,17 @@ Pinned as the house migration engine (design D10). `gopgql` already requires
 - [ ] 8.3 **A boot-time PostgreSQL session advisory lock** with a timeout, so two replicas starting together do not both migrate.
 - [ ] 8.4 `Pending()` as a readiness input, wired into `serve`'s `/readyz`, so a service with a behind schema refuses traffic instead of erroring per request.
 - [ ] 8.5 Version table named once: `goga_db_version`.
-- [ ] 8.6 A span per migration carrying its version and name (design D6) — this is how the 40-second migration gets found.
+- [ ] 8.6 A span per migration carrying its version and name (design D6) — this is how the 40-second migration gets found. The per-migration closer holds that migration's own start time; passing `time.Now()` as the start, as an earlier revision did, records zero for every one of them.
 - [ ] 8.7 Errors name the version and file: `migration 20260714120000 (add_index.sql): ...`.
 - [ ] 8.8 `Provider()` escape hatch.
 
 ## 9. `goga/serve`, the router adapters, and `goga/client`
 
-- [ ] 9.1 `Server` with signal handling, bounded graceful shutdown, and header/read/write timeouts **set** rather than left unbounded.
+- [ ] 9.1 `Server` with bounded graceful shutdown on context cancellation, and header/read/write timeouts **set** rather than left unbounded. **It installs no signal handling of its own** — `cli.App.Run` owns that and `app.Run` sequences the surfaces under an errgroup (design D15), so a process serving HTTP and MCP drains once, in one order, instead of racing two handlers.
 - [ ] 9.2 **Probe and metrics endpoints registered on a mux outside the `otelhttp` wrapper** so they never pollute request traces, with **no option that can move them inside**. go-service discovered this by hand; encoding it is the point of the wrapper.
 - [ ] 9.3 `WithHealthCheck` / `WithReadinessCheck`, with `migrate.Pending` as a supported readiness input.
-- [ ] 9.4 `Router` interface — `http.Handler` + `Handle` + `Use` + `Unwrap` — narrow enough that oapi-codegen's generated server needs nothing more.
-- [ ] 9.5 `Routers` registry with three adapters: **`muxrouter`** (standard library, default, so no project pays for a router it did not ask for), **`chirouter`** (mcp-anything's current router), **`ginrouter`** (sysgo's current router, and the owner's target for skill-test).
+- [ ] 9.4 `Router` interface — `http.Handler` + `Handle` + `Use` + `Unwrap` — narrow enough that oapi-codegen's generated server needs nothing more. Two things are **normative**, not adapter detail: the pattern syntax is the framework's (`/users/{id}`) and each adapter translates it; and `Use` must be called before the first `Handle`, with adapters panicking otherwise. Unspecified, the same middleware silently covers all routes on mux, only later routes on gin, and panics on chi — three coverages from one program, which is the failure the seam exists to prevent.
+- [ ] 9.5 `Routers` registry, resolved by `OpenNamed`, with three adapters: **`muxrouter`** (standard library, default, so no project pays for a router it did not ask for), **`chirouter`** (mcp-anything's current router), **`ginrouter`** (sysgo's current router, and the owner's target for skill-test).
 - [ ] 9.6 `ginrouter` translates `{id}` patterns to gin's `:id`, uses `gin.Recovery()` and **omits `gin.Logger()`** — slog is the house logger.
 - [ ] 9.7 **No router adapter carries instrumentation**: `serve.New` wraps whatever `Router` it gets in `otelhttp` exactly once, so all three are instrumented identically and no adapter author can forget (design D6).
 - [ ] 9.8 `client.New` — retries with backoff over `retryablehttp` (already in go-service), `otelhttp` transport underneath for client spans, context propagation and client metrics, plus `gobreaker` (mcp-anything's choice). **Retries are logged, not silently absorbed.**
@@ -122,7 +126,7 @@ Two current consumers at two SDK versions, neither instrumented: gopgql
 - [ ] 10.2 `AddTool[In, Out]` as a free generic function (Go methods cannot carry type parameters) and **the only path to the wrapped SDK server** — which is what makes the instrumentation below unavoidable.
 - [ ] 10.3 A span per tool call, resource read and prompt render, with duration and `error.type`, added by the wrapper and **not** by the tool author (design D6).
 - [ ] 10.4 Tool failures returned in-band as `IsError` results, since that is what MCP specifies — not as protocol errors.
-- [ ] 10.5 A per-tool timeout from settings.
+- [ ] 10.5 A per-tool timeout from settings, and the wrapper **recovers a panicking tool** into an in-band error result. Deferred, so the span still ends and the timeout context is still released on the panic path. Without it one tool's nil dereference takes down a server serving every other tool — and the wrapper is the only place that can be fixed once for every project.
 - [ ] 10.6 Trace-context propagation: MCP defines no header, so the house convention is `traceparent` in the request `_meta`, extracted on the server and injected on the client. State it once here.
 - [ ] 10.7 `Transports` registry: `stdio` (default), streamable `http`, `sse`.
 - [ ] 10.8 `Handler()` so an MCP server mounts on a `goga/serve` `Server` — one port for HTTP and MCP, the sysgo case.
@@ -137,7 +141,8 @@ it's not enforced."* Design D9.
 - [ ] 11.1 Pin **`github.com/goforj/wire`**, not the archived `google/wire`, as a `tool` directive — `skill-test/go-service` already pins the fork at v1.2.0.
 - [ ] 11.2 Every module exports a `ProviderSet`; each module's set attaches its own telemetry provider, so importing a module cannot mean importing it uninstrumented.
 - [ ] 11.3 `di.Core`, `di.Service`, `di.Data`, `di.MCP` unions.
-- [ ] 11.4 `goga.App` with **unexported fields and no exported constructor**, so the practical way to build one is a generated injector.
+- [ ] 11.4 `app.App` with **unexported fields and no exported constructor**, so the practical way to build one is a generated injector.
+- [ ] 11.4a The four wire mechanics, settled so no project discovers them late (design D9): cleanups are `func()`, never `func(context.Context) error` — a shutdown of the wrong shape is a value wire provides and nothing calls, so a service silently stops flushing spans on exit; wire cannot supply variadic options, so module sets provide the constructor and `di.Defaults` binds an empty `[]Option` per module; providers take named types (`database.URL`, `serve.Addr`), never bare `string`, because wire's graph is keyed by type; and `config.Load[T]` is generic, so the project writes its own one-line instantiation.
 - [ ] 11.5 One `//go:generate go tool wire ./...` line in the project template; `wire_gen.go` committed.
 - [ ] 11.6 **`go-generate-check` is the enforcement**: a stale or missing `wire_gen.go` is a red build (task 16.5).
 - [ ] 11.7 `goga/lint`'s `gogawire` rule: a goga provider called outside a `//go:build wireinject` file.
@@ -150,7 +155,7 @@ aspirational. `mcp-anything` already depends on
 `golangci/plugin-module-register`, so a custom plugin module is proven in-house.
 
 - [ ] 12.1 A golangci-lint plugin module, wired into the shipped `.golangci.yml` template.
-- [ ] 12.2 `gogaparamstruct` — an exported constructor whose final parameter is a struct.
+- [ ] 12.2 `gogaparamstruct` — an exported constructor whose final **non-variadic** parameter is a struct (or pointer to one) declared in the same package with at least one exported field, and which takes no variadic option parameter. The looser "final parameter is a struct" fires on `New(t *testing.T)` and on `migrate.New(db *database.DB, …)`; a lint rule that cries wolf gets disabled.
 - [ ] 12.3 `gogawire` — goga providers constructed outside a `wireinject` injector.
 - [ ] 12.4 `gogatelemetry` — a type embedding a goga *driver* interface directly, bypassing the portable type.
 - [ ] 12.5 `gogasemconv` — string-literal attribute keys where a generated constant exists.
@@ -165,9 +170,9 @@ invocation, the config and the runtime seam — not the generator (design D11).
 
 - [ ] 13.1 One `//go:generate` entry point per project, so `go generate ./...` is the whole generation story and task 16.5 has a single thing to run.
 - [ ] 13.2 `sqlc.yaml` template — engine postgresql, `sql_package: pgx/v5`.
-- [ ] 13.3 **`goga/database/sqlcdb`** — satisfy sqlc's generated `DBTX` interface (`Exec`, `Query`, `QueryRow`, `CopyFrom`, `SendBatch`) from the portable `*database.DB`, so generated sqlc code inherits design D6's telemetry with no generated line changing. *(Anticipated consumer: codiq.)*
+- [ ] 13.3 **`goga/database/sqlcdb`** — satisfy sqlc's generated `DBTX` interface (`Exec`, `Query`, `QueryRow`, `CopyFrom`, `SendBatch`) from the portable `*database.DB`, so generated sqlc code inherits design D6's telemetry with no generated line changing. **`DBTX`'s signatures are pgx types, so this seam is pgx-only**: `New` returns `ErrNotPgx` for any other adapter rather than being documented as adapter-neutral. *(Anticipated consumer: codiq.)*
 - [ ] 13.4 `buf.yaml` + `buf.gen.yaml` templates — lint plus breaking-change detection against `main`, `protoc-gen-go` and `protoc-gen-go-grpc`. *(Anticipated consumer: codiq.)*
-- [ ] 13.5 **`goga/grpc`** — server and client constructors for buf-generated stubs with `otelgrpc` stats handlers, reflection and health service on by default, `Register(func(grpc.ServiceRegistrar))` so the generated output is untouched. gRPC gets the same treatment HTTP gets.
+- [ ] 13.5 **`goga/grpc`** — server and client constructors for buf-generated stubs with `otelgrpc` stats handlers, reflection and health service on by default, `Register(func(grpc.ServiceRegistrar))` so the generated output is untouched. gRPC gets the same treatment HTTP gets. The client constructor is `NewClient`, not `Dial`: `grpc.Dial` is deprecated upstream, and a house wrapper that ships it teaches it to every adopter.
 - [ ] 13.6 `oapi-codegen.yaml` template; mount the generated `StrictServerInterface` through `serve.Router` so one generated server runs on stdlib, gin or chi.
 - [ ] 13.7 **`goga/semconv`** — the OTel Weaver registry for goga's own attributes, generated into the package, plus the documented pattern for a project to keep its own registry and generate into its own package. `telemetry.Instrumentation` consumes the generated constants, which is what stops hand-written attribute keys.
 - [ ] 13.8 `mockgen` `tool` directive and `//go:generate` lines; freshness enforced by task 16.5, never by review.
@@ -178,7 +183,7 @@ In scope per the owner. `ServiceWeaver/weaver` is **archived** upstream (checked
 2026-07-30), which design D12 handles by making Weaver one adapter rather than
 the shape of the API.
 
-- [ ] 14.1 `Component`, `Ref[T]`, `Deployer`, and the `Deployers` registry.
+- [ ] 14.1 `Component`, `Ref[T]`, `Deployer`, and the `Deployers` registry (name-keyed, `OpenNamed`). **`Ref[T]`'s `T` is constrained to an interface, enforced by the local deployer at registration**: a distributing deployer returns a generated stub, never the concrete struct the local one stored, so `Ref[*myComponent]` is a reference that passes tests and fails in production. `Get` is a checked assertion returning a typed error — the type parameter saves the caller writing the assertion, it does not remove it.
 - [ ] 14.2 Portable `Graph` owning the telemetry, so a component graph is traceable regardless of deployer (design D6).
 - [ ] 14.3 **`local` deployer** — in-process, the default, and what tests use. Build in v1.
 - [ ] 14.4 `k8s` deployer.
@@ -237,5 +242,5 @@ A framework nobody adopts moves no numbers.
 - [ ] 18.3 Replace gopgql's 5× duplicated godog bootstrap with `gogatest.Features`, and its `Snapshot`/`Restore` with the decided fixture strategy.
 - [ ] 18.4 Adopt `config` + a metrics-only `telemetry` subset in **epos** — the better test of D2, since epos wants a subset and has no DI.
 - [ ] 18.5 Adopt `ginrouter` in **skill-test/go-service**, per the owner. It serves on the standard library today, so this is the first exercise of the router seam with a real consumer.
-- [ ] 18.6 Retarget sysgo's templates to emit `goga.*` (design D3) — `main.go.tmpl` collapses to roughly `goga.Run(...)`, `providers.go.tmpl` to a `wire.Build` over goga's ProviderSets — and add its MCP server on `goga/mcp`.
+- [ ] 18.6 Retarget sysgo's templates to emit `goga.*` (design D3) — `main.go.tmpl` collapses to roughly `app.Run(...)`, `providers.go.tmpl` to a `wire.Build` over goga's ProviderSets — and add its MCP server on `goga/mcp`.
 - [ ] 18.7 Re-measure the compliance numbers afterwards and record them, so the claim in the proposal is checkable rather than rhetorical.

@@ -19,6 +19,11 @@ replaceable adapter, so replacing the backend does not change the calling code.
 - **THEN** it is added as an adapter, and callers of the portable API compile and
   behave unchanged
 
+#### Scenario: A second adapter exists before the split is relied on
+- **WHEN** the portable API is first released
+- **THEN** more than one adapter implements it, so the claim that the interface
+  is portable has been exercised rather than assumed
+
 #### Scenario: The adapter surface is narrow
 - **WHEN** a new adapter is written
 - **THEN** it implements query, execute, transaction and close, and implements no
@@ -76,6 +81,36 @@ rolls back on failure.
 - **WHEN** a query runs with a configured timeout
 - **THEN** it is bounded by that timeout rather than running indefinitely
 
+#### Scenario: A transaction's timeout covers the whole transaction
+- **WHEN** a transaction body runs several statements
+- **THEN** the configured bound applies to the transaction as a whole, so it
+  cannot outlive its budget one statement at a time
+
+### Requirement: A streaming result outlives the call that returned it
+
+A query that returns rows SHALL keep those rows usable until the caller closes
+them.
+
+#### Scenario: Returned rows are readable
+- **WHEN** a caller receives rows and begins reading them
+- **THEN** they read successfully, because neither the timeout nor the
+  instrumentation for that query was released when the call returned
+
+#### Scenario: The recorded duration covers the read
+- **WHEN** the rows are closed
+- **THEN** the operation's recorded duration covers fetching and reading them,
+  not only issuing the statement
+
+#### Scenario: Closing releases everything, once
+- **WHEN** rows are closed, whether after a full read or an abandoned one
+- **THEN** the timeout and the recording are released exactly once, and closing
+  again is harmless
+
+#### Scenario: A failed read is recorded as a failure
+- **WHEN** an error occurs partway through reading rows
+- **THEN** the operation is recorded as failed rather than as the success it
+  appeared to be when the call returned
+
 ### Requirement: The backend and the standard interface both stay reachable
 
 The module SHALL expose both the native backend handle and a standard-library
@@ -99,3 +134,9 @@ database handle.
 - **WHEN** a project uses generated type-safe query code
 - **THEN** that code compiles against the portable handle and inherits its
   instrumentation without any generated line changing
+
+#### Scenario: The generated-query seam states which adapter it requires
+- **WHEN** the generator's own interface is expressed in one backend driver's
+  types, as the house query generator's is
+- **THEN** the seam requires that adapter and fails with a distinguishable error
+  under any other, rather than being described as adapter-neutral

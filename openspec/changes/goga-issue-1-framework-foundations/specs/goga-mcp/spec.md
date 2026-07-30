@@ -65,6 +65,13 @@ The module SHALL translate handler outcomes into the protocol's own error model.
 - **WHEN** a tool exceeds its configured timeout
 - **THEN** the call is cancelled and reported as an error result
 
+#### Scenario: A panicking tool does not take down the server
+- **WHEN** a tool function panics
+- **THEN** the server survives, the caller receives an error result, the panic is
+  logged with its stack, and the call's telemetry is completed rather than left
+  open — because the framework's registration wrapper is the one place this can
+  be handled for every tool in every project
+
 ### Requirement: The transport is selectable and the server is mountable
 
 The module SHALL support the protocol's transports interchangeably and allow the

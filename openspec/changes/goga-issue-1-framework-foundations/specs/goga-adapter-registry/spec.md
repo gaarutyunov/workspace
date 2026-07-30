@@ -24,7 +24,9 @@ it rather than its own lookup table.
 #### Scenario: The caller's options reach the adapter
 - **WHEN** an adapter needs the caller's settings to construct itself
 - **THEN** the registry carries the module's resolved settings through to it,
-  without exposing a settings type the caller could construct directly
+  and the adapter reads them through accessors — the type is nameable, because
+  an adapter in its own package must name it, and remains impossible for a
+  caller to populate
 
 ### Requirement: Adapters self-register and are selected by name
 
@@ -32,8 +34,19 @@ An adapter SHALL register itself under a scheme, and a caller SHALL select one b
 naming that scheme.
 
 #### Scenario: Selection is by scheme
-- **WHEN** a caller names a scheme, whether directly or through a connection URL
-- **THEN** the matching adapter is used
+- **WHEN** a caller supplies a connection URL
+- **THEN** the adapter registered under that URL's scheme is used
+
+#### Scenario: Selection is by plain name where there is no URL
+- **WHEN** a surface selects its adapter by name alone — a router, an exporter, a
+  protocol transport, a deployer — with no connection URL to carry it
+- **THEN** the registry resolves that name directly, rather than requiring the
+  caller to compose a URL whose scheme would not be the adapter's name
+
+#### Scenario: One adapter signature serves both
+- **WHEN** an adapter is written
+- **THEN** it implements one opener signature regardless of which of the two
+  selection forms its module uses
 
 #### Scenario: An adapter's dependency is optional
 - **WHEN** a project does not use a given adapter
@@ -66,3 +79,9 @@ Adapter resolution SHALL be instrumented.
 #### Scenario: A failed resolution is recorded
 - **WHEN** resolution fails
 - **THEN** the failure is recorded with its error type
+
+#### Scenario: The registry does not depend on the telemetry module
+- **WHEN** the registry records a resolution
+- **THEN** it does so through an instrumentation interface it declares itself, so
+  that the telemetry module — which uses the registry for its own exporters — can
+  depend on the registry without the dependency running both ways

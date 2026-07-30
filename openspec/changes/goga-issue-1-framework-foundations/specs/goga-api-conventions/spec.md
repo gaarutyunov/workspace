@@ -11,9 +11,17 @@ for a caller to populate.
 - **THEN** it passes option functions, and the call site reads as a list of named
   choices rather than as a struct literal
 
-#### Scenario: A parameter struct cannot be constructed
+#### Scenario: A settings type cannot be populated by a caller
 - **WHEN** a caller looks for a settings type to fill in
-- **THEN** none is exported, so the option form is the only form that compiles
+- **THEN** the type is visible — an adapter in its own package has to name it —
+  but it has no exported field and no exported constructor, and no entry point
+  accepts one, so the only populated instance in existence is the one the
+  framework builds from the caller's options
+
+#### Scenario: An adapter receives the caller's settings without a public struct
+- **WHEN** an adapter in its own package implements the registry's opener
+- **THEN** it can name the settings type in its signature and read the values it
+  needs through accessors, and still cannot construct or mutate one
 
 #### Scenario: An option validates its own input
 - **WHEN** an option is given a value outside its permitted range
@@ -36,8 +44,9 @@ for a caller to populate.
 
 ### Requirement: Every part of the framework is instrumented
 
-Every module of the framework SHALL emit telemetry for its operations, and no
-module SHALL be exempt or offer a way to disable it.
+Every module of the framework that performs a runtime operation SHALL emit
+telemetry for its operations, and no such module SHALL be exempt or offer a way
+to disable it.
 
 #### Scenario: Each module's operations produce telemetry
 - **WHEN** any framework operation runs — loading configuration, resolving an
@@ -59,13 +68,26 @@ module SHALL be exempt or offer a way to disable it.
 #### Scenario: An adapter cannot produce a portable object
 - **WHEN** an adapter returns its result
 - **THEN** it returns the adapter-level type, and only the module's own entry
-  point can wrap that into the portable type — so there is no reachable path to
-  an uninstrumented object
+  point can wrap that into the portable type — so no framework constructor
+  returns an uninstrumented object
+
+#### Scenario: The remaining route to an uninstrumented object is reported
+- **WHEN** code calls an adapter registry directly to obtain an adapter-level
+  object, which must stay possible so a project can register its own adapter
+- **THEN** the linter reports it, because the guidance states the strength of
+  each mechanism honestly rather than claiming an impossibility
 
 #### Scenario: Coverage is verified, not asserted
 - **WHEN** the framework's own tests run
-- **THEN** a test enumerates the modules and fails if any module has no
-  instrumentation
+- **THEN** a test compares the set of modules that obtained instrumentation
+  against the module list, and fails both when a module performing runtime
+  operations has none and when a module is added to the exempt set
+
+#### Scenario: A module with no runtime operation is named, not silently skipped
+- **WHEN** a module produces only compile-time or generation-time artefacts —
+  generated constants, lint analysers, wiring definitions
+- **THEN** it has no operation to record, and it is named in the exempt set the
+  test checks, rather than being quietly absent from an enumeration
 
 #### Scenario: A library consumer without a configured backend still works
 - **WHEN** a library uses a framework module in a process that never configures
@@ -91,3 +113,30 @@ Each wrapper SHALL provide access to the underlying object it composes.
 - **WHEN** the guidance describes an escape hatch
 - **THEN** it is documented as a supported route, and is not counted among things
   the framework fails to enforce
+
+### Requirement: Failures are recorded and reported consistently
+
+An operation's recorded outcome SHALL match the outcome the caller receives, and
+every error the framework returns SHALL identify where it came from.
+
+#### Scenario: A failed operation is recorded as failed
+- **WHEN** an operation returns an error through any of its exit paths
+- **THEN** the telemetry for that operation records the failure and its error
+  type, rather than recording success because the failure left by a different
+  path
+
+#### Scenario: The recorded duration is the operation's duration
+- **WHEN** an operation's duration is recorded
+- **THEN** the elapsed time is measured by the framework from the point the
+  operation began, not supplied by the call site
+
+#### Scenario: An error names its origin
+- **WHEN** an error crosses a framework boundary
+- **THEN** it is wrapped identifying the module and the operation, and the
+  original error remains inspectable
+
+#### Scenario: A caller that must branch gets a distinguishable error
+- **WHEN** a caller has to distinguish one failure from another — an unknown
+  adapter, a missing required key, an unsupported capability
+- **THEN** the error is a distinct type or value it can test for, rather than a
+  string to match
