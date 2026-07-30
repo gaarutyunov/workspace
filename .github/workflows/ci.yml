@@ -1,0 +1,39 @@
+name: CI
+on:
+  pull_request:
+    paths:
+      - ".agents/skills/**"
+      - ".github/workflows/ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".agents/skills/**"
+      - ".github/workflows/ci.yml"
+permissions:
+  contents: read # tests only read the checkout
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # No `pip install` anywhere: the loop scripts are deliberately stdlib-only
+      # so they stay runnable with zero setup, and this job stays immune to a
+      # package-registry outage. Do not add a formatter or linter that needs one.
+      - name: Syntax gate
+        run: python3 -m compileall -q .agents/skills/loop-common/scripts
+      - name: Unit tests
+        run: |
+          python3 -m unittest discover \
+            -s .agents/skills/loop-common/scripts -p 'test_*.py' -v
+# Note: this check is path-filtered, so it does not run on PRs that touch
+# nothing under .agents/skills/**. Were it ever made a *required* check under
+# branch protection, those PRs would sit "pending" forever — the standard fix is
+# a companion job with the same name that runs unfiltered and exits 0. This repo
+# has no branch protection today, so nothing is gated on it and no such shim is
+# needed yet.
