@@ -39,7 +39,16 @@ so that a registry's skills can be browsed without installing anything else.
 #### Scenario: No runtime beyond the binary
 - **WHEN** the served or exported catalog is opened in a browser
 - **THEN** it renders without a Node runtime, a package manager, a build step or
-  any request to a host other than the one serving it
+  any request to a host other than the one serving it — a claim about building,
+  serving and rendering the catalog, which the browser the end-to-end suite
+  drives does not contradict because that is test tooling and neither binary
+  contains it
+
+#### Scenario: Every page is rendered on the server
+- **WHEN** a page is delivered in either mode
+- **THEN** its content, including every document converted from markup and every
+  count, is already HTML; the browser is never asked to fetch data, render a
+  template or convert a document in order to show the page's content
 
 ### Requirement: The skill list comes from one of two explicit sources
 
@@ -100,6 +109,13 @@ built when it started.
 - **THEN** it appears once the server is restarted, and the command's
   documentation says so rather than implying the catalog is live
 
+#### Scenario: The index being fixed does not fix the counts
+- **WHEN** a skill already in the index is pulled after the server started and a
+  page showing its count is reloaded
+- **THEN** the count has changed, because the set of skills and the numbers
+  beside them are refreshed by different rules and only the first is fixed at
+  startup
+
 ### Requirement: List metadata costs one manifest request per skill
 
 Every field shown on the home, catalog and tools pages SHALL be derivable from a
@@ -143,6 +159,13 @@ its `SKILL.md`, taken from the artifact itself.
 - **THEN** the catalog still lists the skill from its manifest metadata, and its
   detail page says the document could not be read rather than failing the whole
   catalog
+
+#### Scenario: The document has its own size bound
+- **WHEN** a skill's document is larger than a document plausibly is, even
+  though its layer is within the layer limit
+- **THEN** it is not rendered, its page says so, and the skill still lists —
+  because a publisher who pushes an enormous document once would otherwise make
+  the served catalog do that work on every request
 
 ### Requirement: The content layer is treated as untrusted input
 
@@ -189,11 +212,12 @@ present them, including which Skillfile stage contributed each file.
   Skillfile, and therefore carries no stage annotation
 - **THEN** the page omits the provenance section rather than showing it empty
 
-#### Scenario: Parameters are not claimed
+#### Scenario: Parameters are shown only where the artifact declares them
 - **WHEN** a skill accepts install-time parameters
-- **THEN** the page does not present a parameter list or a values form, because
-  the artifact does not declare its parameters and the catalog would be
-  inventing them
+- **THEN** the page presents them if and only if the artifact carries a values
+  schema declaring them; where it does not, the page shows no parameter list and
+  no values form, because a catalog that assembles one from guesses is
+  inventing a contract the installer will not honour
 
 ### Requirement: The home page is the leaderboard
 
@@ -401,9 +425,24 @@ deployed.
 #### Scenario: The site surface is current
 - **WHEN** the specification's description of the published site is read
 - **THEN** it records that the site serves a catalog alongside the documentation,
-  and how that catalog is produced and deployed
+  that the catalog is rendered to static files during the build, and how it is
+  deployed
 
-#### Scenario: Nothing else is amended
+#### Scenario: The metrics section records the persistent destination
+- **WHEN** the specification's description of how measurements are emitted is
+  read
+- **THEN** it names the exporter that sends them to a store outside the
+  registry, and it records that the user-agent is not among the attributes that
+  reach such a store
+
+#### Scenario: The testing section records the end-to-end tier
+- **WHEN** the specification's description of the test stack and its build tags
+  is read
+- **THEN** it records the browser-driven tier, how it is selected, and that it is
+  not part of the ordinary test run
+
+#### Scenario: What is deliberately unamended says so
 - **WHEN** the specification's sections on the registry's statelessness, its
-  write path, its API surface and its metrics are compared before and after
-- **THEN** they are unchanged, because this change alters none of them
+  write path and its API surface are compared before and after
+- **THEN** they are unchanged, and the change says so, so that a later reader
+  does not go looking for an amendment that was deliberately not made

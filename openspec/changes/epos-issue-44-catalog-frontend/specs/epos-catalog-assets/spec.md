@@ -7,9 +7,11 @@ time, and the binary SHALL need no file outside itself to render a page.
 
 #### Scenario: A fresh clone builds a complete binary offline
 - **WHEN** the repository is cloned and built with no network access and no
-  credentials
+  credentials, the module cache being already populated
 - **THEN** the build succeeds and the resulting binary serves the catalog
-  complete with its stylesheet, its scripts and its logos
+  complete with its stylesheet, its scripts and its logos — a statement about
+  building and running the binary, which the browser the end-to-end tier
+  downloads does not weaken because that tier is not part of building it
 
 #### Scenario: No asset is fetched at build time
 - **WHEN** the build is inspected
@@ -125,10 +127,41 @@ HTML passthrough disabled and the result sanitised before it reaches a page.
   output is constrained by what the renderer is permitted to emit, and any
   additional sanitisation uses an established library
 
-#### Scenario: One new module
+#### Scenario: The renderer is a dependency chosen for this job
+- **WHEN** the Markdown renderer is inspected
+- **THEN** it is a maintained, specification-compliant, pure-Go renderer whose
+  own dependency footprint is minimal, and it is the only Markdown
+  implementation in the module
+
+### Requirement: Every dependency this change adds is named and justified
+
+This change adds more than one module. Each SHALL be recorded with what it is
+for and where it is linked, and none SHALL require cgo.
+
+#### Scenario: Each addition has a stated reason
 - **WHEN** the module requirements are compared before and after this change
-- **THEN** exactly one direct dependency has been added, the Markdown renderer,
-  and it is pure Go with no cgo
+- **THEN** every direct dependency that appeared is accounted for by a decision
+  that names what it does and what was rejected in its place
+
+#### Scenario: The hard constraint holds
+- **WHEN** the added dependencies are built
+- **THEN** every one of them is pure Go, so the project's cross-builds continue
+  to run with cgo disabled
+
+#### Scenario: Test-only dependencies do not reach the binaries
+- **WHEN** a dependency exists only to test the catalog
+- **THEN** it is reachable only from test files selected by an explicit build
+  tag, and neither released binary links it
+
+#### Scenario: A dependency that only one page needs is not taken
+- **WHEN** an addition would serve a single presentational nicety
+- **THEN** it is not taken; the effect is achieved with the design tokens
+  already vendored, or recorded as a follow-up
+
+#### Scenario: The security scan stays green
+- **WHEN** the project's vulnerability scan runs after the additions
+- **THEN** it passes, because it is a required check and a new dependency is the
+  most likely thing to break it
 
 ### Requirement: The JavaScript budget is three behaviours
 
