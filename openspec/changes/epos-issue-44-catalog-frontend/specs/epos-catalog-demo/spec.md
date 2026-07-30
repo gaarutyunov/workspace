@@ -11,16 +11,22 @@ that `epos` has a command for.
 - **THEN** the example skill is packed by `epos pack`, not by a hand-assembled
   artifact or another tool
 
-#### Scenario: Publishing requires no client the project does not ship, once one exists
-- **WHEN** the CLI provides a publish command
-- **THEN** the workflow uses it, and no separate OCI client is needed; until then
-  the workflow copies the packed artifact out of the local store, which is what
-  the documented publishing procedure already does
+#### Scenario: Publishing requires no client the project does not ship
+- **WHEN** the workflow publishes the example
+- **THEN** it authenticates and pushes with the CLI's own commands, and no
+  separate OCI client is installed or invoked
 
 #### Scenario: Publishing needs no new secret
 - **WHEN** the workflow authenticates to the demo registry
 - **THEN** it uses the credential the workflow already has for the repository's
-  own package namespace
+  own package namespace, with the job granted permission to write packages
+
+#### Scenario: The two credential failures stay distinguishable
+- **WHEN** the publish step fails because no credential is stored, or because a
+  stored credential was rejected
+- **THEN** the workflow surfaces the CLI's own message for whichever occurred,
+  rather than collapsing both into one condition — a rejected credential and an
+  absent one send whoever is debugging to different places
 
 #### Scenario: The published artifact is the one that was built
 - **WHEN** the published artifact is compared with the one in the local store

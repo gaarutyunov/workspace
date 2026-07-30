@@ -30,9 +30,12 @@ and one of them changes the deliverable:
   container image**. GitHub Pages cannot run a Go binary, and there is no host
   named anywhere in the repository. Design **D5** picks the deployment that the
   repo can actually reach today and says plainly what it costs.
-- **"push to registry"** — publishing is `oras cp` today. `epos push` exists on
-  a branch (epos#43, CI-green, unmerged). Design **D10** keeps #44 off that
-  gate.
+- **"push to registry"** — this one has stopped being a problem since the issue
+  was written. epos#43 merged (`6f7738a`), so `epos push` and `epos registry
+  login` are on `origin/main` and the demo publishes with the CLI itself rather
+  than delegating to `oras`. Design **D10** records the one thing a publish job
+  still has to get right: there are two credential failures and they read
+  differently.
 
 And one thing the issue asks for cannot be shown at all as things stand: an
 artifact does not declare its parameters. `epos build` writes
@@ -65,8 +68,8 @@ instead, and why that is the better demonstration anyway.
   The catalog reads counts through a `Stats` source with two implementations:
   `none` (the default — the column is absent, not zeroed) and `snapshot` (a JSON
   file of per-repository counts, captured at a stated moment). The snapshot is
-  produced by running the real chain — pack, publish, pull, read the counter —
-  through the exporter `epos-registry` already has, parsed the way
+  produced by running the real chain — `epos pack`, `epos push`, `epos pull`,
+  read the counter — through the exporter `epos-registry` already has, parsed the way
   `tests/integration/steps_counting.go` already parses it. **No new exporter, no
   scrape loop, no Prometheus, no second listener, and not one byte of new state
   in `epos-registry`** (design **D4**). A live-counts deployment is a named
@@ -141,9 +144,6 @@ instead, and why that is the better demonstration anyway.
   Go-only testcontainers slice — everything the #44 issue lists under "show all
   the capabilities" — is #42's artifact. #44 packs it, publishes it and displays
   it (design **D1**).
-- **No `epos push` dependency.** #44 does not block on epos#43. The publish step
-  is one line of a CI workflow and is written to be either command (design
-  **D10**).
 - **No change to `epos-registry` at all.** SPEC §4.5 and §10.1 stand: no write
   path, no rendering, no second listener. The catalog is a `/v2/` client and
   nothing more; it is never served by the relay.

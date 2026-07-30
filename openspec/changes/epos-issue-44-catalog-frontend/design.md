@@ -11,8 +11,11 @@ binary under `cmd/`, shared code in top-level `internal/`. No `pkg/`, no `api/`
 hexagonal layering, no DDD"). OCI via `oras.land/oras-go/v2 v2.6.2`; cobra;
 koanf (never Viper); OTel `v1.44.0` with the stdout metric exporter.
 
-**Binaries**: `cmd/epos` (13 commands) and `cmd/epos-registry` (a single flat
-command). There is no `serve`, `web`, `ui` or `catalog` command anywhere.
+**Binaries**: `cmd/epos` and `cmd/epos-registry` (a single flat command). Since
+epos#43 merged (`6f7738a`), the CLI publishes for itself: `epos push
+<name>:<version> <destination>` plus `epos registry login` / `logout`, sharing
+one credential-bearing client with `pull`, `build`, `sign`, `attest` and
+`verify`. There is no `serve`, `web`, `ui` or `catalog` command anywhere.
 
 **`//go:embed`: zero occurrences in the repository.** Embedding a frontend is
 net-new; there is no precedent to follow and nothing to extend.
@@ -250,11 +253,17 @@ fallback chain.
   per line. No `_catalog` required.
 
 **Why both.** `errNoCatalog` exists in the shipped code because registries
-disagree about `_catalog`: it is an optional part of the distribution spec, and
-several of the largest registries either omit it or scope it to an
-authenticated, per-account view. The demo publishes to `ghcr.io` (**D10**), and
-a demo that cannot enumerate its own registry is not a demo. A `--refs` file
-also makes the static export reproducible: the same file produces the same site.
+disagree about `_catalog`, and SPEC §4.1 now says so in its own words:
+
+> `GET /v2/_catalog` is proxied **when the upstream registry supports it**, and
+> is the basis for discovery (§7). It is outside the Content Discovery
+> conformance category and **is disabled on several hosted registries**; where
+> upstream does not support it, `epos-registry` relays upstream's response
+> unchanged and `epos search` reports the capability as unavailable.
+
+The demo publishes to `ghcr.io` (**D10**), and a demo that cannot enumerate its
+own registry is not a demo. A `--refs` file also makes the static export
+reproducible: the same file produces the same site.
 
 **Why not a fallback.** Silently degrading from "everything in the namespace" to
 "whatever a file happens to list" makes a missing skill indistinguishable from a
@@ -760,9 +769,15 @@ thing:
    registries reject unknown `artifactType` or non-image manifests.
 3. **`_catalog` discovery** — optional in the distribution spec, and this is
    where the list thins out. `errNoCatalog` and its 403/404/405/501 mapping
-   exist in `internal/cli/discover.go` *because this is common*. `epos list`
-   and `epos search` do not work against a registry without it, and neither does
-   the catalog's namespace mode (**D3**).
+   exist in `internal/cli/discover.go` *because this is common*, and SPEC §4.1
+   states outright that it "is disabled on several hosted registries". `epos
+   list` and `epos search` do not work against a registry without it, and
+   neither does the catalog's namespace mode (**D3**).
+
+Note that (2) is now a claim epos can make for itself: since epos#43,
+publishing is `epos push`, so "push works here" is a statement about the
+project's own command rather than about whichever OCI client the reader
+happens to have.
 
 zot is the one registry the repository actually exercises — CI runs
 `ghcr.io/project-zot/zot-linux-amd64:v2.1.18` and five integration files drive
@@ -799,26 +814,57 @@ relationship with. It has a relationship with directories.
 
 ---
 
-## D10: publishing the example — either command, neither blocking
+## D10: publishing the example — `epos push`, no gate
 
-**Decision.** #44 does **not** block on epos#43. The publish step is one line in
-one CI workflow, and the spec requires *"the repository's own tooling publishes
-the example, and no OCI client other than `epos` is required once one exists"* —
-satisfied by `epos push` after #43 merges, and by `oras cp
---from-oci-layout-path "$(epos store path)" …` until then, which is what the
-quick start documents today.
+**Resolved.** epos#43 merged (`6f7738a`, PR gaarutyunov/epos#48). `epos push
+<name>:<version> <destination>` and `epos registry login` / `logout` are on
+`origin/main`. The question this section originally answered — whether #44
+should wait for them — no longer exists, and the answer it reached (no) is now
+moot rather than merely correct.
 
-**Why not block.** #43 is CI-green and awaiting approval only. Blocking four
-capabilities on an approval gate for one workflow line trades all of #44's
-progress for a cosmetic difference in a YAML file. The issue's actual
-requirement — *"we should pack my go skill … so we would also use epos to pack
-our own skill"* — is about `epos pack`, which shipped long ago.
+**Decision.** The demo publishes with the CLI itself:
+
+```
+epos registry login ghcr.io -u <actor> --password-stdin
+epos pack examples/go-house
+epos push go-house:<version> oci://ghcr.io/gaarutyunov/skills
+```
+
+No `oras`, no `docker`, nothing outside the binary the repository builds. That
+is exactly what the issue asked for — *"we should pack my go skill as an example
+skill and push to registry so we would also use epos to pack our own skill"* —
+and it is now literally true rather than true of `pack` and delegated for the
+rest.
 
 **Which registry.** `ghcr.io/gaarutyunov/skills/`. It is free, the org already
 pulls from it in CI, and a workflow's `GITHUB_TOKEN` can push packages it owns —
-so publishing needs no new secret. The consequence is **D3**: ghcr is one of the
-registries where a `_catalog` sweep cannot be relied on, so the demo runs in
-`--refs` mode. That is not a workaround; it is the reason `--refs` is specified.
+so publishing needs no new secret, only `permissions: packages: write` on the
+job. The consequence is **D3**: ghcr is one of the registries where a `_catalog`
+sweep cannot be relied on, so the demo runs in `--refs` mode. That is not a
+workaround; it is the reason `--refs` is specified.
+
+**One thing to get right in the workflow: there are two credential failures, not
+one, and they read differently** (`registryOptions.explainAuth`,
+`internal/cli/credentials.go`):
+
+- **No credential at all** fails inside `oras-go` as
+  `auth.ErrBasicCredentialNotFound`. It never reaches the registry, so there is
+  no HTTP status to read. Message: *"no credential is stored for it"*.
+- **A wrong or expired credential** returns a real **401**. Message: *"the
+  stored credential was rejected"*.
+
+Both end at `epos registry login <host>`. A publish job that treats them as one
+condition will report a missing `packages: write` permission — a 401 — as a
+missing login, and send whoever is debugging it to re-run a login that already
+worked. Neither message contains the credential.
+
+**Not a concern here, but worth not misreading:** SPEC §4.5's withdrawal is of
+the `epos-registry` **relay** write path, not of publishing. §4.5 now says so
+directly — *"What is withdrawn is routing a publish through `epos-registry` —
+not publishing"* — and §1.1 lists only *"a write server that packs, validates,
+or holds credentials"* as out of scope. The demo publishes straight to the
+upstream registry it addressed, which is the case the advisory behind §4.5 was
+never about.
 
 **Rejected: publishing to a zot instance stood up for the demo.** Needs a host
 (**D5**) and makes the demo's artifacts disappear when it goes away.
