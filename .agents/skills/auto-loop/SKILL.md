@@ -1,6 +1,6 @@
 ---
 name: auto-loop
-description: "Autonomous delivery loop: run the board-tick digest, take the highest-signal task routed to Loop=auto on the gaarutyunov GitHub Project board (project #6), and drive it end-to-end WITHOUT human gates — never waits for owner spec approval or human code review; self-merges each PR once CI is green, then moves the task to Done. Never splits an issue into sub-issues: each issue is one deliverable, worked to merged in a single tick. Still obeys owner comments surfaced by the digest, uses labels for intermediate states, and never asks anything in the Claude Code window. Use when asked to run the board unattended / fully autonomously. Examples: \"auto-run the board\", \"run the auto loop\", \"work the board without stopping for review\", \"drive the tasks and merge when CI passes\". For the gated, review-first variant, use the hitl-loop skill instead."
+description: "Autonomous delivery loop: run the board-tick digest, take the highest-signal task routed to Loop=auto on the gaarutyunov GitHub Project board (project #6), and drive it end-to-end WITHOUT human gates — never waits for owner spec approval or human code review; self-merges each PR once CI is green, then moves the task to Done. Never splits an issue into sub-issues: each issue is one deliverable, worked to merged in a single tick. Still obeys owner comments surfaced by the digest, uses labels for intermediate states, parks a genuine dependency on another issue in the Blocked status (a merely *technical* blocker is cleared in the same PR instead), and never asks anything in the Claude Code window. Use when asked to run the board unattended / fully autonomously. Examples: \"auto-run the board\", \"run the auto loop\", \"work the board without stopping for review\", \"drive the tasks and merge when CI passes\". For the gated, review-first variant, use the hitl-loop skill instead."
 ---
 
 # Auto task loop
@@ -23,7 +23,7 @@ through delivery one at a time, but **removes every human gate**:
 ## Shared mechanics live in `loop-common`
 
 The **board-tick digest**, the **label protocol**, the **comment ack ledger**,
-**GitHub-only interaction**, the **blocked → In review** rule, board IDs,
+**GitHub-only interaction**, the **Blocked vs In review** rule, board IDs,
 clone/worktree + gortex tracking, opening a PR early, the OpenSpec `/opsx:*`
 flow, commit/push discipline, moving a task's status, and the
 `coderabbit-prompts.py` helper are all documented **once** in the `loop-common`
@@ -47,11 +47,13 @@ differs in the **autonomous path**: `Loop = auto` and self-merging on green CI.
 2. **Never ask the owner anything in the Claude Code window.** No
    `AskUserQuestion`, ever — nobody is watching an unattended run. If you truly
    need the owner, post the question on the issue, add `needs:input`, move the
-   item to **In review**, and continue with the next task.
+   item to **In review** — a human need is always **In review**, never
+   **Blocked** — and continue with the next task.
 
 3. **Never park a task In progress.** *In progress* means actively being worked
-   this tick. Anything waiting on the owner goes to **In review** with a label
-   saying why.
+   this tick. Anything waiting on a *human* goes to **In review** with a label
+   saying why; anything waiting on *another issue* goes to **Blocked** with that
+   issue recorded as a dependency. Neither ever stays In progress.
 
 4. **Never split an issue into sub-issues.** Every issue is one deliverable unit
    of work, finished in place — see *One issue, one deliverable* below. This
@@ -78,12 +80,18 @@ run once per repo so the loop labels exist.
 .claude/skills/loop-common/scripts/board-tick.py --loop auto
 ```
 
-Work the top actionable row (`HUMAN-INPUT` → `UNPUSHED` → `SPEC-MERGED` →
-`CI-RED` → `THREADS` → `READY` → `NOT-STARTED` → `WIP`), skipping `TRACKER`,
-`WAITING-OWNER` and `BLOCKED`. Capture the row's item id (in the details block),
-issue (repo + number), and title. A Ready issue with
+Work the top actionable row (`HUMAN-INPUT` → `UNBLOCKED` → `UNPUSHED` →
+`SPEC-MERGED` → `CI-RED` → `THREADS` → `READY` → `NOT-STARTED` → `WIP`), skipping
+`TRACKER`, `WAITING-OWNER` and `BLOCKED`. Capture the row's item id (in the
+details block), issue (repo + number), and title. A Ready issue with
 no Loop value (or `Loop = hitl`) is **not** this loop's — leave it untouched. If
 nothing is actionable, stop (or idle on the next tick when looping).
+
+**`UNBLOCKED` is actionable and ranks second.** Every blocker it recorded has
+closed (`BLK` reads `n/n✓`), so it is work waiting to be resumed: run
+`board-tick.py unblock --repo <repo> --issue <N>`, move it back to **Ready**
+(`61e4505c`) and then take it through this tick like any other pickup. Only
+`BLOCKED` — at least one blocker still open — is a skip.
 
 Fix any `⚠` hygiene warning on the row in the same tick. If the chosen row is
 `READY`, move it to **In progress** (`47fc9ee4`) with the status-edit command in
@@ -98,8 +106,8 @@ labelled one, that's still a green light, not something to undo.
 **Do not decompose an issue into sub-issues. Ever.** An issue is a deliverable
 unit of work: this tick takes it from Ready to merged. Filing children instead of
 shipping is how the loop stops delivering — every tick ends with more backlog and
-nothing merged, and the real work disappears behind `tracker` and `blocked`
-labels that later ticks skip.
+nothing merged, and the real work disappears behind `tracker` labels and the
+**Blocked** status that later ticks skip.
 
 So, when an issue looks large:
 
@@ -118,16 +126,30 @@ So, when an issue looks large:
 
 And when an issue looks blocked:
 
-- **Re-check the blocker before believing it.** A `blocked` label is a claim
-  someone made earlier, not a fact; the thing it waited on has often merged
-  since.
+- **Re-check the blocker before believing it.** The digest does this for you: the
+  `BLK` column reads `closed/total` from the issue's recorded dependencies, and a
+  `✓` means nothing is blocking it any more. A claim in an older comment that
+  contradicts the digest is simply stale.
 - **If the blocker is technical, clear it inside this issue.** Implement the
   missing piece in the same PR rather than filing it as foundation work for a
-  later tick.
+  later tick. The **Blocked** status changes nothing about this, and this is the
+  common case: a gap you could close yourself is not a dependency.
+- **Only a genuine dependency on another issue earns Blocked** — that issue has
+  to land before this one can be finished at all. Record it and move the item to
+  **Blocked** (`8351b71b`), then pick up the next task:
+
+  ```bash
+  .claude/skills/loop-common/scripts/board-tick.py block \
+    --repo <repo> --issue <N> --on <ref> --note "<what is blocked, and why>"
+  ```
+
 - **Only a blocker that genuinely needs the owner** — a credential, an access
   grant, a product decision nobody else can make — goes back to them: post it on
-  the issue with `board-tick.py post`, add `blocked` (or `needs:input`), move the
-  item to **In review**, and pick up the next task. Never park it In progress.
+  the issue with `board-tick.py post`, add `needs:input`, move the item to
+  **In review** (`df73e18b`), and pick up the next task.
+
+Never park either one In progress, and never reach for **Blocked** to end a tick
+early. It means "another issue must land first" and nothing else.
 
 Review comments follow the same rule: **every actionable review comment is
 implemented inside the issue being worked**, never deferred to a follow-up issue,
@@ -223,6 +245,10 @@ gh project item-edit --project-id PVT_kwHOAjGWgc4Bcice --id <ITEM_ID> \
   --field-id PVTSSF_lAHOAjGWgc4BcicezhXKdRQ --single-select-option-id 98236657
 ```
 
+If the task ever carried a recorded blocker, drop the dependency too —
+`board-tick.py unblock --repo <repo> --issue <N>` — so a merged issue doesn't
+leave a stale edge behind.
+
 Report: task title, merged PR URL, spec PR URL (if any), and what shipped.
 
 ## Looping
@@ -234,12 +260,14 @@ there is **no spec-approval hard gate**, so a task is never parked waiting on a
 human review.
 
 A tick that ends without something merged has not delivered — and filing
-sub-issues is not delivery. Large means "work a long tick", blocked means "clear
-the blocker in this PR"; neither means "split it up" (step 1a). The only task
-that leaves a tick unmerged is one that genuinely needs the *owner*, and it goes
-to **In review** with `blocked` / `needs:input`. Never leave such a task In
-progress, and never ask in the chat. If nothing is actionable for
-**Loop = auto**, idle until the next tick.
+sub-issues is not delivery. Large means "work a long tick", technically blocked
+means "clear the blocker in this PR"; neither means "split it up" (step 1a). Only
+two things leave a tick unmerged: a task that genuinely needs the *owner*, which
+goes to **In review** with `needs:input`, and a task that genuinely depends on
+*another issue*, which goes to **Blocked** with that dependency recorded. Never
+leave either In progress, never use **Blocked** for work you simply haven't done,
+and never ask in the chat. If nothing is actionable for **Loop = auto**, idle
+until the next tick.
 
 ## Related skills
 
