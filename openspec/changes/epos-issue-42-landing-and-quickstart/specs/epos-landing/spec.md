@@ -112,17 +112,30 @@ reference instead.
 - **THEN** its information is either present on the quick start or the reference,
   or it was a claim the code does not support
 
-### Requirement: The landing band is wider than a prose page
+### Requirement: The landing shares the site's one container width
 
-The landing SHALL render in a wider container than the documentation pages, and
-the documentation pages' width SHALL be unchanged by this work.
+The landing SHALL render in the same container as every other page — the
+reference site uses one width throughout and its inner pages are not narrower
+than its landing — and SHALL differ from a documentation page only in filling
+that container edge to edge instead of splitting it into content and aside.
 
-#### Scenario: An opt-in width on the shared layout
-- **WHEN** a page needs the wide band
-- **THEN** it asks the shared layout for it by prop, and the layout's default
-  stays the narrow prose width
+#### Scenario: No width of its own
+- **WHEN** the landing renders on a wide viewport
+- **THEN** its container is the same width, with the same gutters, as every
+  documentation page, and the shared layout offers no per-page width option
 
-#### Scenario: The other three pages are untouched
+#### Scenario: The landing bands are full width
+- **WHEN** the hero, install band and feature grid render
+- **THEN** each spans the whole container, with no aside column, which is the
+  only structural difference from a documentation page
+
+#### Scenario: The documentation pages' reading measure does not regress
 - **WHEN** the quick start, CLI reference and Skillfile reference render after
   this change
-- **THEN** their content width is what it was before it
+- **THEN** their content column is no wider than it was before it, the extra
+  container width having gone to the aside
+
+#### Scenario: The landing keeps the visually hidden title
+- **WHEN** the landing renders
+- **THEN** its heading remains visually hidden behind the wordmark, and this is
+  the one page where that is so — the documentation pages show their titles

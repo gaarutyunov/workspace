@@ -43,19 +43,31 @@ multi-stage composition and parameterisation, the two things the issue calls
   preventing a wrong command, not by teaching OCI.
 - **The worked example the issue asks for**, as a checked-in, CI-executed
   artifact under `examples/go-house/`: one Skillfile deriving **one** house Go
-  skill from **three** real skills — `go-project-scaffold` as the parameterised
-  base, spf13's `go` stripped to its philosophy, `golang-pro` stripped to the
-  two reference files that are neither redundant nor contradicted, and a
-  path-scoped slice of `testcontainers-go`. Four stages, `COPY --from`, `RM`,
-  `AWK`, `SET`, and `{{ if .Values.x }}` on the features a library does not
-  want.
-- **A correction the demo cannot ship without.** `--set x=false` stores the
-  **string** `"false"`, which `{{ if }}` reads as **true**
-  (`internal/install/values.go` — *"Values stay strings"*, verified). The
-  owner's "disable a dependency, enable it later by changing the values" demo is
-  therefore specified against a `-f values.yaml` **boolean**, with `--set x=`
-  (empty) as the documented one-off off-switch. A quick start written the
-  obvious way would be wrong (design **D4**).
+  skill from **five** real skills — `go-project-scaffold` as the parameterised
+  base, spf13's `go` stripped to its philosophy, `golang-pro` stripped of the
+  layered-structure reference and two named sections, `cobra-viper` with its
+  **Viper half removed and the house koanf translation appended in its place**,
+  and a path-scoped slice of `testcontainers-go`. Five stages, `COPY --from`,
+  `RM`, `AWK`, `REPLACE`, `APPEND`, `SET`, and `{{ if .Values.x }}` on the
+  features a library does not want.
+- **The drops are surgical where surgery is what the conflict deserves.**
+  `golang-pro`'s generics reference is **kept** — it is good material — minus
+  the one generic-interface section `go/SKILL.md` calls *"this is Java"* and the
+  Rust-style `Result[T]` block, with `constraints.Ordered` corrected to
+  `cmp.Ordered`. `var _ Interface = (*Impl)(nil)` is dropped outright and its
+  absence is asserted by test. Only `project-structure.md`, which conflicts with
+  the house standard on every axis it touches, is dropped whole (design **D6a**,
+  **D6b**, **D6c**).
+- **A correction the demo cannot ship without — until epos#47 lands.**
+  `--set x=false` stores the **string** `"false"`, which `{{ if }}` reads as
+  **true** (`internal/install/values.go` — *"Values stay strings"*, verified).
+  That is a **bug**, now tracked as **epos#47** *"install --set does not infer
+  types (must match helm)"*, and this change is written around it *temporarily*:
+  one sentence of warning and `--set x=` (empty) as the documented one-off
+  off-switch, both listed in design **D4** as the exact text to delete when #47
+  lands. The `-f values-*.yaml` profiles stay the demo's primary path
+  permanently — a named, committed, re-appliable profile is the right shape for
+  "disable a dependency and enable it later", whatever `--set` does with types.
 - **The note-spacing bug, fixed once.** `ga-note` sets `:host { display: block }`
   and `.note { margin: 0 }`, and **no page anywhere supplies an external
   margin** — `git grep 'ga-note\s*{'` over `docs/` returns nothing. Adjacent
@@ -68,11 +80,25 @@ multi-stage composition and parameterisation, the two things the issue calls
   `#3b82f6` where the real accent is `#54a2ff`. Nothing uses `--ga-font-sans`
   (Geist), `.ga-theme`, or the spacing scale. "Follow garutyunov.com's style"
   is, in its most literal sense, this list.
-- **Two pages are generated and must not be hand-edited.** `cli.astro` and
-  `skillfile.astro` come from `internal/docsgen`, with a CI drift gate
-  (`.github/workflows/ci.yml:36-43`). Their share of the style work is a change
-  to Go string literals in `internal/docsgen/{cli,skillfile}.go` plus a
-  regenerate — spelled out so nobody edits the Astro and loses it.
+- **The docs pages are styled as garutyunov.com's *inner* pages, breadcrumbs
+  included.** The site's skill pages and CV are **not** narrower than its
+  landing — `app/cv/page.tsx:27` is byte-identical to `app/page.tsx:19`, both
+  `max-w-6xl` (1152px) — and they get their reading measure from a 12-column
+  grid with a `col-span-9` body beside a `col-span-3` aside (≈824px, within 8px
+  of epos's current `main`). So every epos page adopts the one 1152px shell, the
+  56px sticky header, the visible `text-4xl font-semibold tracking-tight` `h1`,
+  the em-dash bullets, the ruled key/value rows, the pill chips — and a
+  **breadcrumb** above every docs page's title, in the CV's mono 14px form, plus
+  the `aria-label` / `aria-current` / `aria-hidden` the reference site omits. The
+  breadcrumb replaces the back link each page hand-rolls today (design **D3**).
+- **The two generated pages stay generated — that is a feature, and it is
+  extended, not worked around.** `cli.astro` and `skillfile.astro` come from
+  `internal/docsgen` with a CI drift gate (`.github/workflows/ci.yml:36-43`); an
+  auto-generated reference cannot drift from the code it documents. Nothing here
+  replaces one with a hand-authored page or bypasses the gate. Their share of
+  the style work — tokens, shared chrome, the breadcrumb, the new sidebar slot —
+  is a change to `internal/docsgen/{page,cli,skillfile}.go` plus a regenerate,
+  spelled out so nobody edits the Astro and loses it.
 
 ## Capabilities
 
@@ -85,8 +111,10 @@ multi-stage composition and parameterisation, the two things the issue calls
 - `epos-derived-go-skill`: the multi-stage, parameterised worked example — the
   artifact, its values profiles, and the CI harness that stops the tutorial from
   documenting a build that no longer runs.
-- `epos-docs-style`: the shared layout, token and spacing corrections across all
-  four pages, including the two that are generated from Go.
+- `epos-docs-style`: the shared inner-page shell — one container width, the
+  sticky header, the breadcrumb, the 9/3 content-and-aside grid — plus the token
+  and spacing corrections, across all four pages, including the two that are
+  generated from Go and stay that way.
 
 ## Non-goals
 
@@ -95,10 +123,10 @@ multi-stage composition and parameterisation, the two things the issue calls
   the multi-stage demo does not sit behind #43 (design **D1**).
 - **No catalog UI, leaderboard or download counts.** That is #44. `git grep
   'go:embed'` over epos returns zero hits; there is no frontend to extend.
-- **No fix to `--set` type inference.** Making `--set x=false` a boolean is a
-  change to epos's value semantics with a Helm-compatibility argument on both
-  sides. #42 documents today's behaviour correctly and leaves the change to the
-  owner (design **D4**).
+- **No fix to `--set` type inference — that is epos#47.** Making `--set x=false`
+  a real boolean, matching helm's `pkg/strvals`, is now its own issue at the
+  owner's direction. #42 documents today's behaviour correctly and marks every
+  sentence written around the bug as deletable when #47 lands (design **D4**).
 - **No resolution of the `internal/` conflict.** The derived skill is built from
   `go-project-scaffold` as the base, which settles it *for the example* by
   precedence and not by decision. The standing contradiction between the two

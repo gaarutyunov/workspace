@@ -97,6 +97,20 @@ SHALL demonstrate turning a feature off and back on by changing values.
 - **THEN** it shows removing a whole file from a base skill and editing a section
   out of another, and says in one sentence why that beats forking the skill
 
+#### Scenario: The example's best case is the one the workspace already lost
+- **WHEN** the page explains why deriving beats forking
+- **THEN** it names the concrete case: a vendored skill whose configuration
+  guidance the house rejects, whose correction had to be written down outside the
+  skill because an edit inside it would be lost on the next reinstall, and which
+  the derivation layers back in — one sentence, because it is the strongest
+  argument on the page
+
+#### Scenario: A section is replaced, not just removed
+- **WHEN** the worked example removes a section that the house has its own answer
+  for
+- **THEN** it also shows the replacement being appended, so the reader sees that
+  a derivation can substitute guidance and not only delete it
+
 #### Scenario: A feature is disabled by values
 - **WHEN** the reader installs with the lean values profile
 - **THEN** the sections guarded by the disabled features are absent from the
@@ -113,25 +127,54 @@ SHALL demonstrate turning a feature off and back on by changing values.
 - **THEN** it is the content of the example checked into the repository, so the
   page cannot drift from a build that works
 
-### Requirement: The page states how to disable a feature correctly
+### Requirement: A values file is how a feature is turned off
 
-Because a value set on the command line is stored as a string and a non-empty
-string is true to the template engine, the quick start SHALL NOT present a
-command-line `=false` as a way to disable a feature.
+The quick start SHALL turn features off and on with named values files, and SHALL
+present a command-line override as the one-off exception rather than the method.
 
 #### Scenario: Booleans come from a values file
 - **WHEN** the page turns a feature off
 - **THEN** it does so with a boolean in a values file, which the loader parses as
   a real boolean
 
-#### Scenario: The command-line off-switch is the empty value
+#### Scenario: The profile is the demonstrated mechanism
+- **WHEN** the page shows the owner's scenario — disabling what a project does
+  not need, and enabling it later by changing the values
+- **THEN** it does so by applying a different named, committed profile, because
+  that is what "changing the values" means, and this stays true regardless of
+  what a command-line assignment does with types
+
+#### Scenario: The command-line override appears at most once
+- **WHEN** the page shows a value being overridden on the command line
+- **THEN** it does so once, as an aside to the profile mechanism, and never as
+  the primary path
+
+### Requirement: The command-line off-switch is written around a known defect, temporarily
+
+A value assigned on the command line is stored as a string today, and a non-empty
+string is true to the template engine. Until that defect is fixed, the quick start
+SHALL NOT present a command-line `=false` as a way to disable a feature, and SHALL
+say why in one sentence. This requirement exists only for the life of that defect.
+
+#### Scenario: The off-switch shown is the empty value
 - **WHEN** the page shows a one-off override that turns a feature off
 - **THEN** it assigns the empty value, and never the word `false`
 
 #### Scenario: The reason is stated once
 - **WHEN** the page first shows a value being overridden on the command line
 - **THEN** one sentence says that command-line values stay strings, so `=false`
-  would read as true
+  would read as true, and it names the issue tracking the fix
+
+#### Scenario: The workaround is marked as temporary in the page's own source
+- **WHEN** the page is written
+- **THEN** the sentence and the empty-value form are identifiable as belonging to
+  the defect, so whoever fixes it can find and remove them
+
+#### Scenario: What the fix makes removable
+- **WHEN** the defect is fixed and command-line values infer their types
+- **THEN** the explanatory sentence and the empty-value form are removed and the
+  natural `=false` is shown in their place, while the values-file profiles remain
+  the page's primary mechanism unchanged
 
 ### Requirement: Notes on the page are separated
 

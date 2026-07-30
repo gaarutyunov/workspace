@@ -4,7 +4,17 @@ epos ships a docs site at `https://gaarutyunov.github.io/epos/` — Astro 5, fou
 pages, ui-kit v0.2.0 **vendored** (not installed: the kit publishes to GitHub
 Packages, which needs a PAT even for public packages — `docs/vendor/ui-kit/VENDORED.md`).
 
-Two of the four pages are **generated**. `internal/docsgen/main.go`:
+Two of the four pages are **generated**, and that is a property this change
+**preserves and extends, never works around**. An auto-generated reference cannot
+drift from the code it documents; a hand-written one always does. Every style,
+chrome and layout decision below therefore has to reach `cli.astro` and
+`skillfile.astro` *through their generator* — which means editing
+`internal/docsgen`, not the Astro. Nothing in this change replaces a generated
+page with a hand-authored one, bypasses the drift gate, or moves a reference out
+of `internal/docsgen`; where the generator cannot yet express something the
+change needs, the generator gains the capability.
+
+`internal/docsgen/main.go`:
 
 ```go
 func targets() []target {
@@ -17,8 +27,11 @@ func targets() []target {
 
 `cli.astro` comes from the cobra tree via `cli.NewRootCommand()`;
 `skillfile.astro` from `skillfile.NewReference()`. `.github/workflows/ci.yml:36-43`
-re-runs the generator and fails on any diff. `index.astro` and `quickstart.astro`
-are hand-written and covered by no drift check.
+re-runs the generator and fails on any diff — the gate stays. `index.astro` and
+`quickstart.astro` are hand-written and covered by no drift check, which is the
+asymmetry to be uncomfortable about: the two pages this change rewrites by hand
+are the two nothing verifies. Hence D5, which puts the quick start's worked
+example behind a test.
 
 Page weights today:
 
@@ -65,7 +78,7 @@ in `internal/skillfile/reference.go`, a test fixture, or escaped HTML in an
   the default because the quick start does not actually need anything from #44:
   `FROM git+https://github.com/o/r#<ref>:<subdir>` is a shipped `FROM` source
   (`internal/skillfile/git.go`, pinned to a commit SHA **and** a tree SHA), and
-  the three Go skills live at real paths in
+  every source skill lives at a real path under
   `gaarutyunov/workspace:.agents/skills/`. The whole multi-stage demo runs
   against git sources with no registry involved.
 - *Write the example against `ghcr.io/gaarutyunov/skills/...` OCI refs now.*
@@ -93,12 +106,16 @@ translation is not "consume the site's components" — it is **the tokens are
 already the site's palette, and three kit components already are the site's
 patterns.**
 
-Measured from `app/page.tsx`, `app/globals.css`, `components/*`:
+This section measures the reference site's **landing** (`app/page.tsx`,
+`app/globals.css`, `components/*`) against epos's landing. The site's **inner**
+pages — the five skill pages and the CV — are a different and, for a docs site,
+more important shape; they are measured separately in **D3**, because three of
+epos's four pages are inner pages.
 
 | element | garutyunov.com | epos landing |
 |---|---|---|
 | background | `#000000`, one elevation `#1a1a1a` | `--ga-bg` / `--ga-bg-elev` (identical values) |
-| container | `max-w-6xl` = **1152px**, `px-4 sm:px-6 lg:px-8` | landing band widens; docs pages stay narrow (D3) |
+| container | `max-w-6xl` = **1152px**, `px-4 sm:px-6 lg:px-8` | **every** page widens to this — inner pages included (D3) |
 | hero grid | `grid-cols-1 lg:grid-cols-[auto_1fr]`, `gap-10 lg:gap-14` | same two-column band |
 | hero left | ASCII box-drawing wordmark, `<pre>`, Fira Mono, `text-[8px] sm:text-[10px] lg:text-[12px]`, `tracking-[-1px]`, `leading-[125%]`, `select-none` | ASCII `EPOS` wordmark, same treatment, `--ga-font-display` |
 | hero right | **one** sentence, `text-xl sm:text-2xl lg:text-3xl leading-tight tracking-tight text-balance`, muted `#878787` | one sentence, same scale via `--ga-fs-*`, `--ga-muted` |
@@ -137,24 +154,143 @@ naming it here so nobody derives one.
 
 ---
 
-## D3: the landing is wide, the docs pages stay narrow
+## D3: epos's docs pages are *inner* pages — one shell, a 9/3 grid, breadcrumbs
 
-`Base.astro` sets `main { max-width: 52rem }` (832px) globally. That is right for
-prose and wrong for a hero plus a 3-column grid; garutyunov.com's band is 1152px,
-and the kit's own `--ga-max-width` is 880px.
+An earlier draft of this design said "the landing is wide, the docs pages stay
+narrow". Measuring the reference site's inner pages shows that is **wrong**, and
+correcting it is the largest single change in this revision.
 
-**Decision.** Add a `width?: "prose" | "wide"` prop to `Base.astro`, defaulting
-to `"prose"`. `index.astro` passes `"wide"`. The other three pages are untouched,
-including the two generated ones — which matters, because a change to their
-`<Base …>` call would mean editing `internal/docsgen/page.go`'s `frontmatter()`.
+Measured from `app/[skill]/page.tsx` (route is top-level `/{skill}`, not
+`/skills/[slug]`), `app/cv/page.tsx`, `app/layout.tsx`,
+`components/section-label.tsx`, `components/skill-chip.tsx` on `origin/main`:
 
-**Rejected:** overriding `max-width` from `index.astro`'s scoped `<style>`.
-Astro scopes styles to the component, and `main` lives in `Base`; it would need
-`:global`, which is the same global reach with none of the type safety.
+| element | garutyunov.com inner pages | epos docs pages |
+|---|---|---|
+| container | **the same `max-w-6xl` = 1152px as the landing** — `app/cv/page.tsx:27` is byte-identical to `app/page.tsx:19`. Inner pages do **not** narrow | same 1152px shell as the landing |
+| gutters | `px-4 sm:px-6 lg:px-8` (CV, landing); the skill page's bare `px-4` is a divergence, not a pattern | `px-4 sm:px-6 lg:px-8` |
+| body layout | 12-column grid, `lg:grid-cols-12`, main `lg:col-span-9` + `aside lg:col-span-3`, `gap-12 lg:gap-16` (skill) / `gap-10 lg:gap-14` (CV) | `col-span-9` main + `col-span-3` aside, one gap value |
+| effective measure | **≈824px** at the 1152px cap — *wider* than epos's current 832px `main`, not narrower | ≈824px, i.e. today's measure, kept |
+| sticky header | `sticky top-0 z-50 bg-background flex h-14` — 56px, opaque `#000`, **no border, no blur** | same |
+| footer | **there is none.** `app/layout.tsx` renders `<header>` + `<main>` and nothing else | epos keeps its footer (see below) |
+| page `h1` | **visible**, not `sr-only` — `text-4xl font-semibold tracking-tight text-foreground mb-6` = 36px/40px, weight 600, `-0.025em`, `#ededed`, 24px below. CV steps `text-3xl sm:text-4xl` | same, and the landing's `sr-only` `h1` is the exception, not the rule |
+| section heading | `SectionLabel` — `text-sm font-mono font-medium uppercase tracking-normal text-foreground mb-3.5` = 14px mono, weight 500, UPPERCASE, tracking **0em**, 14px below, no rule | same component, same values, on every page |
+| bullets | never a real list marker: `<li class="flex gap-3">` with a leading `—` span nudged `mt-1`/`mt-0.5` | same em-dash bullet |
+| ruled rows | CV sidebar: `flex justify-between text-sm border-b border-border py-2` — label `text-foreground`, value `font-mono text-muted` | the pattern for any key/value list |
+| chips | `inline-flex items-center px-2.5 py-0.5 rounded-full border border-border text-xs text-muted`, group `gap-1.5` = 6px | same |
+| rhythm | always `space-y-*`, never element margins: 48px between sections, 40px between entries, 8–10px between bullets | same |
+| colours | `--foreground #ededed`, `--muted #878787`, `--dim #454545`, `--border #1a1a1a`, `--border-subtle #111111`, `--card #1a1a1a` on `#000` | the identical tokens, via the kit |
+
+**Decision.** Drop the `width?: "prose" | "wide"` prop. `Base.astro` instead
+gives **every** page the 1152px shell and the sticky 56px header, and the three
+docs pages render their content in the inner-page **9/3 grid**: content in
+`col-span-9`, an aside in `col-span-3`. The reading measure lands at ~824px —
+within 8px of today's 832px `main`, so no page's prose gets harder to read while
+every page gains the site's actual proportions. The landing is then not a special
+width at all; it is the same shell with a full-width band instead of a 9/3 split.
+
+**Why this is better than the prop.** The prop existed to protect the docs pages
+from a width they never needed protecting from. The real difference between the
+landing and an inner page on garutyunov.com is not container width — it is
+*whether there is an aside*. Modelling that directly means the two generated
+pages get a sidebar slot (an on-page contents list is the obvious tenant, and
+`internal/docsgen` already knows every section it emits), which the prop could
+never have given them.
+
+**The aside is where the generated pages gain the most.** `cli.astro` is 2109
+words and `skillfile.astro` 3341, with no navigation within the page at all. The
+site's own answer to "where am I in a set" is the skill page's *Other skills*
+list and the CV's *Areas* rows; the docs equivalent is a per-page contents list
+plus links to the sibling reference. Both are derivable in the generator.
+
+**D3a: breadcrumbs.** The owner asked for them explicitly, and the reference site
+has them on every inner page — hand-rolled twice, with **divergent** styling:
+
+```jsx
+// app/[skill]/page.tsx:43-49
+<nav className="flex items-center gap-2 text-xs text-dim pt-8 pb-6">
+  <Link href="/" className="hover:text-foreground transition-colors shrink-0">
+    German Arutyunov
+  </Link>
+  <span className="shrink-0">/</span>
+  <span className="text-foreground">{skill.title}</span>
+</nav>
+```
+
+```jsx
+// app/cv/page.tsx:28-34
+<nav className="flex items-center gap-2 text-sm font-mono text-muted pt-4 pb-6">
+  <Link href="/" …>German Arutyunov</Link>
+  <span className="shrink-0">/</span>
+  <span className="text-foreground">CV</span>
+</nav>
+```
+
+They agree on the structure — a `<nav>` of flex children, **no `<ol>`/`<li>`**, a
+literal `/` separator in a bare `<span>`, `gap-2` = 8px on both sides of the
+separator, `pb-6` = 24px down to the `h1`, first crumb a link with
+`hover:text-foreground transition-colors`, **last crumb a plain `<span>` in
+`text-foreground`, never a link**. They disagree on font (inherited sans vs
+`font-mono`), size (`text-xs` 12px vs `text-sm` 14px), link colour (`text-dim`
+`#454545` vs `text-muted` `#878787`) and top offset (`pt-8` 32px vs `pt-4` 16px).
+
+**Decision.** Follow the **CV variant**: `font-mono`, 14px, `--ga-muted` for the
+link, `--ga-fg` for the current page, `/` separator, 8px gaps, 24px to the `h1`.
+Reasons, in order: it is the more legible of the two (`#454545` on `#000` fails
+contrast at 12px); mono matches a documentation site's character and the
+`SectionLabel` treatment it sits above; and the site's own metadata convention
+(D2) is that machine-ish text is mono. The skill page's 12px `text-dim` form is
+treated as the divergence it is, not as a second pattern to reproduce.
+
+**Three things are added that the reference site does not have**, and they are
+additions on purpose rather than copies: the `<nav>` gains
+`aria-label="Breadcrumb"`, the current-page crumb gains `aria-current="page"`,
+and the `/` separator gains `aria-hidden="true"` so a screen reader does not read
+"slash" between crumbs. The reference site omits all three; reproducing an
+accessibility gap is not fidelity. Nothing else about the markup changes, so the
+visual result is the CV's breadcrumb exactly.
+
+**The breadcrumb replaces the per-page back link.** Every epos page currently
+hand-rolls its own "← back to the landing". The first crumb *is* that link, and
+one shared definition beats four copies — which is what the existing "shared page
+furniture" requirement was already asking for. On the two generated pages the
+breadcrumb is emitted by `internal/docsgen/page.go`, from the page's own title;
+that is the generator being extended, per the Context.
+
+**Depth.** The site's breadcrumbs are always exactly two crumbs. epos's docs are
+also two levels — `epos / Quick start`, `epos / CLI reference`,
+`epos / Skillfile reference` — so no deeper case has to be designed. The landing,
+being the root, carries none.
+
+**What the reference site does *not* give us, and where we stop copying.**
+`@tailwindcss/typography` is loaded in `app/globals.css:2` and **`prose` appears
+zero times in the repo** — the entire site is hand-rolled per element. There is
+no `<h3>` anywhere, no styled paragraph-in-flow, no inline code, no code block,
+no blockquote, no table. So for a documentation site there is **no long-form
+scale to copy**: the site's inner pages are bullets, ruled rows and chips, not
+prose. Where epos needs something the reference has no answer for — an `h3`, a
+code block's surround, a table in the CLI reference — the spec extends the
+existing scale rather than importing an outside one, and says so. Claiming to
+have "copied" an `h3` from a site that has none would be a fabrication.
+
+**Rejected:**
+
+- *Keep the `"prose" | "wide"` prop and leave the docs at 832px.* This is what the
+  earlier draft said. It contradicts the measurement: the reference site's inner
+  pages are 1152px, and its own reading column is *wider* than epos's, not
+  narrower. The owner asked for the inner-page style; this was not it.
+- *Copy the skill page's 12px `text-dim` breadcrumb.* Rejected above on contrast.
+- *Reproduce the site's inner-page divergences* (`px-4` at all breakpoints, two
+  different grid gaps, two breadcrumb styles, no footer, no print stylesheet).
+  Rejected: those are drift in the reference, not design. epos picks the CV's
+  gutters, one gap value, one breadcrumb, and keeps its footer — a docs site
+  needs the licence and repository links a personal site does not.
+- *Overriding `max-width` from a page's scoped `<style>`.* Astro scopes styles to
+  the component and `main` lives in `Base`; it would need `:global`, which is the
+  same global reach with none of the type safety.
 
 ---
 
-## D4: parameterisation is install-time, and `--set x=false` is true
+## D4: parameterisation is install-time, and `--set x=false` is true — for now
 
 This is the load-bearing correction in the change. Epos has **two** parameter
 mechanisms and they are deliberately disjoint — `internal/skillfile/reference.go`
@@ -194,18 +330,49 @@ contrast `LoadValues` reads `-f` files with `yaml.Unmarshal` into
 `map[string]any`, so `openapi: false` in a YAML file is a real Go `bool` and is
 falsy. Verified against the code, not inferred.
 
-**Decision.** The demo's primary path is `-f values-library.yaml` /
-`-f values-service.yaml` — two profiles, and "enabling it later" is swapping the
-file. `--set` appears once, as the one-off override, in its **only** correct
-off-form: `--set openapi=` (empty string). The quick start states the reason in
-one sentence, because a reader who guesses `--set openapi=false` gets a silently
-wrong install.
+**This is a bug, and it is being fixed — epos#47.** The owner's ruling on this
+design: *"Extract into separate issue, this must be fixed and work same as in
+helm. Explore helm source code."* That issue is **epos#47, "install --set does
+not infer types (must match helm)"**, and it is the one place the defect is
+tracked. `applySet`'s comment is therefore **not** a considered position to be
+documented as behaviour-by-design; it is a limitation with an owner-approved
+fix pending, and helm's `pkg/strvals` (`false`/`true` → `bool`, integers →
+`int64`, `null` → nil, `a,b` → list, `\,` escaping, `--set-string`,
+`--set-file`) is the target semantics.
 
-**Rejected:** specifying a fix to `applySet` so `false` infers a boolean. It is
-a change to epos's value semantics with a real argument on both sides (the
-comment above is a considered position, not an oversight), it is out of a
-docs issue's scope, and #42 can be correct without it. Flagged for the owner
-below.
+**Decision — two parts, and the second is temporary.**
+
+1. **`-f values-library.yaml` / `-f values-service.yaml` is the demo's primary
+   path, permanently.** This is *not* a workaround and does not go away when #47
+   lands. A values file is the right shape for the thing being demonstrated: the
+   owner's scenario is "disable some dependencies because the project doesn't
+   need it, and enable it later by changing the values" — a *named, committed,
+   re-appliable profile*, which is a file, not a command line. `--set` is for
+   one-off overrides, and it stays a footnote on the page whatever its type
+   semantics.
+2. **Until #47 lands, `--set` appears once, in its only correct off-form:
+   `--set openapi=` (empty string), with one sentence of prose saying why.**
+   This part **is** a workaround and is written to be deleted. A reader who
+   guesses `--set openapi=false` today gets a silently wrong install, and the
+   quick start cannot ship without warning them.
+
+**Exactly what becomes removable when #47 lands**, so whoever closes it knows
+what to delete here:
+
+- The one sentence in the quick start explaining that command-line values stay
+  strings and so `=false` reads as true.
+- The `--set openapi=` empty-value form, replaced by the natural
+  `--set openapi=false`.
+- The prohibition in the `epos-quickstart` capability on writing `=false` on the
+  command line.
+- The corresponding "Booleans are real booleans" caveat in the
+  `epos-derived-go-skill` capability — after #47 the YAML profiles are still the
+  right primary path (part 1), but for the reason above, not because `--set` is
+  broken.
+
+Nothing else in this change depends on the bug. The values profiles, the
+`{{ if .Values.x }}` guards, the two-profile install test and the whole worked
+example are unaffected by #47 either way.
 
 **One more consequence worth writing down.** Stage names are the values-scope
 keys (`internal/artifact/artifact.go`, `StagesAnnotation` =
@@ -237,7 +404,7 @@ quotes that file rather than restating it.
   when the workspace skills change, and epos's whole argument is that pinning is
   the point.
 
-**Rejected:** `PATCH` for the edits to the three base skills. go-gitdiff is
+**Rejected:** `PATCH` for the edits to the vendored base skills. go-gitdiff is
 applied strictly — **no fuzz, no offset search** — so any upstream drift in a
 774-line `SKILL.md` fails the build outright. `AWK` (line-oriented, section-
 boundary matching) and `REPLACE` (RE2, and a zero-match **warns and continues**)
@@ -249,47 +416,143 @@ strictness is right and already the behaviour: an absent path is fatal, because
 
 ## D6: how the derived skill is scoped, and what it does *not* decide
 
-Four stages, chosen from what the three skills actually contain:
+**Five** stages, chosen from what the source skills actually contain. The fifth,
+`cli`, is added in this revision on the owner's *"drop viper"* ruling — see
+D6a, which explains why the drop is only meaningful with that source present.
 
 | stage | source | what happens to it | why |
 |---|---|---|---|
-| *(final, unnamed)* | `go-project-scaffold` — 438 lines, 3 files | base; `## Non-negotiable` excised with `AWK` and re-added parameterised; `SET name`/`SET version` | the only one of the three the workspace routes for Go work (`AGENTS.md`), and already written as if it had parameters |
-| `idiomatic` | spf13 `go` — 774 lines, one `SKILL.md` | keep the philosophy (≈11-429); strip the "modern stdlib / current syntax" cookbook (≈430-718) and the debugging essay (750-774) | ~290 stripped lines are a stdlib cookbook, useful but not house guidance; the surviving half is the part `go-project-scaffold` has no view on |
-| `pro` | `golang-pro` — 2255 lines, 6 files | keep `references/{concurrency,testing}.md` minus two sections; **drop `generics.md` and `project-structure.md` whole**; drop `interfaces.md`'s "Interface Satisfaction Verification" | see below — this is where the drops are load-bearing rather than cosmetic |
+| *(final, unnamed)* | `go-project-scaffold` — 438 lines, 3 files | base; `## Non-negotiable` excised with `AWK` and re-added parameterised; `SET name`/`SET version` | the only one the workspace routes for Go work (`AGENTS.md`), and already written as if it had parameters |
+| `idiomatic` | spf13 `go` — 774 lines, one `SKILL.md` | keep the philosophy (≈11-429, **including the generics guardrails at 380-429**); strip the "modern stdlib / current syntax" cookbook (≈430-718) and the debugging essay (750-774) | ~290 stripped lines are a stdlib cookbook, useful but not house guidance; the surviving half is the part `go-project-scaffold` has no view on |
+| `pro` | `golang-pro` — 2255 lines, 6 files | keep `references/{concurrency,testing,generics}.md` minus named sections; **drop `project-structure.md` whole**; drop `interfaces.md`'s "Interface Satisfaction Verification" | see D6a — the drops are load-bearing, and `generics.md` is now a *precise* strip rather than a whole-file drop |
+| `cli` | `cobra-viper` — 446 lines, one `SKILL.md` | keep the Cobra half; **`AWK` out `## Viper Configuration Patterns` (251-362) whole**; `REPLACE` the remaining Viper mentions; `APPEND` the koanf translation | the owner's *"drop viper"*, and the workspace's own live example of an override that could not be layered — D6a |
 | `containers` | `testcontainers-go` — 3437 lines | `COPY` only the Go example(s) the profile needs, path-scoped | #44: *"add testcontainers reference but only go, it has a bunch of references"* |
 
-**The `golang-pro` drops are removals of content that is wrong here, not merely
-duplicated:**
+---
 
-- `references/generics.md` (442 lines) teaches `type Container[T any]` and a
-  Rust-style `Result[T]`; `go/SKILL.md:409-423` labels that shape *"this is
-  Java"* and says "do not create generic base types, generic services, or
-  generic repositories". It also writes `import "constraints"` (`:40`) — not a
-  package — where `go/SKILL.md:426` says use `cmp.Ordered`.
-- `references/project-structure.md` (477 lines) is the single biggest source of
-  conflict in the workspace: `gin` + `zap` + **`kelseyhightower/envconfig`** as
-  *the* configuration mechanism (a **third** config library, against
-  `go-project-scaffold`'s koanf and `cobra-viper`'s Viper), the **archived**
-  `github.com/golang/mock/mockgen` driven by a `tools.go` of blank imports that
-  `go/SKILL.md:712` says never to generate, deprecated `// +build` tags, and the
-  exact `api/`+`service/`+`repository/` layer set `go/SKILL.md:120` says to
-  reject.
-- `interfaces.md:173-180`'s `var _ io.Reader = (*MyReader)(nil)` is #44's
-  "explicit interface conformance". `go-project-scaffold/SKILL.md:174-176`:
-  *"**Never** write `var _ Interface = (*Impl)(nil)` … Java-flavoured noise."*
-  A clean two-sided conflict, and the crispest one-line demonstration of "drop
-  what we don't use" in the whole set.
-- `concurrency.md:15-51` opens with a static `WorkerPool`, which
-  `go/SKILL.md:187` names an anti-pattern and `:195` answers with `errgroup` +
-  `SetLimit`. The section goes; rate-limiting and pipelines stay.
+### D6a: the four drops, each attributable to a named conflict
 
-**Viper — the drop the issue names, and the one that is *already* a workaround.**
-#44 says "dropping what we don't use, i.e. viper". Worth being precise about
-where Viper actually is: the vendored skills were **not** patched. `37bd574` is
-titled "Add spf13's Go skills, with koanf in place of Viper", but that describes
-a workspace *rule*, not an edit — `cobra-viper/SKILL.md` is verbatim upstream
-Viper and contains zero occurrences of "koanf". The override lives in
-`.claude/rules/go-cli-koanf.md`, which states why:
+**1. `var _ Interface = (*Impl)(nil)` — dropped, and the owner is emphatic.**
+The review comment reads: *"Drop viper and explicit interface implementation. The
+var _ Interface thing. I hate it."* `interfaces.md:173-181` is the offending
+section, "Interface Satisfaction Verification":
+
+```go
+var _ io.Reader = (*MyReader)(nil)
+var _ io.Writer = (*MyWriter)(nil)
+var _ io.Closer = (*MyCloser)(nil)
+```
+
+`go-project-scaffold/SKILL.md:175` — *"**Never** write
+`var _ Interface = (*Impl)(nil)`. The compiler enforces…"* — and
+`references/review.md:77` makes removing it a review checklist item. A clean
+two-sided conflict, the crispest one-line demonstration of "drop what we don't
+use" in the whole set, and now an owner instruction on top of that. It is
+dropped, the derived skill inherits `go-project-scaffold`'s prohibition, and the
+build test asserts the string `var _ ` does not occur in the installed artifact —
+a drop nobody verifies is a drop that comes back on the next upstream bump.
+
+**2. `references/project-structure.md` (477 lines) — dropped whole.** The single
+biggest source of conflict in the workspace: `gin` + `zap` +
+**`kelseyhightower/envconfig`** as *the* configuration mechanism (a **third**
+config library, against `go-project-scaffold`'s koanf and `cobra-viper`'s Viper),
+the **archived** `github.com/golang/mock/mockgen` driven by a `tools.go` of blank
+imports that `go/SKILL.md:712` says never to generate, deprecated `// +build`
+tags, and the exact `api/`+`service/`+`repository/` layer set `go/SKILL.md:120`
+says to reject. Nothing in it survives a house review, so nothing in it is worth
+a precise strip.
+
+**3. `concurrency.md:15-51`'s static `WorkerPool` — dropped.**
+`go/SKILL.md:187` names it an anti-pattern and `:195` answers with `errgroup` +
+`SetLimit`. The section goes; rate limiting and pipelines stay.
+
+**4. Viper — dropped from a source that is added in order to drop it.** See
+immediately below.
+
+---
+
+### D6b: generics — kept, with two blocks strip
+
+**The owner reversed this one.** The earlier draft dropped
+`golang-pro/references/generics.md` whole. The review says simply *"Generics is
+good."* — so the file stays, and the strip becomes precise. Re-reading the file
+against `go/SKILL.md` shows the earlier all-or-nothing call was over-broad: two
+blocks out of twelve sections are wrong, and the earlier rationale conflated
+them.
+
+`generics.md` is 442 lines in twelve sections. **Ten survive untouched**: Basic
+Type Parameters, Type Constraints, Generic Data Structures, Generic Map
+Operations, Generic Pairs (the `Pair`/`Swap` half), Comparable Constraint, Type
+Inference, Generic Channels, Union Constraints, Quick Reference. A generic
+`Stack[T]` or a generic `Map`/`Filter` is exactly what generics are *for*, and
+`go/SKILL.md` endorses them.
+
+**Strip A — `## Generic Interfaces` (270-309), removed whole.** It teaches
+
+```go
+type Container[T any] interface { Add(item T); Remove() (T, bool); Size() int }
+func ProcessContainer[T any](c Container[T], item T) { … }
+```
+
+which is precisely the shape `go/SKILL.md:409-413` shows under **"When NOT to Use
+Generics"** with the comment *"Bad: generic interface for polymorphism — this is
+Java"*, answered at :415-420 by a concrete `UserStore`. `:422` — *"**Do not**
+create generic base types, generic services, or generic repositories."* Clean
+section boundary, so `AWK`.
+
+**Strip B — the `Result[T]` block inside `## Generic Pairs and Tuples`
+(≈199-228), removed by `REPLACE`.** It opens with its own admission —
+`// Generic Result type (like Rust's Result<T, E>)` — and reimplements
+`Ok`/`Err`/`IsOk`/`Unwrap`/`UnwrapOr`. Go returns `(T, error)`; a `Result`
+wrapper is a different language's idiom and collides with every error-handling
+line in both surviving skills. The `Pair`/`Swap` code above it is fine and stays,
+which is why this is a `REPLACE` on a multi-line pattern and not an `AWK` on a
+section — the bad block is *inside* a good section. **Verify first that epos's
+`REPLACE` compiles an RE2 pattern with `(?s)` so a multi-line match is
+expressible**; if it does not, the honest fallback is `AWK` on the whole
+Pairs-and-Tuples section, losing `Pair` — worse, and worth knowing before the
+Skillfile is written. Added as task 1.4.
+
+**Correction, not a strip — the `constraints` package.** `generics.md:40` writes
+`import "constraints"`, which is not an importable path (the real one is
+`golang.org/x/exp/constraints`), and uses `constraints.Ordered` at `:9`, `:323`
+and `:440` where `go/SKILL.md:426` says *"**Do** use `cmp.Ordered`"*. `REPLACE`
+rewrites `constraints.Ordered` → `cmp.Ordered` and fixes the import line. Note
+that `constraints.Integer | constraints.Float` at `:44` has **no** `cmp`
+equivalent — only `Ordered` moved to the standard library — so that illustration
+stays and the import must name the real `golang.org/x/exp/constraints` path
+alongside `cmp`. Getting this wrong in either direction produces a reference that
+does not compile, which is why it is spelled out here rather than left to the
+implementer.
+
+**Why this is better than the whole-file drop, beyond the owner's preference.**
+The `idiomatic` stage keeps `go/SKILL.md:380-429` — spf13's generics
+*guardrails*, including "When NOT to Use Generics". Keeping the `pro` stage's
+*recipes* next to them is the pairing the derived skill wants: rules and worked
+examples on the same topic, with the two shapes the rules forbid removed from the
+examples. That is not redundancy — it is the "no two reference files give
+opposing instructions on the same question" scenario being *satisfied* rather
+than dodged, and it is a better demonstration of Epos than deleting the file,
+because a surgical strip is something a fork cannot keep doing cheaply.
+
+---
+
+### D6c: Viper — the drop the owner named, and the workspace's own unfixable override
+
+*"Drop viper"* — and #44 said the same: *"dropping what we don't use, i.e.
+viper"*. Being precise about where Viper actually is matters, because **none of
+the four original stages contains any**: `golang-pro` has zero occurrences,
+`testcontainers-go` zero, and spf13's `go` mentions Viper only in its author
+bio. `go-project-scaffold` mentions it three times and every one already says
+*never*. So against the earlier four-stage design the instruction would have been
+**vacuous** — nothing to drop.
+
+It is not vacuous against the workspace, because Viper is in `cobra-viper`, whose
+**Cobra** half is house standard and whose **Viper** half is house-forbidden. The
+vendored skill was never patched: `37bd574` is titled "Add spf13's Go skills,
+with koanf in place of Viper", but that describes a workspace *rule*, not an edit
+— `cobra-viper/SKILL.md` is verbatim upstream and contains zero occurrences of
+"koanf". The override lives in `.claude/rules/go-cli-koanf.md`, which states why:
 
 > **Do not use Viper.** … This is a standing preference, not a per-project call,
 > so the skill is left exactly as upstream wrote it and the exception lives here
@@ -297,10 +560,42 @@ Viper and contains zero occurrences of "koanf". The override lives in
 > reinstalled.**
 
 That sentence is the strongest argument for Epos anywhere in this workspace, and
-the quick start should say so plainly: the override is detached from the skill
-*because there was no way to layer it onto the skill*. `FROM … ` + `AWK`/`REPLACE`
-is that way. It survives reinstallation because the derivation, not the edited
-file, is the artifact.
+the earlier draft already said the quick start should make it: the override is
+detached from the skill *because there was no way to layer it onto the skill*.
+`FROM` + `AWK`/`REPLACE`/`APPEND` is that way, and it survives reinstallation
+because the derivation, not the edited file, is the artifact.
+
+**Decision.** Add `cli` as a fifth stage from `cobra-viper`, and make the drop
+real:
+
+- `AWK` out `## Viper Configuration Patterns` — lines **251-362**, from
+  "Prefer a Viper Instance over the Global Singleton" through "Config File
+  Setup", ending cleanly at `## Version Handling` (363). A whole named section
+  with unambiguous boundaries, which is exactly the case `AWK` is for.
+- `REPLACE` the residual mentions the section boundary does not catch: the title
+  at `:12` ("Go CLI Architecture: Cobra & Viper"), `### Unified Configuration`
+  at `:31`, and any Viper line under `## Common Mistakes` (438+).
+- `APPEND` the koanf translation from `.claude/rules/go-cli-koanf.md` in its
+  place, so the derived skill carries the house configuration guidance the
+  upstream skill cannot.
+
+The result lands as `references/cli.md`. Everything else in `cobra-viper` — the
+command-first architecture, the constructor-per-command factory, `RunE`,
+context-aware commands, `Args` validation, flag design, in-memory CLI testing —
+is kept as written, because it is spf13's and it is what the house follows.
+
+**This is the change's best single demonstration**, better than any of the other
+drops: it is a real workspace problem, unsolved today, with a written admission
+that it is unsolved, and the derivation solves it. The quick start should say so
+in one sentence.
+
+**Interpretation flagged.** The owner wrote "drop viper" as a three-word
+instruction on the stripping list; adding a source in order to strip it is an
+inference, and it grows the example from four stages to five. The alternative
+reading — assert "no Viper guidance survives" without adding the source — is
+satisfiable by doing nothing, which cannot be what was meant. If the owner wants
+the example kept to four stages, the `cli` stage is the piece to cut, and the
+`epos-derived-go-skill` requirement reduces to the vacuous form.
 
 **What this deliberately does NOT decide — for the owner.** The parameterised
 base is `go-project-scaffold`, so the derived skill prescribes
@@ -330,10 +625,17 @@ and that is the owner's call.**
    Either works provided it is one checked-in file both issues point at. If #44
    keeps it, #42 reduces to landing + note fix + token fix now, and the quick
    start follows #44.
-2. **Should `--set x=false` infer a boolean?** (D4.) Today it does not, and the
-   docs will say so. Changing it is a small, separate epos change.
-3. **`internal/` as the default package home** (D6) — unresolved between two
+2. **`internal/` as the default package home** (D6) — unresolved between two
    merged skills. Not needed for the example; needed before the derived skill
    could be adopted as the real house skill.
-4. **Pin for the git `FROM` sources** (D5) — a workspace tag, or a SHA? A tag
+3. **Pin for the git `FROM` sources** (D5) — a workspace tag, or a SHA? A tag
    reads better in a tutorial; a SHA needs no tagging discipline.
+4. **Five stages, or four?** (D6c.) Adding `cobra-viper` as the `cli` stage is
+   how "drop viper" becomes a real drop rather than a vacuous assertion, and it
+   is the change's strongest demonstration — but it is an inference from a
+   three-word instruction, and it makes the example bigger. Flagged, not assumed.
+
+**Resolved since the first review.** *"Should `--set x=false` infer a boolean?"*
+— yes, and it is now **epos#47**, filed at the owner's direction. D4 records
+which parts of this change are written around the bug and are to be deleted when
+#47 lands, and which parts stand on their own regardless.
