@@ -24,6 +24,17 @@ reader experiences them rather than as template output.
   a real registry, consistently with the project's rule against substituting
   fakes for the registry
 
+#### Scenario: The served subject is the registry serving its own catalog
+- **WHEN** the served half of the suite sets up its subject
+- **THEN** it is the registry binary with the catalog enabled, answering both the
+  distribution API and the pages on one listener, because that is the shape that
+  gets deployed
+
+#### Scenario: The distribution API keeps working while the catalog is browsed
+- **WHEN** pages are loaded against the served catalog
+- **THEN** a pull through the same process succeeds throughout, so that serving
+  pages cannot be shown to have cost the registry its own function
+
 #### Scenario: The suite does not depend on the published site
 - **WHEN** the suite runs
 - **THEN** it never requests the project's deployed site, so a deployment
@@ -157,6 +168,12 @@ requirement for building, installing or running either binary.
 - **WHEN** the released binaries are built
 - **THEN** neither contains the browser automation library or any part of its
   driver, and the constraint that the project builds without cgo is unaffected
+
+#### Scenario: The command-line binary is asserted to carry no frontend
+- **WHEN** the suite's subject is set up
+- **THEN** nothing in it is served by the command-line binary, because that
+  binary has no catalog to serve — which is the deployment shape the assertions
+  are about
 
 #### Scenario: The ordinary test run does not need a browser
 - **WHEN** the project's unit tests are run

@@ -1,17 +1,30 @@
 ## ADDED Requirements
 
-### Requirement: The frontend ships inside the binary
+### Requirement: The frontend ships inside the registry binary, and only that one
 
-Every asset the catalog serves SHALL be embedded in the `epos` binary at compile
-time, and the binary SHALL need no file outside itself to render a page.
+Every asset the catalog serves SHALL be embedded at compile time in the binary
+that serves the catalog, that binary SHALL need no file outside itself to render
+a page, and the command-line binary SHALL contain none of it.
 
 #### Scenario: A fresh clone builds a complete binary offline
 - **WHEN** the repository is cloned and built with no network access and no
   credentials, the module cache being already populated
-- **THEN** the build succeeds and the resulting binary serves the catalog
-  complete with its stylesheet, its scripts and its logos — a statement about
-  building and running the binary, which the browser the end-to-end tier
+- **THEN** the build succeeds and the resulting registry binary serves the
+  catalog complete with its stylesheet, its scripts and its logos — a statement
+  about building and running the binary, which the browser the end-to-end tier
   downloads does not weaken because that tier is not part of building it
+
+#### Scenario: The command-line binary carries no frontend
+- **WHEN** the packages reachable from the command-line binary are enumerated
+- **THEN** the package holding the embedded assets is not among them, so a user
+  who installs the CLI to pack and publish skills receives no component bundle,
+  no stylesheet, no template and no logo
+
+#### Scenario: Putting it back fails the build
+- **WHEN** a change makes any package the command-line binary reaches import the
+  embedded-asset package
+- **THEN** the test suite fails naming the import, so the separation is enforced
+  rather than reviewed
 
 #### Scenario: No asset is fetched at build time
 - **WHEN** the build is inspected
@@ -152,6 +165,12 @@ for and where it is linked, and none SHALL require cgo.
 - **WHEN** a dependency exists only to test the catalog
 - **THEN** it is reachable only from test files selected by an explicit build
   tag, and neither released binary links it
+
+#### Scenario: The accounting says which binary each addition lands in
+- **WHEN** the record of added dependencies is read
+- **THEN** each entry names the binary it links into, and the entries for the
+  markup renderer, the store client and the emission exporter name the registry
+  binary and not the command-line one
 
 #### Scenario: A dependency that only one page needs is not taken
 - **WHEN** an addition would serve a single presentational nicety

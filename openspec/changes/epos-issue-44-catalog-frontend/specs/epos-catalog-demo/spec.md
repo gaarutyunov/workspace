@@ -1,10 +1,11 @@
 ## ADDED Requirements
 
-### Requirement: The project publishes its own example skill with its own tooling
+### Requirement: The project publishes its own example skills with its own tooling
 
-The repository SHALL pack the worked example skill it ships and publish it to a
-public registry from continuous integration, using `epos` itself for every step
-that `epos` has a command for.
+The repository SHALL pack the worked example skills it ships — including the
+skill that teaches how to author skills with Epos — and publish them to a public
+registry from continuous integration, using `epos` itself for every step that
+`epos` has a command for.
 
 #### Scenario: epos packs its own example
 - **WHEN** the publishing workflow runs
@@ -34,9 +35,29 @@ that `epos` has a command for.
   re-derives
 
 #### Scenario: The example is the one the sibling change defines
-- **WHEN** the workflow packs the example
+- **WHEN** the workflow packs the derived Go example
 - **THEN** it packs the derived Go skill checked in by the landing-and-quickstart
   change, and this change does not define a second recipe for it
+
+#### Scenario: The Epos skill is published too
+- **WHEN** the publishing workflow runs
+- **THEN** it also packs and publishes the skill that teaches authoring skills
+  with Epos, so that the registry the demo browses holds a skill about the tool
+  that packed it
+
+#### Scenario: The generated references are current when the skill is packed
+- **WHEN** the Epos skill is packed
+- **THEN** the generated references inside it are the ones the documentation
+  generator produces from the current sources, because the drift check has
+  already passed — a published skill carrying a reference for a command that no
+  longer takes that flag is worse than no reference
+
+#### Scenario: The demo survives the sibling change not landing
+- **WHEN** the derived Go example is unavailable because the sibling change has
+  not merged
+- **THEN** the demo still publishes and renders the Epos skill, so the catalog,
+  its pages and its counts are demonstrable — with one skill rather than two,
+  and without the multi-stage provenance the derived example exists to show
 
 ### Requirement: The published site is rendered from real data during continuous integration
 
@@ -239,6 +260,16 @@ show, from artifact data where the artifact carries it.
 - **WHEN** the demo catalog is opened
 - **THEN** it lists several skills, so that the leaderboard, the list page and
   the filter are exercised by the demo rather than merely present in it
+
+#### Scenario: The Epos skill's page shows what it teaches
+- **WHEN** the Epos skill's detail page is opened
+- **THEN** its rendered document is the skill's own entry document, and the
+  references it names are part of the artifact rather than links off the page
+
+#### Scenario: The demo is served by the registry it browses
+- **WHEN** the served form of the demo is exercised
+- **THEN** the pages and the distribution API come from the same process, so the
+  registry that counted a pull is the one that renders the number
 
 ### Requirement: The deployed demo is verified in a browser before it is called done
 

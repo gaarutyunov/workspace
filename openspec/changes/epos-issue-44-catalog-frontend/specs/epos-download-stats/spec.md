@@ -24,10 +24,11 @@ for anything a page shows.
   value, so a later change can show a trend without changing where the numbers
   come from
 
-#### Scenario: Export is the registry's only relationship with the store
-- **WHEN** the registry's behaviour is inspected
-- **THEN** it pushes measurements outward and never reads them back, never
-  queries the store, and never waits on it to answer a request
+#### Scenario: The relay never reads the store
+- **WHEN** a request under the distribution API is served
+- **THEN** nothing in answering it reads, queries or waits on the store; the
+  relay's relationship with the store is outward emission only, and the catalog
+  reading counts is a separate path that no distribution request enters
 
 #### Scenario: A store that is unavailable does not break serving
 - **WHEN** the store cannot be reached
@@ -38,14 +39,136 @@ for anything a page shows.
 - **WHEN** several registry instances serve downloads for the same repository,
   or one instance is restarted mid-window
 - **THEN** the total the store yields for that repository is the sum of the
-  downloads that were actually served, neither double-counted across export
-  intervals nor reduced to a single instance's share
+  downloads that were actually served, neither double-counted nor reduced to a
+  single instance's share — which follows from each download being recorded as
+  its own event rather than as a running total that several producers each
+  maintain
 
-#### Scenario: How measurements combine is decided, not left to a default
-- **WHEN** the exporter and the query are read
-- **THEN** the temporality the counter is exported with is stated, and the query
-  is the one that is correct for it — so that a reader does not have to
-  reconstruct which of the two it is from the shape of the SQL
+#### Scenario: A download is recorded as an event, not as a running total
+- **WHEN** a download is recorded for the store
+- **THEN** it is emitted as one span describing that download, so counting is
+  counting rows and no reader has to know how partial totals from several
+  producers combine
+
+#### Scenario: Every download is recorded, none is sampled
+- **WHEN** the tracing pipeline is configured
+- **THEN** the download span is always sampled, and the configuration says that
+  reducing it would silently reduce every number the catalog renders
+
+#### Scenario: The span is a measurement, not a tracing deployment
+- **WHEN** the span is inspected
+- **THEN** it carries only the attributes the counter carries, with no request
+  headers, no automatically instrumented server span and no events, so that
+  general-purpose instrumentation cannot reintroduce what this change removes
+
+#### Scenario: The counter still behaves as it does today
+- **WHEN** the registry is configured with the existing metrics exporters
+- **THEN** the counter is recorded and emitted exactly as before, because the
+  span is emitted beside it from the same call and the same attributes, not in
+  place of it
+
+### Requirement: The database schema is defined by this change and epos writes no code to fill it
+
+The tables the catalog reads SHALL be defined as checked-in schema, the pipeline
+that fills them SHALL be a configured collector rather than code in this
+project, and the catalog's query SHALL be written against that schema rather
+than discovered by an implementation.
+
+#### Scenario: There is no ingestion code
+- **WHEN** the path from a served download to a row in the store is traced
+- **THEN** every step between the registry's emission and the row is a
+  configured collector; this project contributes no client that writes to the
+  store, no batching, no retry and no migration code
+
+#### Scenario: The schema is checked in, not improvised
+- **WHEN** the store's schema is looked for
+- **THEN** it is a checked-in definition in this repository — the table the
+  catalog reads and the rollup that fills it — reviewed like any other file,
+  rather than something an implementation decided at the keyboard
+
+#### Scenario: The collector's own tables are not redefined
+- **WHEN** the checked-in schema is read
+- **THEN** it declares only this project's own table and the rollup into it; the
+  collector's tables are the collector's and are neither declared nor altered
+  here
+
+#### Scenario: The counts outlive the rows they came from
+- **WHEN** the collector's raw records expire under their retention policy
+- **THEN** the counts the catalog reads are unaffected, because they were rolled
+  up into a table with no such expiry — a leaderboard must not quietly shrink on
+  the day a retention window first closes
+
+#### Scenario: The rollup exists before the first record arrives
+- **WHEN** a deployment is brought up
+- **THEN** the schema is applied before the collector's first write, because a
+  rollup of this kind sees only what is written after it exists; and the
+  checked-in schema records how to backfill a deployment where that ordering was
+  missed
+
+#### Scenario: The query is stated with the schema
+- **WHEN** the schema is read
+- **THEN** the query the catalog runs against it is stated alongside, including
+  how partial rows are aggregated, so that reading the stored column directly —
+  which is correct only by coincidence of timing — is not the first thing an
+  implementation tries
+
+### Requirement: Only the collector may write, and the registry holds no credential that can
+
+Write access to the store SHALL belong to the collector alone. The registry
+SHALL hold no credential for the store, and the catalog SHALL hold one that can
+only read.
+
+#### Scenario: The relay holds no database credential
+- **WHEN** the registry's configuration is inspected with the catalog disabled
+- **THEN** it holds an emission endpoint and no database credential of any kind,
+  so compromising the process that answers unauthenticated requests from the
+  public internet does not yield access to the store
+
+#### Scenario: The catalog's credential cannot write
+- **WHEN** the catalog's credential is used to attempt to create, alter, insert
+  into or delete from the store
+- **THEN** the store refuses it, because the grant permits reading one table and
+  nothing else — "the catalog only reads" is enforced by the store and not by a
+  convention an implementation has to remember
+
+#### Scenario: A read-only credential is still bounded
+- **WHEN** the catalog's credential is configured
+- **THEN** limits on how long a query may run and how much it may return are
+  configured with it, because a credential that can only read can still be used
+  to make the store unavailable
+
+#### Scenario: The three privileges are declared together
+- **WHEN** the checked-in schema is read
+- **THEN** it declares which principal writes, which reads and which holds
+  nothing, so the separation is reviewable rather than assumed
+
+### Requirement: Statistics are optional, and their absence is a configuration
+
+Emitting measurements to a store and rendering counts SHALL be independently
+optional, both off by default, and neither absence SHALL be an error or a
+degraded page.
+
+#### Scenario: A registry with no store configured behaves as it does today
+- **WHEN** the registry is run without the store pipeline enabled
+- **THEN** it emits nothing outward, requires no collector and no database, and
+  serves exactly as it does today
+
+#### Scenario: A catalog with no statistics source is complete
+- **WHEN** the catalog is run with no statistics source
+- **THEN** every page renders in full, with no count column anywhere and no
+  wording that implies a ranking; this is the documented configuration for
+  anyone who does not want to run a database, not a failure state
+
+#### Scenario: The two switches are independent
+- **WHEN** one of the two is enabled and the other is not
+- **THEN** both combinations are supported: measurements may be collected
+  without any catalog being served, and a catalog may be served without any
+  measurements being collected
+
+#### Scenario: Turning statistics off is not a code path
+- **WHEN** the pages rendered with and without a statistics source are compared
+- **THEN** the difference is which sections the renderer emits, not a separate
+  renderer, a separate template set or a separate set of routes
 
 ### Requirement: The registry exports through its existing instrumentation path and holds no state
 
@@ -54,8 +177,9 @@ uses, selected by the same configuration key, and SHALL remain stateless.
 
 #### Scenario: The exporter is chosen the way exporters are already chosen
 - **WHEN** an operator configures where downloads are recorded
-- **THEN** they select an exporter by name through the setting that already
-  selects one, and the existing settings continue to behave as before
+- **THEN** they select an exporter by name, in the same configuration style and
+  through the same mechanism the registry's existing settings use, and the
+  existing settings continue to behave as before
 
 #### Scenario: The existing exporters keep working
 - **WHEN** the registry is configured with the exporter used for local
@@ -64,10 +188,11 @@ uses, selected by the same configuration key, and SHALL remain stateless.
   registry without a store is affected
 
 #### Scenario: There is still one instrumentation path
-- **WHEN** the registry's metric code is read
-- **THEN** the counter is recorded once, through the same instrument as before,
-  and the destination is an exporter rather than a second code path or a
-  database client in the request handler
+- **WHEN** the registry's instrumentation code is read
+- **THEN** a download is recorded once, at one call site, building one attribute
+  set that both the counter and the span use — so the two cannot describe
+  different events — and the destination is an exporter rather than a second
+  code path or a database client in the request handler
 
 #### Scenario: No durable state is held by the registry
 - **WHEN** the registry is exercised after this change
@@ -75,10 +200,12 @@ uses, selected by the same configuration key, and SHALL remain stateless.
   nothing that replicas would have to share, and remains deployable as several
   identical instances behind a load balancer
 
-#### Scenario: The registry's API surface is untouched
-- **WHEN** the registry's routes are compared before and after
-- **THEN** it serves the same paths on the same single listener, with no metrics
-  endpoint, no scrape endpoint and no catalog endpoint added to it
+#### Scenario: The registry's API surface gains no endpoint
+- **WHEN** the registry's distribution API routes are compared before and after
+- **THEN** they are the same paths on the same single listener, with no metrics
+  endpoint and no scrape endpoint added; the catalog, where it is enabled, is
+  served from that same listener under its own prefix and adds nothing to the
+  distribution API itself
 
 #### Scenario: Exporting does not slow the request
 - **WHEN** a download is recorded
@@ -170,12 +297,17 @@ thing that knows where numbers come from. Obtaining counts SHALL take a context.
 - **THEN** it issues reads, holds no credential that could write, and never
   creates, alters or deletes anything in the store
 
+#### Scenario: A slow store does not slow the registry's own API
+- **WHEN** the statistics store is unreachable or does not answer, while the
+  catalog is enabled in the same process as the relay
+- **THEN** distribution API requests are served as fast as they were before, and
+  no query holds a resource that answering them needs
+
 #### Scenario: The store credential is not an argument
 - **WHEN** the catalog is told how to reach the statistics store
 - **THEN** the credential arrives through the environment or from a file the
-  command names, never as a command-line argument — a long-running server's
-  arguments are readable by every process on the host, and the project's own
-  login command already takes a secret this way
+  configuration names, and there is no command-line flag that accepts it at all
+  — a long-running server's arguments are readable by every process on the host
 
 #### Scenario: The credential does not reach the output
 - **WHEN** the catalog logs, fails, or writes an export

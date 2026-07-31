@@ -20,6 +20,27 @@ one credential-bearing client with `pull`, `build`, `sign`, `attest` and
 **`//go:embed`: zero occurrences in the repository.** Embedding a frontend is
 net-new; there is no precedent to follow and nothing to extend.
 
+**`epos-registry` is a cobra command with a koanf tree and one listener.**
+`newRootCommand` in `cmd/epos-registry/main.go` takes `--addr`, `--upstream` and
+three `metrics.*` keys; `loadConfig` resolves `EPOS_REGISTRY_*` through koanf,
+mapping both `X_Y` and `X__Y` onto dotted keys. It has **no subcommands** today.
+This is the binary the catalog joins (**D2**), and its configuration mechanism
+is the one the catalog's settings use unchanged.
+
+**`internal/skillfile` is not a small import.** It carries the Skillfile build
+language and pulls **`go-git/v5`, `benhoyt/goawk`, `bluekeyes/go-gitdiff` and
+`goccy/go-yaml`**. `fetchOCIBase` — the remote fetch-and-unpack the catalog's
+detail page needs — lives in it. That matters only because the catalog moved to
+a binary that does not link it (**D2a**).
+
+**`internal/docsgen` generates two pages, from live sources, behind a CI drift
+gate.** `targets()` names `docs/src/pages/cli.astro` (walked from
+`cli.NewRootCommand`) and `docs/src/pages/skillfile.astro` (read from
+`skillfile.NewReference()`, which is already plain data). `go run
+./internal/docsgen -check` fails when a committed page is stale. **It walks the
+`epos` tree only** — `epos-registry`'s flags are generated nowhere and appear on
+no page. Both facts are load-bearing for **D17**.
+
 **Enumeration already exists, unexported.** `internal/cli/discover.go`:
 
 ```go
@@ -134,101 +155,267 @@ already in review and its artifact is the demo's only content dependency.
 
 ---
 
-## D2: `epos catalog serve|export`, on the `epos` binary
+## D2: the catalog belongs to `epos-registry`, not to the `epos` CLI
 
-**Decision.** One new command tree on `cmd/epos`:
+**This section is a reversal.** The previous draft put the catalog on `cmd/epos`
+as `epos catalog serve|export`. The owner's review rejects that:
+
+> Catalog is not part of CLI it's part of the registry. Like zot has a UI.
+> People downloading CLI don't need ui artifacts.
+
+The reversal is accepted, and it moves more than a command name. Everything
+below — which binary grows, which package the assets are embedded in, which
+package `internal/catalog` may import, how it is configured, and what the SPEC
+has to say — follows from it.
+
+**Decision.** The catalog is a capability of `epos-registry`:
 
 ```
-epos catalog serve   --registry --namespace --refs --plain-http --base-path \
-                     --stats-source --stats-file --stats-dsn-file --stats-ttl --addr
-epos catalog export  --registry --namespace --refs --plain-http --base-path \
-                     --stats-source --stats-file --stats-dsn-file --out
+epos-registry --catalog --catalog-namespace <ns> [--catalog-refs <file>] \
+              --catalog.base-path / --catalog.stats-source clickhouse
+                        # relay on /v2/, catalog on the same listener
+
+epos-registry catalog export --upstream <url> --catalog-namespace <ns> \
+              --base-path /epos/catalog --out catalog-dist \
+              --catalog.stats-source clickhouse
+                        # the same renderer, driven offline, to a directory
 ```
 
-One renderer, two drivers. `serve` answers requests; `export` walks the same
-route table and writes each route to a file. A page that only one of them can
-produce is a bug.
+`cmd/epos` gains **nothing**: no command, no template, no stylesheet, no
+vendored bundle. `internal/catalog` — the model, the renderer, the templates and
+the embedded assets — is imported by `cmd/epos-registry` and by nothing the CLI
+links.
 
-**Why not a third binary (`epos-catalog`).** Nothing about it deploys separately
-from the CLI. A third binary is a third goreleaser build matrix, a third set of
-release artifacts and a third `main` to keep in step, bought for no isolation
-that matters — the catalog holds no secrets and takes no writes.
+**The zot comparison is exact, and it is the argument.** zot ships one binary
+that terminates the Distribution API and, in the builds that enable it, serves a
+browsing UI from the same process over the same listener. Nobody installs
+`zli`, zot's *client*, and receives a web frontend with it. The split is
+between the thing an operator deploys and the thing a user installs, and the
+owner's second sentence is the whole point: someone who runs `go install
+.../cmd/epos` to pack and push a skill should not be carrying 104 KB of
+JavaScript, a stylesheet, four HTML template trees and a set of registry logos
+to do it.
 
-**Why not on `epos-registry`.** Two SPEC clauses forbid it and both are right.
-§10.1 decision #3: *the registry never renders anything*. Decision #2: `/v2/`
-only, no second API surface. Beyond the letter: `epos-registry` is designed to
-run as N stateless replicas behind a load balancer (§4.4), and the catalog wants
-a warm per-digest cache and an index it built at startup. Putting them in one
-process makes the relay's statelessness a lie.
+**One renderer, two drivers, unchanged.** The served catalog and the exported
+directory come from one route table and one template set. A page that only one
+of them can produce is a bug. What changed is which binary holds the renderer,
+not that there are two ways to drive it.
 
-**Why on `epos` rather than nothing.** "Embedded into Go" is the issue's own
-constraint, and `epos catalog serve --registry localhost:5000` is a real
-feature for anyone running a private registry — the same binary they already
-have, browsing the skills they already pulled. The cost is 104 KB of vendored
-JS plus templates in a binary that is already several megabytes.
+**Why the export subcommand is on `epos-registry` too.** The exported site is
+the *same renderer* over the same model; putting `export` on `epos` would put
+`internal/catalog` back into the CLI's link graph and undo the whole decision
+for the sake of where a subcommand is spelled. GitHub Pages cannot run a Go
+binary (**D5**), so the export exists for the demo — and the demo is a
+deployment concern, which is what `epos-registry` is.
 
-**Consequence: `internal/cli/discover.go` gets lifted — and it is not quite a
-pure move.** The discovery client, `discover`, `skill` and `errNoCatalog` move
+### D2a: what the move costs, and what it buys
+
+Stated together, because a reversal that only lists its benefits is not a
+design decision.
+
+**It costs two SPEC amendments that the previous draft used as its reason not to
+do this.**
+
+- **Decision ledger #2 — *"`/v2/` only; no second API surface"* — is amended.**
+  The catalog is a second surface. It is not a second *API*: it serves HTML on
+  `GET` under a reserved path prefix, speaks no Epos-specific media type and
+  negotiates nothing. The amendment says exactly that, and says the catalog is
+  **off unless enabled**, so a default `epos-registry` still serves `/v2/` and
+  nothing else. The zot precedent is the argument the ledger row should carry.
+- **§4.4 — *"no manifest cache, no digest→role lookup table, no shared store
+  between replicas"* — is amended, narrowly.** The catalog's index and its
+  per-digest document cache are exactly a manifest cache. The amendment scopes
+  §4.4's prohibition to the **relay path**: no request under `/v2/` may be
+  answered from, or made slower by, anything the catalog holds; the catalog's
+  index is process-local, in memory, rebuilt at startup, derived entirely from
+  upstream, shared with nothing and never written to disk. What §4.4 exists to
+  protect — any `/v2/` request may land on any replica and get the same answer —
+  is untouched, and that sentence stays in §4.4 word for word.
+
+**Decision ledger #3 was cited by the previous draft and does not apply.** It
+reads *"Rendering location — Helm model: templates rendered at install, never by
+the registry or a server"*. That is about **skill values templates** — the
+`{{ .Values.x }}` substitution §10.3 performs at install. The catalog renders
+HTML pages about artifacts; it renders no skill and installs nothing. Reading
+#3 as "the registry may not emit HTML" was a misreading in the previous draft
+and is corrected here rather than carried forward.
+
+**It costs an availability coupling on the relay, and this is the one that has to
+be got right.** `epos-registry` today contacts upstream for the first time when
+it answers its first request; it starts regardless of whether upstream is up.
+The catalog builds its index at startup (**D3b**), so a naive implementation
+makes an unreachable upstream at boot into a registry that does not start —
+turning a catalog feature into an outage on the relay, which is precisely the
+coupling §4.4's narrow amendment is supposed to avoid.
+
+**Decision: a failed or partial index never stops the registry.** The listener
+comes up first and `/v2/` serves immediately. The index build is a startup step
+whose failure is logged and whose result is an empty catalog answering a page
+that says the catalog could not be built; the relay is unaffected either way.
+A skill that could not be read leaves that skill out and the rest listed, which
+is **D3d** one level up. Enabling the catalog must not be able to reduce the
+registry's availability, and that is asserted rather than intended.
+
+**It costs a replica caveat, and it must be stated rather than discovered.**
+With N replicas each building its own index at its own startup, two replicas can
+briefly disagree about which skills exist — a skill published between two
+restarts appears on some replicas and not others. That is a property of a
+read-only view, not a correctness bug, and the alternative (a shared index) is
+the durable state §4.4 refuses. The mitigation is that the *counts* are read per
+request from a store all replicas share (**D4e**), so the numbers never
+disagree; only the membership can, and only until the next restart.
+
+**It costs a package-boundary problem the previous shape did not have, and this
+is the sharpest consequence of the move.** The detail page needs the remote
+fetch-and-unpack routine, which today is `skillfile.fetchOCIBase`. When the
+catalog lived on `epos`, exporting it in place was free — the CLI already links
+`internal/skillfile`. `cmd/epos-registry` does not, and `internal/skillfile`
+imports **`go-git/v5`, `benhoyt/goawk`, `bluekeyes/go-gitdiff` and
+`goccy/go-yaml`**: the entire Skillfile build language would land in the
+registry binary to obtain one function.
+
+**Decision: the routine moves down, it is not exported in place.**
+`internal/registry` gains a `FetchContent(ctx, ref) (map[string][]byte, error)`
+— resolve, fetch the manifest, assert exactly one layer, fetch it, untar into an
+in-memory file map, keeping `checkPath`, the symlink and hardlink rejection and
+the 64 MiB cap. `internal/skillfile` builds its `Tree` from that map and keeps
+the `Tree` type, so nothing about `FROM` changes and there is still exactly one
+implementation of the guards. This is a **larger refactor than the previous
+draft's "export it"**, it is the honest price of the move, and it is worth
+paying: it also gives `epos-registry` a dependency budget it can defend.
+
+**It buys three things.**
+
+1. **`epos` stops growing.** No `//go:embed`, no vendored bundle, no goldmark in
+   the CLI. The Markdown renderer, the templates and the assets are linked by
+   `epos-registry` alone.
+2. **The counts stop being a remote reading.** The process that *counts* a
+   download and the process that *renders* the number are now the same
+   deployment, which is what makes **D4e**'s per-request read and the owner's
+   *"pull, refresh, the number moved"* one host rather than two.
+3. **Configuration stops being a special case.** The previous draft argued at
+   length for flags-only, no-koanf, and then had to make an exception for the
+   store credential. `epos-registry` is already a koanf server with an
+   `EPOS_REGISTRY_` prefix; the catalog's settings join it, and the credential
+   is `EPOS_REGISTRY_CATALOG_STATS_DSN` like every other key. See **D2b**.
+
+**Rejected: a third binary, `epos-catalog`.** A third goreleaser matrix, a third
+set of release artifacts and a third `main`, bought for no isolation that
+matters — and it splits the catalog from the counter it renders, which is the
+one thing the move exists to join. zot does not ship its UI as a separate
+binary either.
+
+**Rejected: a build tag, the way zot gates its UI.** It is the closest imitation
+of the reference, and it is not taken: a build tag means goreleaser builds two
+`epos-registry` variants, and it means the catalog's code is not compiled by the
+ordinary `go build ./...` or seen by `go vet`, which is how a tagged package
+rots. A runtime flag, defaulting off, gives the operator the same choice and
+keeps one artifact and one build. The binary carries the assets either way.
+
+**Rejected: leaving `epos catalog serve` as well, "for local browsing".** It is
+the tempting compromise and it defeats the decision — the CLI would link
+`internal/catalog` to have it, which is precisely the artifact the owner does
+not want in a CLI. Anyone with a private registry runs `epos-registry
+--catalog`, which is the same binary an operator of that registry already has.
+
+### D2b: configuration joins `epos-registry`'s koanf tree
+
+**Decision.** Every catalog setting is a key on `epos-registry`, in the dotted
+koanf style the binary already uses, resolvable from a flag or from
+`EPOS_REGISTRY_*`:
+
+| key | flag | what it does |
+|---|---|---|
+| `catalog` | `--catalog` | serve the catalog on the existing listener; **default false** |
+| `catalog.base-path` | `--catalog.base-path` | prefix every internal URL (**D2c**) |
+| `catalog.namespace` | `--catalog.namespace` | enumerate this namespace through `_catalog` |
+| `catalog.refs` | `--catalog.refs` | a file of explicit references instead (**D3**) |
+| `catalog.stats-source` | `--catalog.stats-source` | `none` (default), `clickhouse` or `file` (**D4e**) |
+| `catalog.stats-dsn` | *(no flag)* | **environment or file only** — a credential |
+| `catalog.stats-file` | `--catalog.stats-file` | a counts document |
+| `catalog.stats-ttl` | `--catalog.stats-ttl` | freshness bound on the per-request read |
+
+**Exactly one dot, then kebab-case — and this is a correction, not a style
+preference.** An earlier draft of this section wrote three-level keys
+(`catalog.stats.source`) and claimed `EPOS_REGISTRY_CATALOG_STATS_DSN` would
+reach them "with no new mechanism". **It would not.** `loadConfig`'s
+`TransformFunc` lowercases, maps `__` to `.`, then applies a **hardcoded**
+`strings.Replace(key, "metrics_", "metrics.", 1)`, then replaces every remaining
+`_` with `-`. So `EPOS_REGISTRY_CATALOG_STATS_DSN` becomes
+`catalog-stats-dsn` — one flat key, matching nothing.
+
+Two consequences:
+
+- **The key shape follows the one the binary already has.**
+  `metrics.version-attribute` is one dot and then a hyphen, and the catalog's
+  keys are the same shape for the same reason. Inventing a third level would
+  require generalising the transform, and generalising it — mapping every `_` to
+  `.` — would break `metrics.version-attribute` itself, whose env form is
+  `EPOS_REGISTRY_METRICS_VERSION_ATTRIBUTE`. That is a breaking change to a
+  shipped key, bought for punctuation.
+- **The transform still needs one line.** `catalog_` must be mapped to
+  `catalog.` beside the existing `metrics_` line. It is a one-line change and it
+  is the difference between the credential resolving and silently not, so it is
+  a task rather than an assumption.
+
+**The DSN has no flag at all** — a long-running server's arguments are readable
+by every process on the host — which is now an ordinary consequence of being a
+koanf key rather than the exception to a flags-only rule the previous draft had
+to argue for. Because env is that key's **only** path, the transform above is
+load-bearing for it specifically, and a test resolves it end to end.
+
+`epos-registry catalog export` is a subcommand of the same binary and reads the
+same keys, minus `catalog` and `catalog.stats-ttl` and plus `--out`.
+
+**One mechanical detail that will otherwise cost an hour.** `newRootCommand`
+declares `--addr`, `--upstream` and the `metrics.*` flags on `cmd.Flags()` —
+**local** flags, which a subcommand does not inherit. `export` needs
+`--upstream` and every `catalog.*` key, so either those move to
+`PersistentFlags()` or the subcommand declares its own set and shares one
+registration helper with the root. Prefer the shared helper: making the server's
+`--addr` visible on an export subcommand that opens no port is worse than a
+little duplication of registration.
+
+The rest is the repository's existing shape, called out because a new command is
+where it gets forgotten: a factory returning `*cobra.Command`, `RunE` so errors
+propagate, `cobra.NoArgs`, and output through `cmd.OutOrStdout()`.
+
+**Consequence: `internal/cli/discover.go` still gets lifted, and now it is
+load-bearing rather than tidy.** `cmd/epos-registry` must not import
+`internal/cli` — that would link the entire CLI, cobra tree and all, into the
+registry. So the discovery client, `discover`, `skill` and `errNoCatalog` move
 to a new `internal/registry` package, exported, and `internal/cli` calls into
-it. But `newOCIRegistry(host string, opts registryOptions)` and
-`ociRegistry.explain` depend on `registryOptions`, which lives in
+it. `registryOptions` does **not** move: it lives in
 `internal/cli/credentials.go`, carries the cobra flag binding and the Docker
 credential store, and is shared by `pull`, `push`, `build`, `sign` and
-`install`.
-
-**Decision: `registryOptions` does not move.** `internal/registry` defines its
-own plain options struct — plain-HTTP, an `auth.Credential` resolver, a
-`remote.Client` — with no cobra and no koanf in it, and `internal/cli` builds
-one from its existing `registryOptions`. Dragging cobra into `internal/registry`
-to avoid writing an eight-line adapter would put flag parsing under a package
-whose job is to talk to registries, and would make every registry-contacting
-command depend on the CLI's flag types.
+`install`. `internal/registry` defines its own plain options struct — plain-HTTP,
+a credential resolver, a client — with no cobra and no koanf in it, and each
+binary builds one its own way.
 
 Behaviourally this is still a move: `epos list` and `epos search` must produce
 byte-identical output afterwards, the existing `discover` tests move with it,
 and their expected output must not be edited in the same commit. If it has to
 be, the move was not a move.
 
-**Consequence: the docsgen drift gate fires.** `internal/docsgen` renders
-`docs/src/pages/cli.astro` from the live cobra tree, and
-`.github/workflows/ci.yml` fails on any diff. Adding `epos catalog` changes that
-page. Regenerating and committing it is a required task, not an accident.
+**Consequence: the docsgen drift gate fires twice.** `internal/docsgen` renders
+`docs/src/pages/cli.astro` from the live cobra tree and CI fails on any diff.
+The tree it walks is `epos`'s, which this change no longer touches — but
+`epos-registry`'s new flags are rendered nowhere today, which is itself a gap
+(**D17** closes it, because the Epos skill's CLI reference has the same
+problem).
 
-### D2a: flags, not koanf; kebab-case, not dots; `RunE` and `cmd.OutOrStdout()`
+### D2c: the catalog is served under a base path, and it is the same in both modes
 
-**Decision.** `epos catalog` is configured by flags alone, named in kebab-case:
-`--registry`, `--namespace`, `--refs`, `--plain-http`, `--base-path`,
-`--stats-source`, `--stats-file`, `--stats-dsn-file`, plus `--addr` and
-`--stats-ttl` on `serve` and `--out` on `export`.
+**Decision.** Both drivers take a base path (default `/`) — `--catalog.base-path`
+on the server, `--base-path` on `export` — every internal URL the templates emit
+is prefixed with it, and the two produce identical bytes **for the same base
+path**.
 
-**One exemption, and it is a secret rather than a setting.** The statistics
-store's DSN is a credential and does not go on a command line — it arrives in
-`EPOS_CATALOG_STATS_DSN` or from the file `--stats-dsn-file` names (**D4e**).
-That is one environment variable read directly, not koanf and not an env prefix;
-the rule below is about configuration style, and it is not weakened by refusing
-to put a password in `ps(1)`.
-
-koanf and the `EPOS_REGISTRY_` env prefix belong to `epos-registry`, which is a
-long-running server configured by an operator. Every command on the `epos`
-binary today is flags-only and kebab-case (`--plain-http`, `--password-stdin`,
-`--versions`). `epos catalog serve` being a server is not a reason to make one
-subcommand of `epos` configure itself differently from the other thirteen; a
-container deployment (**D5**'s rejected alternative) passes flags perfectly
-well. The dotted `--metrics.exporter` form on `epos-registry` exists only
-because koanf maps dots to config keys — copying the punctuation without the
-mechanism would be cargo cult.
-
-The rest is the repository's existing shape and is called out only because a
-new command is where it gets forgotten: factory functions returning
-`*cobra.Command` registered in `NewRootCommand`, `RunE` so errors propagate,
-`cobra.NoArgs` on every one of them (both subcommands take only flags), and all
-output through `cmd.OutOrStdout()` so the commands are testable in memory.
-
-### D2b: the catalog is served under a base path, and it is the same in both modes
-
-**Decision.** Both subcommands take `--base-path` (default `/`), every internal
-URL the templates emit is prefixed with it, and the two drivers produce
-identical bytes **for the same base path**.
+The base path is also what keeps the catalog off `/v2/`. A served catalog
+mounted at `/` still hands `/v2/` to the relay first: the registry's routes are
+matched before the catalog's, and no catalog route may shadow one. That is a
+requirement, not an ordering accident — an operator who sets
+`--catalog.base-path /v2` is refused at startup.
 
 This is not a nicety. The project's Pages site is a *project* page:
 `docs/astro.config.mjs` reads `base = process.env.BASE_PATH ?? "/epos"` for
@@ -251,13 +438,21 @@ different bytes by construction, which is the invariant **D2** exists to keep.
 ## D3: Two enumeration modes, because `_catalog` is not universal
 
 **Decision.** The catalog takes its skill list from **either** a `_catalog`
-sweep **or** an explicit list of references, and the choice is a flag, not a
+sweep **or** an explicit list of references, and the choice is a setting, not a
 fallback chain.
 
-- `--registry <host> --namespace <ns>` — the `epos list` path. Requires
-  `GET /v2/_catalog`.
-- `--refs <file>` — a checked-in list of `<host>/<repo>:<tag>` references, one
+- `catalog.namespace` — the `epos list` path, run against the registry the
+  process already fronts. Requires `GET /v2/_catalog`.
+- `catalog.refs` — a checked-in list of `<host>/<repo>:<tag>` references, one
   per line. No `_catalog` required.
+
+**There is no `--registry` flag any more, and that is a consequence of D2.**
+When the catalog served from the CLI it had to be told which registry to browse.
+Served from `epos-registry`, the registry is `--upstream`, which is already
+required and already configured: the catalog shows the skills of the registry it
+fronts, which is the only thing a registry's own UI should show. `export` takes
+`--upstream` explicitly because it runs without a listener, and it is the same
+key.
 
 **Why both.** `errNoCatalog` exists in the shipped code because registries
 disagree about `_catalog`, and SPEC §4.1 now says so in its own words:
@@ -329,13 +524,21 @@ here; conflating them is the mistake this paragraph exists to prevent.
 
 ### D3c: the content layer is untrusted, and the existing guards come with it
 
-**Decision.** The exported remote-fetch routine keeps every guard
+**Decision.** The relocated remote-fetch routine keeps every guard
 `internal/skillfile` applies today: the 64 MiB layer cap, `checkPath`'s refusal
 of `..`, absolute and non-canonical entries, and the rejection of symlinks and
-hardlinks. The routine to export is **`skillfile.fetchOCIBase`** — resolve,
-fetch the manifest, assert exactly one layer, fetch it, untar into a `Tree` —
-not `install.read` (which reads the *local store*) and not `ociTreeFiles` (which
-takes bytes already in hand).
+hardlinks. The routine is today's **`skillfile.fetchOCIBase`** — resolve, fetch
+the manifest, assert exactly one layer, fetch it, untar — not `install.read`
+(which reads the *local store*) and not `ociTreeFiles` (which takes bytes
+already in hand).
+
+**It moves to `internal/registry` rather than being exported where it is**
+(**D2a**): `epos-registry` must not link `internal/skillfile`, which imports
+`go-git/v5`, `goawk`, `go-gitdiff` and `goccy/go-yaml`. `internal/registry`
+exposes the fetch and the untar as a file map; `internal/skillfile` keeps `Tree`
+and builds one from that map, so `FROM` behaves identically and the guards have
+exactly one implementation. Moving it, rather than copying it, is the whole
+point — a second copy is how one of them loses a guard.
 
 Those guards exist because a Skillfile's `FROM` can name any registry. The
 catalog points at any registry by definition, so if anything the exposure is
@@ -357,123 +560,216 @@ bad artifact is a catalog an attacker can take down.
 This is the part of the issue with no implementation behind it, so it gets the
 most space.
 
-**This section is a reversal.** The previous draft decided (as **D4a**) to add
-no exporter at all and to feed the leaderboard from a one-off snapshot scraped
-out of `epos-registry`'s stdout. The owner's review rejects that:
+**This section has been reversed twice, and the second review sharpened it.**
+The first draft fed the leaderboard from a snapshot scraped out of
+`epos-registry`'s stdout; the owner rejected that and asked for a persistent
+store, suggesting ClickHouse. The second review keeps the store and fixes the
+shape of the pipeline:
 
-> We need to ship persistent metrics exporter we can query on catalog page. I
-> would suggest clickhouse.
+> Instead of adding ingestion code for clickhouse, add OTEL collector that will
+> process **traces** and export values to clickhouse in some format appropriate
+> for catalog. **Define the database schema in the spec.** This way we don't need
+> additional code for clickhouse. And **we don't need write credentials for the
+> registry.** The catalog only reads from it. **It should be an optional
+> feature.** People who don't want to ship clickhouse don't get the leaderboard
+> and downloads.
 
-The reversal is accepted and the reasoning below is rewritten to match. What
-survives from the previous draft is the part that was never about the exporter:
-ranking must count the verified side only (**D4d**), and the `client` attribute
-is unbounded attacker-controlled cardinality (**D4c**) — which was a note about
-a hypothetical exporter and is now a live constraint, because an exporter is
-shipping.
+Four instructions, and each of them changes something:
 
-### D4a: the counter needs a destination that outlives the process, and OTel already names it
+1. **Traces, not metrics** — the durable record of a download is a **span**, not
+   a counter datapoint (**D4a**).
+2. **The schema is defined here** — the DDL is in this design and checked into
+   the repository, not left to the implementation (**D4b**).
+3. **The registry holds no write credential** — the collector is the only writer,
+   which is a security property and is specified as one (**D4g**).
+4. **The whole thing is optional** — off by default, at two independent
+   switches, and the pages degrade rather than break (**D4h**).
 
-**Decision.** `epos-registry` gains the **`otlp`** exporter, selected by the
-`--metrics.exporter` key that already selects one. It pushes `epos.downloads`
-out of the process; it queries nothing and stores nothing.
+What survives unchanged from the previous draft is the part that was never about
+the pipeline: ranking counts the verified side only (**D4d**), and the raw
+user-agent must never reach a store (**D4c**).
 
-This is not a new mechanism. SPEC §5.3's own table already lists the three
-exporters the project intended:
+### D4a: a download is recorded as a span, and that is what makes the rest cheap
 
-| Exporter | Use |
-|---|---|
-| `stdout` | godog runs, local development |
-| `prometheus` | Production scrape |
-| `otlp` | Production push |
+**Decision.** `epos-registry` gains an **OTLP traces exporter**, selected by a
+new `--traces.exporter` key (`none` by default, `otlp` to enable). Every
+download it counts also emits one span, `epos.download`, with the same
+attributes the counter carries. The existing `epos.downloads` counter and its
+`stdout`/`none` exporters are **unchanged**.
 
-`stdout` and `none` are implemented; `metrics.New` returns *"metrics exporter %q
-is not implemented"* for the other two. So **implementing `otlp` completes
-§5.3 rather than amending it**, and it is the push half — the one that needs no
-listener on `epos-registry`, no second port, and no inbound path into a process
-whose whole design is that anything may land on any replica.
+One recording site, two emissions. `countDownload` calls one function; that
+function increments the counter and, when tracing is enabled, ends a span. The
+two cannot describe different events because there is one call and one attribute
+set — which is what SPEC §5.3's *"one instrumentation path"* means and what a
+second, parallel instrumentation would break.
 
-**Why `otlp` and not `prometheus`.** A scrape endpoint means a second listener
-on `epos-registry`, which SPEC §10.1 decision #2 (`/v2/` only, no second API
-surface) rules out, and it means the *store* pulls from N replicas behind a load
-balancer — which is exactly the topology §4.4 describes and exactly the topology
-a scrape cannot address, because a scrape reaches one replica. Push is the only
-shape that works with the deployment the project already specifies.
+**Why a span rather than the `otlp` metrics exporter the previous draft chose.**
+This is the owner's instruction and it is also, on the merits, the better half of
+the fork:
 
-**§4.4 is not amended, and this is the load-bearing point.** §4.4 says
-`epos-registry` holds no durable state: *"No manifest cache, no digest→role
-lookup table, no shared store between replicas."* Exporting a measurement is not
-holding state. The registry accumulates nothing it must survive a restart with,
-shares nothing between replicas, and reads nothing back. The persistence is in a
-store the registry never queries, on the far side of a one-way push. Had the
-decision been "write rows to ClickHouse from the request handler", §4.4 *would*
-have to be amended and a database client would sit on the request path — see
-**D4f**.
+- **A span is an event, so counting is `count()`.** The previous draft spent
+  three paragraphs, a verification task and an exporter option on
+  **temporality** — cumulative rows from N replicas and several process lifetimes
+  land in one table and `sum()` double-counts them, so the counter had to be
+  exported with delta temporality and the reason recorded in a comment. With one
+  row per download, none of that exists. **Tasks 1.5a and 3.2a are deleted, not
+  moved**, and the query stops being a thing a reader has to re-derive.
+- **It moves off an alpha component.** `clickhouseexporter` documents its own
+  support as **beta for traces and logs, alpha for metrics**. The previous draft
+  built the whole leaderboard on the alpha half and carried a verification task
+  whose failure condition was "stop and report it to the owner". The traces path
+  is the supported one, and its `otel_traces` table is the exporter's most
+  stable schema.
+- **It carries more than a count, for free.** A span has a timestamp, so
+  `epos_downloads_total`'s hourly bucketing (**D4b**) is a `GROUP BY` rather
+  than a second instrument, and the time series **D8** defers becomes a query
+  rather than a redesign.
 
-The cost is real and is stated in **D4f**: the OTLP exporter drags a large
-dependency graph into `epos-registry`.
+**What it costs, stated plainly.** One span per blob `GET` is far more rows than
+one counter export per interval. Three consequences the implementation must
+respect:
 
-### D4b: the store is ClickHouse, and epos writes none of the code that fills it
+- **Sampling must be off.** A sampled trace is a sampled count, and a
+  leaderboard built on 10 % of downloads is a wrong number presented as a right
+  one. The tracer provider uses `AlwaysSample` for this span, deliberately, with
+  a comment saying that changing it silently changes every number the catalog
+  renders. If volume ever forces sampling, the answer is pre-aggregation in the
+  collector, not a sampled count.
+- **The span is minimal.** No HTTP server instrumentation, no auto-instrumented
+  middleware, no request headers. One span, four attributes, no events, no
+  links. This is a measurement that happens to travel as a span, not a tracing
+  deployment.
+- **The rows expire and the counts must not.** `otel_traces` is written with a
+  TTL. That is correct for spans and fatal for a lifetime counter, which is
+  exactly why **D4b** rolls them up into a table with no TTL rather than
+  querying the raw spans.
 
-**Decision.** The persistent store is **ClickHouse**, as the owner suggested. It
-is filled by an **OpenTelemetry Collector** running the contrib
-`clickhouseexporter`, and epos ships the collector's configuration, not an
-ingestion path. The catalog **reads** it with
-`github.com/ClickHouse/clickhouse-go/v2` (official, pure Go, `database/sql`
-support, native or HTTP protocol).
+**Why not `prometheus`.** Unchanged from the previous draft and still right: a
+scrape needs a second listener, and a scrape reaches one replica of a
+deployment specified as N behind a load balancer (§4.4). Push is the shape that
+fits. §5.3's `prometheus` row stays unimplemented.
+
+**§5.3 is amended, where the previous draft claimed it was completed.** The
+previous draft argued that implementing the `otlp` *metrics* exporter completed
+§5.3's table rather than amending it. That argument no longer applies: `otlp`
+under §5.3 stays unimplemented, and §5.3 gains a new subsection for the
+**download span** — its name, its attributes and the fact that it is the durable
+record. Claiming otherwise would be the more comfortable sentence and the false
+one.
+
+### D4b: the store is ClickHouse, and the schema is defined here
+
+**Decision.** The persistent store is **ClickHouse**. It is filled by an
+**OpenTelemetry Collector** running the contrib `clickhouseexporter` on its
+**traces** pipeline. epos ships the collector configuration and the DDL below;
+epos writes **no ingestion code at all**.
 
 ```
-epos-registry --metrics.exporter otlp  ──OTLP──▶  OTel Collector  ──▶  ClickHouse
-                                                                          │
-                                        epos catalog {serve,export} ──SQL─┘
+epos-registry --traces.exporter otlp ──OTLP──▶ Collector ──INSERT──▶ ClickHouse
+       │                                                        (otel_traces)
+       │  read-only DSN                                                │
+       │                                                     materialized view
+       └───────────── catalog ◀────── SELECT ────── epos_downloads_total
 ```
 
 **Why a collector rather than writing to ClickHouse from Go.** ClickHouse has no
 OTLP receiver — verified, and worth writing down because it is the thing most
 likely to be assumed. Open-source ClickHouse exposes native TCP and an HTTP
-interface; neither speaks OTLP. There are exactly two ways to get OTel metrics
-into it: the collector's `clickhouseexporter`, or bespoke INSERTs from your own
-process. The second means a ClickHouse driver in `epos-registry`, a schema epos
-invents and migrates, batching, retry and back-pressure written by hand, and a
-second instrumentation path beside the OTel SDK that §5.3 says there is only one
-of. The collector is a container and a config file.
+interface; neither speaks OTLP. So the two ways to get OTel data into it are the
+collector's `clickhouseexporter` or bespoke INSERTs from your own process. The
+second means a ClickHouse **write** client in `epos-registry`, batching, retry
+and back-pressure written by hand, and a schema epos then owns and migrates.
+The collector is a container and a config file, and it is the reason the
+registry needs no write credential (**D4c**).
 
-**Temporality is a decision, not a default to accept.** OTLP's default for a
-monotonic counter is **cumulative**, and SPEC §4.4 puts N replicas behind a load
-balancer. Cumulative rows from several replicas, several process lifetimes and
-several export intervals all land in the same table differing only by resource
-identity and start time — so `sum()` over them double-counts every interval and
-`max()` throws away every replica but one. This is the kind of thing that looks
-right on a single-replica demo (**D15** is exactly that) and is wrong the moment
-anyone runs two.
+**The schema, in three parts.** The first is the collector's; the other two are
+this project's and are checked in as one `.sql` file.
 
-**Decision: export the counter with delta temporality**, via the SDK's
-temporality selector on the OTLP exporter, so rows are additive and the
-catalog's query is a plain `sum()` over a window. The alternative — keep
-cumulative and make the query take the last value per resource-identity and
-start-time before summing — is a correct query that every future reader has to
-re-derive, and it breaks silently when a replica restarts mid-window. Delta puts
-the complexity in one exporter option instead of in every query.
+**1. `otel_traces` — created by the exporter, never by epos.** The
+`clickhouseexporter` creates it on first use (`create_schema: true`) or is given
+it by an operator (`create_schema: false`, which its README recommends in
+production). Epos declares none of it and alters none of it. The columns the
+rollup reads are `Timestamp`, `ServiceName`, `SpanName` and
+`SpanAttributes Map(LowCardinality(String), String)`.
 
-This is not a free choice and the trade is worth naming: delta temporality means
-a dropped export is a permanently lost increment, where cumulative would have
-healed on the next one. For a download counter feeding a leaderboard that is the
-right side to be wrong on — an undercount by one pull, against a number the page
-already describes as a floor (**D4d**).
+**2. `epos_downloads_total` — the catalog's table, and the only thing it
+queries.**
 
-**The honest caveat, stated here so it is not discovered later.**
-`clickhouseexporter`'s support is **beta for traces and logs and *alpha* for
-metrics** (its own README), and its default schema is created by the exporter
-itself — for metrics, type-partitioned tables of which `otel_metrics_sum` is the
-one a monotonic counter lands in. Consequences the implementation must respect:
+```sql
+CREATE TABLE IF NOT EXISTS epos_downloads_total
+(
+    Repository  LowCardinality(String),
+    Verified    Bool,
+    Bucket      DateTime,        -- start of the hour, UTC
+    Downloads   UInt64
+)
+ENGINE = SummingMergeTree
+PARTITION BY toYYYYMM(Bucket)
+ORDER BY (Repository, Verified, Bucket);
+```
 
-- Query the exporter's schema; do not re-declare it. The exporter's README
-  recommends `create_schema: false` in production with the DDL managed
-  separately, and is explicit that column names and types must not change or its
-  inserts break.
-- Pin the collector image and record the schema version the query was written
-  against, because an alpha component's schema is the thing that will move.
-- The catalog's query lives behind the `Stats` interface (**D4e**), so a schema
-  change is one implementation, not a rewrite.
+**3. `epos_downloads_mv` — the rollup that fills it.**
+
+```sql
+CREATE MATERIALIZED VIEW IF NOT EXISTS epos_downloads_mv
+TO epos_downloads_total AS
+SELECT
+    SpanAttributes['repository']         AS Repository,
+    SpanAttributes['verified'] = 'true'  AS Verified,
+    toStartOfHour(Timestamp)             AS Bucket,
+    count()                              AS Downloads
+FROM otel_traces
+WHERE ServiceName = 'epos-registry' AND SpanName = 'epos.download'
+GROUP BY Repository, Verified, Bucket;
+```
+
+**The catalog's query, in full, because "define the schema" means the read side
+too:**
+
+```sql
+SELECT Repository, Verified, sum(Downloads) AS Downloads
+FROM epos_downloads_total
+WHERE Repository IN ? AND Bucket >= ?
+GROUP BY Repository, Verified;
+```
+
+**Five properties of that schema, each of which is a decision:**
+
+- **`sum()` is not optional.** `SummingMergeTree` collapses rows *eventually*, in
+  background merges. Reading `Downloads` without summing returns whatever the
+  merge state happens to be — right on an idle demo, wrong under load. The
+  aggregation is in the query, always, and the DDL carries a comment saying so.
+- **The rollup is what survives the TTL.** `otel_traces` expires its rows;
+  `epos_downloads_total` has no TTL, so a lifetime count outlives the spans that
+  produced it. Querying the raw spans instead would have produced a leaderboard
+  that quietly shrinks the day the TTL first fires — the sort of defect nobody
+  finds until it has been wrong for a month.
+- **A materialized view is an insert trigger, so it must exist before the
+  collector starts.** ClickHouse materialized views see only rows inserted after
+  they are created; they do not backfill. Applying the DDL is a bootstrap step
+  in the compose file and in CI, before the collector's first insert, and
+  backfilling an existing deployment is one `INSERT … SELECT` that the `.sql`
+  file carries as a comment.
+- **Hourly buckets, not raw rows.** An hour is small enough for any window a
+  page shows and large enough that the table stays negligible. It also makes
+  **D8**'s deferred sparkline a `GROUP BY Bucket` rather than a new pipeline.
+- **`Verified` is a `Bool` here and a string in the span.** OTLP attributes on
+  the wire are strings in the exporter's map column, so the view does the
+  conversion once, in the one place that knows the encoding.
+
+**What this buys against the owner's words.** *"We don't need additional code for
+clickhouse"* is literally true: there is no Go on the write path, and the read
+path is one `SELECT` against a table this document defines. The `.sql` file and
+the collector `.yaml` are configuration, in the sense the repository already
+uses that word for `.goreleaser.yaml` and `.golangci.yml` — reviewed, pinned and
+diffable, and not a schema an implementation improvises.
+
+**Rejected: querying `otel_traces` directly and skipping the rollup.** It removes
+two DDL statements and it is what an implementation will reach for first. It
+scans raw spans on every page load, it breaks silently at the first TTL
+expiry, and it puts the encoding of `verified` into every query instead of into
+one view. Named here so that removing the view is a decision someone has to
+argue for.
 
 **Rejected: ClickHouse Cloud, or any managed store, as the demo's backing.** It
 needs an account, a credential and a bill, all of which are the owner's to
@@ -484,45 +780,144 @@ of that is **D5**.
 thing, and it is exactly what §4.4 refuses: durable state in `epos-registry`
 that N replicas cannot share.
 
-### D4c: the `client` attribute must be dropped, and now that is enforceable
+### D4g: the registry never holds a credential that can write
 
-The previous draft recorded this as a constraint on a hypothetical future
-exporter. An exporter is now shipping, so it is a requirement.
+**This is a security property, not a convenience, and the owner named it as
+one:** *"we don't need write credentials for the registry."*
 
-`Download.Client` is the raw `User-Agent`. In a store it is attacker-controlled,
-unbounded cardinality — one row group per distinct User-Agent per repository,
-forever, created by anyone who can issue a blob `GET`. The SPEC already refuses
-far less: `VersionAttribute` is off by default with the comment *"version-valued
-attributes accumulate without bound under a Prometheus exporter, one time series
-per version per repository, forever."* Versions are at least finite and authored
-by the publisher; User-Agents are neither.
+**Decision.** Three principals, three privileges, and they are declared in the
+same `.sql` file as the schema:
 
-**Decision.** The attribute is removed by the metric pipeline, not by
-convention. The OTel Go SDK has the mechanism:
+| principal | credential | privilege |
+|---|---|---|
+| `epos-registry` (relay) | an **OTLP endpoint**. No database credential of any kind. | none — it cannot reach ClickHouse |
+| the collector | `epos_collector` | `INSERT` on `otel_traces` |
+| the catalog | `epos_catalog` | `SELECT` on `epos_downloads_total`, and nothing else |
 
-```go
-sdkmetric.NewView(
-	sdkmetric.Instrument{Name: "epos.downloads"},
-	sdkmetric.Stream{
-		AttributeFilter: attribute.NewAllowKeysFilter("repository", "verified", "version"),
-	},
-)
+```sql
+CREATE USER IF NOT EXISTS epos_catalog IDENTIFIED BY '...'
+    SETTINGS PROFILE 'readonly';
+GRANT SELECT ON epos.epos_downloads_total TO epos_catalog;
 ```
 
-registered with `sdkmetric.WithView` on the provider. An allow-list rather than
-a deny-list, so a future attribute is excluded until someone decides otherwise.
+**Three things this makes true, which the previous draft could only assert:**
 
-Two details that are easy to get wrong:
+- A compromise of the relay yields an OTLP endpoint, not a database. The relay
+  is the process on the public internet answering unauthenticated `GET`s; it is
+  the one that must hold nothing.
+- The catalog cannot create, alter, insert or delete, because it has no grant to
+  do so. *"The catalog only reads"* stops being a rule an implementer has to
+  remember and becomes a rule the database enforces.
+- `readonly` alone is not enough and the DDL says so: a read-only user can still
+  run a query expensive enough to be a denial of service, so the profile also
+  bounds `max_execution_time` and `max_result_rows`. This matters most for
+  **D5a**'s rejected browser-side query and is worth having regardless.
+
+**The one place the registry does read the store, named because D2 created it.**
+The catalog now runs *inside* `epos-registry` (**D2**), so the process does hold
+the read-only DSN — the previous draft's *"the registry's only relationship with
+the store is export"* is no longer true and has been rewritten rather than left
+to be discovered. What replaces it is narrower and checkable: **no request under
+`/v2/` ever reads the store.** The relay path holds no DSN, makes no query and
+cannot be made slower or less available by one; a store that is unreachable
+costs the catalog its numbers and costs `/v2/` nothing. That is asserted by a
+test, not by a paragraph.
+
+### D4h: the whole feature is optional, at two independent switches
+
+> It should be an optional feature. People who don't want to ship clickhouse
+> don't get the leaderboard and downloads.
+
+**Decision.** Two switches, both defaulting to off, and neither implies the
+other:
+
+| switch | default | off means |
+|---|---|---|
+| `--traces.exporter` | `none` | the registry emits no spans, needs no collector, and nothing is stored |
+| `--catalog.stats-source` | `none` | the catalog renders with no counts at all |
+
+An operator who wants a browsable registry and no telemetry stack runs
+`epos-registry --catalog` and gets pages with no numbers. An operator who wants
+numbers in Grafana and no pages runs `--traces.exporter otlp` without
+`--catalog`. Neither combination is a degraded mode; both are configurations.
+
+**The consequence for the home page, which is a real correction.** The previous
+draft's proposal said flatly that *"the home page **is** the leaderboard"*. With
+statistics optional, that cannot be the requirement, and the delta already had a
+"degrades honestly" scenario contradicting the prose above it. Resolved in
+favour of the switch: **the home page is the catalog's entry page. It is a
+ranked leaderboard when a statistics source is configured, and a deterministic
+index of skills when one is not** — the pull column absent rather than zeroed,
+and no ordering claiming to be a popularity ranking. Both shapes are specified
+and both are tested; neither is an error path.
+
+**And the dependency follows the switch.** `clickhouse-go/v2` links into
+`epos-registry` whether or not a source is configured, because Go has no
+conditional imports. That is honest to state and it is the argument for keeping
+the *store* optional rather than making the *driver* optional: roughly sixteen
+pure-Go modules in the binary an operator deploys, and none in the CLI a user
+installs (**D2**).
+
+### D4c: the `client` attribute must be dropped, and with a store it is worse than cardinality
+
+The previous draft recorded this as a constraint on a hypothetical future
+exporter. Something is now shipping, so it is a requirement — and the span
+(**D4a**) makes the argument stronger rather than weaker.
+
+`Download.Client` is the raw `User-Agent`. Under a metrics exporter it is
+attacker-controlled, unbounded cardinality — one time series per distinct
+User-Agent per repository, forever, created by anyone who can issue a blob
+`GET`. The SPEC already refuses far less: `VersionAttribute` is off by default
+with the comment *"version-valued attributes accumulate without bound under a
+Prometheus exporter, one time series per version per repository, forever."*
+Versions are at least finite and authored by the publisher; User-Agents are
+neither.
+
+**Under a trace exporter it is not a cardinality problem, it is a data problem.**
+Every span becomes a durable row in ClickHouse carrying an arbitrary
+attacker-supplied string, retained for the TTL, in a table an operator will
+eventually put a dashboard on. A registry with a public read path would be
+storing unbounded caller-controlled text on behalf of anyone who can `curl` a
+blob. That is worse than the row-count objection and it is the reason this stays
+a hard rule rather than a tuning knob.
+
+**Decision.** The attribute is removed by the pipeline in both directions, not
+by convention:
+
+- **On the metric**, by an SDK view — an allow-list, so a future attribute is
+  excluded until someone decides otherwise:
+
+  ```go
+  sdkmetric.NewView(
+  	sdkmetric.Instrument{Name: "epos.downloads"},
+  	sdkmetric.Stream{
+  		AttributeFilter: attribute.NewAllowKeysFilter("repository", "verified", "version"),
+  	},
+  )
+  ```
+
+  registered with `sdkmetric.WithView` on the provider.
+- **On the span**, by never setting it. The span carries `repository`,
+  `verified` and optionally `version`, and the attribute set is built by the
+  same function that builds the metric's, so the two cannot diverge. There is no
+  span-side equivalent of a view, which is exactly why the shared attribute
+  builder is the mechanism rather than a second list to keep in step.
+
+Three details that are easy to get wrong:
 
 - **Exemplars.** The SDK documents that attributes a view filters out may still
   appear on exemplars, which record the dropped measurement attributes.
   Exemplars must be off, or filtered too.
+- **Auto-instrumentation would put it back.** Any `otelhttp` handler wrapper
+  records `http.user_agent` on its own server span as a matter of course. This
+  is the argument in **D4a** for one hand-written minimal span and no HTTP
+  auto-instrumentation on the relay: a middleware added later for unrelated
+  reasons would silently reintroduce exactly what this section removes.
 - **The stdout exporter.** Nothing forces the filter to be exporter-specific,
-  and making it so is a second code path for no gain. Apply the view
-  unconditionally. If `tests/integration/steps_counting.go` asserts on `client`,
-  that assertion changes — and it is the only place in the repository that reads
-  the attribute at all, which is the argument for dropping it everywhere rather
-  than only where it is dangerous.
+  and making it so is a second code path for no gain. Apply it unconditionally.
+  `tests/integration/steps_counting.go` is the only place in the repository that
+  reads the attribute at all, which is the argument for dropping it everywhere
+  rather than only where it is dangerous.
 
 **Bucketing is not the fix.** Collapsing the user-agent into an enum
 (`epos`/`oras`/`docker`/`other`) duplicates `verified` — a request from `epos
@@ -562,7 +957,7 @@ hover away.
 ### D4e: the catalog reads counts through a `Stats` source, and reads them per request
 
 **Decision.** One interface, one method, `context`-taking, three implementations
-selected by `--stats-source`:
+selected by `catalog.stats-source`:
 
 ```go
 // Stats reports how often each repository has been pulled.
@@ -592,13 +987,14 @@ the three sources answer the same question.
 
 | source | where the numbers come from | who uses it |
 |---|---|---|
-| `none` (default) | nothing — the column is absent and the home page falls back to a stated deterministic order | anyone browsing a registry with no `epos-registry` in front of it |
-| `clickhouse` | a SQL query against the store (**D4b**) | `epos catalog serve` against a live deployment; the demo's export job |
+| `none` (default) | nothing — the column is absent and the home page is an index rather than a ranking (**D4h**) | anyone who wants a browsable registry without a telemetry stack |
+| `clickhouse` | the `SELECT` in **D4b**, against `epos_downloads_total`, with a read-only credential (**D4g**) | `epos-registry --catalog` on a live deployment; the demo's export job |
 | `file` | a JSON document with the shape of `Counts` above | reproducible exports, unit tests, and anyone with numbers but no store |
 
-`none` is the default and it is a first-class mode, not a failure state: most
-registries have no `epos-registry` in front of them, and a catalog that renders
-a broken leaderboard in that case is worse than one that renders a catalog.
+`none` is the default and it is a first-class mode, not a failure state: it is
+the *"people who don't want to ship clickhouse"* case the owner named, and a
+catalog that renders a broken leaderboard in it is worse than one that renders a
+catalog.
 
 `file` is kept even though `clickhouse` exists, and it earns its place three
 times over: it is what makes the demo delta's *"the export is reproducible"*
@@ -631,23 +1027,33 @@ buys nothing here: the work is one query, and the first request after the TTL
 expires is the natural place to do it. Holding the mutex across the query
 serialises a stampede for free; if that proves too coarse, `singleflight` is the
 next step and it is still not a goroutine anyone owns. This also makes
-`--stats-ttl=0` exactly "query every request", which is what the end-to-end test
+`--catalog.stats-ttl=0` exactly "query every request", which is what the end-to-end test
 sets it to rather than sleeping.
 
-**The credential does not go on the command line.** `--stats-dsn` would put a
-working credential for a queryable database in `ps(1)` and in every shell
-history on the box, for a `serve` process that runs for days. This is the one
-place **D2a**'s flags-only rule bends, and it bends the way the CLI already
-bends it for `epos registry login --password-stdin`: the DSN arrives in
-`EPOS_CATALOG_STATS_DSN`, or from a file named by `--stats-dsn-file`. That is
-one environment variable, not a koanf tree and not an env prefix — **D2a**'s
-argument was about configuration style, and a secret is not configuration style.
+**The credential does not go on the command line.** A `--catalog.stats-dsn` flag
+would put a working credential for a queryable database in `ps(1)` and in every
+shell history on the box, for a process that runs for days. So the key has **no
+flag at all**: it is `catalog.stats-dsn`, reachable from
+`EPOS_REGISTRY_CATALOG_STATS_DSN` or from a file the configuration names.
+
+Since **D2**, this is an ordinary koanf key rather than an exception. The
+previous draft had argued the catalog should be flags-only and then had to carve
+out the DSN; served from `epos-registry`, the setting simply joins the tree the
+binary already resolves, and the absence of a flag is the whole mechanism.
 
 The TTL is the stated freshness bound in the stats delta. It must be short
 enough that the e2e assertion — pull, reload, number moved — is not flaky, which
 means the test either waits out the TTL or the TTL is configurable and the test
 sets it to zero. Prefer the latter; a test that sleeps is a test that will be
 made to sleep longer.
+
+**One new hazard the move creates, and it has to be answered.** The catalog now
+shares a process with the relay, so a catalog request that blocks on a slow
+ClickHouse holds a goroutine in the process that is also answering `/v2/`. The
+bounded query timeout and the single-flight TTL cache above are what keep that
+from becoming a relay problem, and the integration tier asserts the property
+directly: with the store unreachable, `/v2/` latency is unaffected and every
+catalog page still serves without counts (**D4g**).
 
 **Rejected: counting in the catalog itself, by proxying pulls through it.** That
 would give exact numbers with no metrics pipeline at all — and would put the
@@ -662,36 +1068,57 @@ queries it", and they are not the same statement.
 
 The previous draft cut an exporter to avoid these costs. The owner has decided
 they are worth paying; that does not make them disappear, and an implementer
-should meet them expecting them.
+should meet them expecting them. The accounting below is rewritten for the
+traces pipeline (**D4a**) and for the catalog living in `epos-registry`
+(**D2**) — both of which move where the weight lands.
 
-- **A large dependency graph in `epos-registry`.** Measured:
-  `go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc` at v1.44.0
-  resolves to **21 modules / ~379 packages**, pulling gRPC, protobuf,
-  `go.opentelemetry.io/proto/otlp`, `grpc-gateway/v2` and `genproto`. **The HTTP
-  variant does not help**: `otlpmetrichttp` measures 21 modules / ~378 packages
-  and still links gRPC for its status codes. Choose between them on
+- **A large dependency graph in `epos-registry`, and *only* there.**
+  `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc` at v1.44.0
+  pulls gRPC, protobuf, `go.opentelemetry.io/proto/otlp`, `grpc-gateway/v2` and
+  `genproto`; the metric variants measured 21 modules / ~379 packages and the
+  trace ones are the same closure. **The HTTP variant does not help** —
+  `otlptracehttp` still links gRPC for its status codes. Choose between them on
   firewall-friendliness, not on weight, and do not justify HTTP by claiming it is
-  lighter — it is not.
-- **A ClickHouse client in `epos`.** `clickhouse-go/v2` is ~16 modules, all pure
-  Go. It links into the CLI, which today has none of them.
-- **Two services to run for a real deployment**, plus a schema owned by an alpha
-  upstream component (**D4b**).
-- **Three SPEC amendments**, where the previous draft made none in this area:
-  §5.3's exporter table gains an implemented `otlp` and its attribute list loses
-  `client` (**D4c**); §13.4's package tree gains the new packages; §14 gains the
-  catalog. **§4.4, §4.5, §5.1, §5.2 and §10.1 are still untouched** — the
-  argument for §4.4 in particular is in **D4a** and is the reason this shape was
-  chosen over the simpler-looking one.
+  lighter. Task 1.6 measures the trace exporters rather than the metric ones.
+- **A ClickHouse client in `epos-registry`.** `clickhouse-go/v2` is ~16 modules,
+  all pure Go. It links unconditionally, because Go has no conditional imports,
+  even when `catalog.stats-source` is `none` (**D4h**).
+- **Nothing new in `epos`.** This is the change the move buys, and it is worth
+  stating in the same list as the costs: the CLI gains no OTLP exporter, no
+  ClickHouse driver, no goldmark, no embedded assets. Its module graph is
+  unchanged by this change except for whatever `internal/registry` needs, which
+  it already had.
+- **A larger refactor than "export a function".** `internal/registry` takes over
+  the remote fetch-and-unpack from `internal/skillfile` (**D2a**, **D3c**) so
+  that `epos-registry` does not link `go-git`, `goawk` and `go-gitdiff`. That is
+  real work on code that already passes tests, and skipping it means a registry
+  binary carrying the entire Skillfile build language.
+- **Three services to run for a real deployment** — registry, collector,
+  ClickHouse — plus one `.sql` file to apply before the collector's first insert
+  (**D4b**).
+- **SPEC amendments, and there are more of them than the previous draft
+  claimed.** §15 decision #2 (`/v2/` only) and §4.4 (statelessness) are both
+  amended by **D2a** — the previous draft cited exactly these two as the reason
+  *not* to do this, so an implementer who reads §4.4 and stops will conclude the
+  change is illegal. §5.3 gains the download span and loses `client` from the
+  attribute list (**D4a**, **D4c**); §3's component table gains the catalog;
+  §13.4's package tree gains the new packages; §14 gains the catalog.
+  **§4.5, §5.1, §5.2 and §10.3 stay untouched**, and the change says so.
 - **`govulncheck` surface.** It is a required job and roughly forty new modules
   arrive at once. Expect to have to move a version.
 
 **Rejected, and this is the one that looks cheaper than it is: writing rows to
 ClickHouse directly from `epos-registry`.** It removes the collector and the
-OTLP dependency graph. It also puts a database client on the request path of a
-process specified to hold no state and to answer from any replica, invents and
-migrates a schema epos would then own, and creates a second instrumentation path
-beside the OTel SDK that §5.3 says there is one of. It would require amending
-§4.4. Not taken.
+OTLP dependency graph. It also puts a **write** credential in the process on the
+public internet — the thing **D4g** exists to prevent, and the thing the owner's
+review names outright — puts a database client on the request path, and invents
+a schema epos would then own and migrate. Not taken.
+
+**Rejected: keeping the metrics `otlp` exporter as well as the span.** Two
+durable paths for the same event is two things to keep in step and two answers
+to "how many downloads", and the second one is on the alpha half of the
+collector (**D4a**). The counter keeps its `stdout` exporter, which is what
+godog and local development use; it does not also get a store.
 
 **Rejected: keeping the snapshot-from-stdout mechanism as well.** The previous
 draft's producer — start `epos-registry --metrics.exporter stdout`, drive pulls,
@@ -710,13 +1137,22 @@ code in `steps_counting.go` stays where it is, testing what it already tests.
 and runs
 
 ```
-EPOS_CATALOG_STATS_DSN=<the CI store> \
-epos catalog export --base-path /epos/catalog --out catalog-dist \
-                    --stats-source clickhouse
+EPOS_REGISTRY_CATALOG_STATS_DSN=<the CI store, read-only> \
+epos-registry catalog export --upstream http://zot:5000 \
+                             --catalog.refs demo/refs.txt \
+                             --base-path /epos/catalog --out catalog-dist \
+                             --catalog.stats-source clickhouse
 ```
 
 writing a directory of finished HTML, published to `gh-pages` under `catalog/`
 and served at `https://gaarutyunov.github.io/epos/catalog/`.
+
+**Note which binary runs.** Since **D2** the renderer lives in `epos-registry`,
+so the export job runs the registry binary in a mode that starts no listener.
+That reads oddly the first time and it is the right boundary: the exported site
+and the served site come from one renderer, and putting `export` on the CLI to
+make the command line look tidier would put the whole frontend back into the
+binary the owner asked to keep clean.
 
 **This is what the owner's review asks for, and it is worth naming the words.**
 
@@ -726,7 +1162,7 @@ and served at `https://gaarutyunov.github.io/epos/catalog/`.
 
 "Static website with SSR" is not a contradiction: it means the HTML is produced
 by a server-side renderer *at build time* rather than by JavaScript in the
-reader's browser. `epos catalog export` is exactly that renderer, and the
+reader's browser. `epos-registry catalog export` is exactly that renderer, and the
 requirement this adds over the previous draft is that the export runs against
 the **real** registry with the **real** documents, not a fixture — which the
 demo delta now says in its own words.
@@ -783,7 +1219,7 @@ request, no credential and no script.
 
 | | where counts come from | do they change on refresh? |
 |---|---|---|
-| `epos catalog serve` + `--stats-source clickhouse` | queried per request, short TTL (**D4e**) | **yes** — this is the mode the owner's e2e assertion describes, and it is tested there |
+| `epos-registry --catalog --catalog.stats-source clickhouse` | queried per request, short TTL (**D4e**) | **yes** — this is the mode the owner's e2e assertion describes, and it is tested there |
 | the published Pages demo | queried once, during the export | **no** — they change when CI re-exports, which is asserted as a property rather than discovered |
 
 **The residual gap, named.** Within one CI run the store is persistent in the
@@ -791,9 +1227,9 @@ sense that matters technically — it outlives the `epos-registry` process, hold
 history, and answers queries — but it does not outlive the *runner*. So the
 demo's leaderboard shows one build's traffic, and the page says so. Making the
 demo accumulate history across runs needs a ClickHouse that is always there, and
-that is the same provisioning decision as a host for `serve`. It is question 2
-for the owner, now sharpened: **one host with ClickHouse and `epos catalog
-serve` on it turns the demo from a build's snapshot into a live catalog with
+that is the same provisioning decision as a host for the served catalog. It is
+question 2 for the owner, now sharpened: **one host running `epos-registry
+--catalog` with ClickHouse behind it turns the demo from a build's snapshot into a live catalog with
 real history, and nothing else in this change has to change to get there.**
 
 Faking the accumulation — seeding the fresh store from the previously published
@@ -880,6 +1316,15 @@ silently never updates.
 `internal/catalog/assets/vendor/ui-kit/{ga-ui-kit.min.js, ga-ui-kit.css, VERSION, LICENSE}`
 and `//go:embed` the assets tree. Refresh with a small script that downloads the
 release assets and rewrites the files; never at build time.
+
+**Which binary carries them is the owner's question from D2, and the answer is
+`epos-registry` alone.** `internal/catalog` is the only package with a
+`//go:embed`, and it is imported by `cmd/epos-registry` and by nothing on the
+CLI's side of the graph. *"People downloading CLI don't need ui artifacts"* is
+therefore a property a test can hold: the assets delta requires an assertion
+that no package reachable from `cmd/epos` imports `internal/catalog`, so a
+future import that quietly puts 104 KB of JavaScript back into the CLI fails the
+build rather than the review.
 
 **The kit's distribution, measured.** `@gaarutyunov/ui-kit` publishes to
 `npm.pkg.github.com` only — not to public npm (`unpkg` and `esm.sh` both 404 for
@@ -1367,28 +1812,37 @@ substitutes, no mocked HTTP."*
   including the `with`-rebinding and conflict cases (**D14c**).
 - **Integration, real containers**: a zot registry (`ghcr.io/project-zot/zot-linux-amd64:v2.1.18`,
   the pinned image already in `tests/integration/registry_read_path_test.go`)
-  with skills packed and pushed into it, `epos-registry` in front exporting
-  OTLP, a collector and a ClickHouse (there is an official
-  `testcontainers-go/modules/clickhouse`, v0.43.0, matching the
-  testcontainers-go the module already has), `epos pull` driving the counter,
-  and the rendered page asserted to carry the count that the store returns. This
+  with skills packed and pushed into it, `epos-registry --catalog
+  --traces.exporter otlp` in front of it, a collector and a ClickHouse (there is
+  an official `testcontainers-go/modules/clickhouse`, v0.43.0, matching the
+  testcontainers-go the module already has) with the DDL applied **before** the
+  collector starts, `epos pull` driving the counter, and the rendered page
+  asserted to carry the count the rollup returns. One process serves both the
+  pull and the page, which is what makes this a test of the deployed shape
+  rather than of two things wired together for the test. This
   is the test that proves the whole chain, and the chain is the deliverable.
-  Note that the collector's metrics support is alpha (**D4b**) — if it proves
-  unusable, that is a finding for the owner about ClickHouse, not a licence to
-  fall back to a hand-written store.
+  The collector's **traces** support is beta rather than the alpha its metrics
+  support is (**D4a**), which is one reason the span is the durable record; if it
+  still proves unusable, that is a finding for the owner about ClickHouse, not a
+  licence to fall back to a hand-written store.
 - **A hostile artifact**, pushed to the real registry: an oversized layer and a
   layer with a `..` entry. The catalog must still list it, its page must say the
   document could not be read, and no file may appear outside `--out` (**D3c**,
   **D3d**, **D12**).
-- **A `--refs`-mode export against a registry with `_catalog` disabled**, so the
+- **A refs-mode export against a registry with `_catalog` disabled**, so the
   ghcr case (**D3**, **D10**) is covered by a test and not by hope.
+- **Two boundary assertions the move makes necessary**: that no package
+  reachable from `cmd/epos` imports `internal/catalog`, and that
+  `cmd/epos-registry` imports neither `internal/cli` nor `internal/skillfile`
+  (**D2a**). Both are `go list -deps` and a comparison; both are the difference
+  between a decision and a preference.
 - **A new `features/` file**, since the features are canonical and never
   paraphrased into Go.
 - **End-to-end, in a browser**: **D16**. It is a third tier, not a variation on
   the integration tier, because it needs a browser and the integration tier is
   required to run everywhere the unit tier does.
-- **The docsgen drift gate** must be green after `epos catalog` joins the cobra
-  tree (**D2**).
+- **The docsgen drift gate** must be green after the generator gains the Epos
+  skill's reference pages and `epos-registry`'s command tree (**D17**).
 
 ---
 
@@ -1738,7 +2192,7 @@ is no server to ask. So the assertion is split, and both halves are asserted:
 
 | subject | assertion |
 |---|---|
-| `epos catalog serve` + a live stats source | read the count, `epos pull` the skill, reload, **the count has increased**. This is the owner's assertion, literally, and it is why `serve` reads counts per request (**D4e**) rather than at startup. |
+| `epos-registry --catalog` + a live stats source | read the count, `epos pull` the skill through that same registry, reload, **the count has increased**. This is the owner's assertion, literally, and it is why the served catalog reads counts per request (**D4e**) rather than at startup — and since **D2** the process that counts the pull and the process that renders the number are one. |
 | the exported directory, served by a plain file server | read the count, pull, reload, **the count is unchanged** — asserted deliberately, so the difference is a tested property of the static mode rather than a surprise in production. Then re-export and assert the number **has** moved. |
 
 Two consequences worth being explicit about:
@@ -1816,6 +2270,134 @@ keep the scenarios in `features/` and the driver behind them.
 
 ---
 
+## D17: the Epos skill — generated where it can be, authored where it cannot
+
+> Let's also publish Epos skill btw. You will need to create it first. A skill
+> that teaches how to properly create skills with Epos. All the cli reference and
+> Skillfile reference. And about the values file and the syntax for templates.
+> Also some guidance on how to decide about what needs to be in values, like
+> parts of the header, whether references are enabled for some tools. For
+> example, testcontainers ships a bunch of references for different languages,
+> while we only need Go.
+
+**Decision.** The repository gains `skills/epos/` — a skill that teaches how to
+author skills with Epos — packed by `epos pack`, published beside `go-house`,
+and rendered by the demo catalog. It is **half generated and half authored**, and
+the split is not a compromise: it follows from which parts have a machine-readable
+source and which are judgement.
+
+### D17a: the two reference documents are generated, by the generator that already exists
+
+**This was worth checking before deciding, and the answer is yes.**
+`internal/docsgen` already renders both references from the implementation:
+
+- `renderCLI` walks the live cobra tree (`cli.NewRootCommand`) — names, usage
+  lines, summaries, prose and every flag with its type and default.
+- `renderSkillfile` reads `skillfile.NewReference()`, which is **already plain
+  data**: `Instructions`, `Topics`, `Sources` and `Syntax`, each a struct with
+  fields a renderer formats.
+
+So the *sources* are structured and reusable. What is not reusable is the
+`page` type: `page.w` writes Astro markup line by line, `escape` escapes for
+Astro's brace syntax, and `frontmatter` emits an `import Base from …`. Content
+and presentation are fused in the emitter, not in the sources.
+
+**Decision.** Extract the emitter, not the content. `docsgen` gains a Markdown
+emitter beside its Astro one, and two new entries in `targets()`:
+
+| target | source | today |
+|---|---|---|
+| `docs/src/pages/cli.astro` | `cli.NewRootCommand` | exists |
+| `docs/src/pages/skillfile.astro` | `skillfile.NewReference()` | exists |
+| **`skills/epos/references/cli.md`** | `cli.NewRootCommand` | **new** |
+| **`skills/epos/references/skillfile.md`** | `skillfile.NewReference()` | **new** |
+
+**Why this and not a second generator.** `docsgen`'s own comment on `targets()`
+answers it: *"A second generator with a drift check of its own is how two pages
+start disagreeing about what 'generated' means, and how one of them quietly
+stops being checked at all."* Adding two targets puts the skill's references
+under the **existing** `go run ./internal/docsgen -check` gate that CI already
+runs, so a flag added to `epos pull` updates the docs site and the skill in one
+command and fails the build until both are committed. A hand-written skill
+reference is a document that is accurate on the day it is written and wrong by
+the next release — which is the failure the owner's "all the cli reference and
+Skillfile reference" is most exposed to, because a skill is read by an agent
+that cannot tell.
+
+**One gap this exposes, and it is worth fixing here.** `renderCLI` walks
+`epos`'s tree only, so **`epos-registry`'s flags are documented nowhere** — not
+on the docs site, not in a skill, not anywhere but `--help`. This change adds
+flags to it (**D2b**), and a previous draft of the task list wrongly asserted
+that the drift gate would catch the stale `--metrics.exporter` help string; it
+would not, because that binary is not walked. So `docsgen` walks both command
+trees, and the CLI reference — Astro and Markdown alike — gains an
+`epos-registry` section.
+
+### D17b: the guidance is authored, and it is the part that makes the skill worth having
+
+The owner asked for three things the generator cannot produce, and they are the
+reason this is a skill rather than two files:
+
+1. **The values file and the template syntax.** Partly derivable —
+   `skillfile.NewReference()` already carries a values-model topic — and partly
+   not: worked examples of a `values.yaml` against a real Skillfile are written,
+   not generated.
+2. **How to decide what belongs in values.** *"Parts of the header, whether
+   references are enabled for some tools"* — this is a judgement about API
+   design. A parameter earns its place when two real consumers disagree about
+   it; everything else is a fork of the skill, not a value.
+3. **The worked example the owner gave, which is the whole lesson.**
+   *"testcontainers ships a bunch of references for different languages, while we
+   only need Go."* That is exactly `examples/go-house/`'s `containers` stage —
+   `{{ if .Values.testcontainers }}` gating whether the reference is included at
+   all, and a `COPY` that takes only the Go files. The guidance and the example
+   are the same artifact seen twice, which is what makes the skill teachable and
+   what makes it check itself: a page in `skills/epos/` describing a stage that
+   `examples/go-house/` does not have is a defect the demo shows on its own
+   detail page.
+
+So `skills/epos/` is:
+
+```
+skills/epos/
+  SKILL.md                   authored — when to reach for epos, the pack →
+                             push → install loop, and where each reference is
+  references/cli.md          GENERATED from the cobra trees
+  references/skillfile.md    GENERATED from the instruction table
+  references/values.md       authored — values files, template syntax, and
+                             what belongs in values (the D17b guidance)
+  values.schema.json         its own declared contract, if D14 lands here
+```
+
+**The recursion is deliberate and it is the demo's strongest argument.** The
+Epos skill is packed by `epos pack`, published by `epos push`, listed by the
+catalog, and its detail page renders its own `SKILL.md` — a skill about
+authoring skills, shipped through the pipeline it documents. It also gives the
+demo its **second** skill for free, which the demo delta already required so
+that the leaderboard ranks something rather than showing one row.
+
+**Rejected: writing the two references by hand.** Faster today, wrong by the
+next release, and invisible to the drift gate that exists precisely to prevent
+this.
+
+**Rejected: generating `SKILL.md` too.** There is no source for "when should you
+use this"; a generated entry document would be a table of contents, and an
+agent reading it would learn nothing it could not get from `--help`.
+
+**Rejected: deriving the Epos skill with a Skillfile from the docs.** Cute, and
+it would make the skill a build rather than a directory — but the references
+come from Go source, not from another skill, so there is no base to derive from
+and `FROM` has nothing to name.
+
+**A scope note, stated because this change has a non-goal about exactly this.**
+The non-goals say epos#42 owns `examples/go-house/` and that #44 "does not
+define a second recipe for it". That still holds: `skills/epos/` is a different
+skill, it is not derived from go-house, and it does not touch #42's recipe. It
+is new scope on #44, added by the owner's review, and it is recorded as such
+rather than smuggled in under the existing boundary.
+
+---
+
 ## Open questions for the owner
 
 1. **Where does the values schema get delivered?** (**D14d**) The recommendation
@@ -1830,14 +2412,31 @@ keep the scenarios in `features/` and the driver behind them.
 3. **A host, or one CI run's worth of history?** (**D5a**) ClickHouse ships and
    is queryable, but the demo's store lives inside the CI job, so the published
    leaderboard shows the traffic of the build that produced it. One host running
-   zot, `epos-registry`, a collector, ClickHouse and `epos catalog serve` turns
+   zot, `epos-registry --catalog`, a collector and ClickHouse turns
    that into a live catalog with accumulating history and **nothing else in this
    change has to change**. It needs infrastructure and a credential the
    repository has never had, so it is the owner's call and it is the biggest
    remaining gap between what shipped and what was asked for.
 4. **`examples/go-house/`** — this change assumes epos#42 merges and supplies it
    (**D1**). If #42 is rejected, #44 needs a different example skill and loses
-   the three capabilities the issue wants demonstrated.
+   the three capabilities the issue wants demonstrated. **Since this review the
+   dependency is softer**: the Epos skill (**D17**) is #44's own and needs
+   nothing from #42, so the demo has a real skill to publish and a leaderboard
+   with something on it even if #42 never lands. It would show one skill instead
+   of two, and lose the multi-stage provenance table, which is #42's artifact to
+   demonstrate.
+7. **Does amending §4.4 and decision #2 go too far?** (**D2a**) The catalog
+   moving into `epos-registry` requires both — a second (non-API) surface on the
+   listener, and a process-local index that is, in §4.4's words, a manifest
+   cache. The amendments are written narrowly: the catalog is off by default,
+   `/v2/` is answered before any catalog route and never from anything the
+   catalog holds, and nothing is written to disk or shared between replicas.
+   §3 already anticipates this direction — *"capabilities that require owning an
+   index … are added to it over time, making it progressively less of a
+   pass-through"* — and §7.4 defers native discovery to exactly such an index.
+   Flagged because these two clauses were the previous draft's stated reason for
+   the shape the review overturned, and a reader who checks the SPEC first
+   should find the amendment rather than a contradiction.
 5. **`playwright-go`, or a pure-Go browser driver?** (**D16b**, **D16c**)
    playwright-go was named in the review and is specified. It downloads a
    Node-based driver, which is exactly the class of dependency

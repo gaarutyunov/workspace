@@ -1,20 +1,42 @@
 ## ADDED Requirements
 
-### Requirement: The CLI serves and exports a catalog of a registry's skills
+### Requirement: The registry serves and exports a catalog of its own skills
 
-`epos` SHALL provide a `catalog` command with two subcommands — one that serves
-the catalog over HTTP and one that writes it to a directory as static files —
-so that a registry's skills can be browsed without installing anything else.
+The registry SHALL be able to serve a catalog of the skills held by the registry
+it fronts, on the listener it already has, and to write that same catalog to a
+directory as static files. The catalog SHALL NOT be part of the CLI.
 
 #### Scenario: A registry can be browsed
-- **WHEN** the serve subcommand is run against a registry that holds skills
-- **THEN** an HTTP server answers on the configured address and its pages list
-  those skills
+- **WHEN** the registry is run with the catalog enabled against an upstream that
+  holds skills
+- **THEN** its pages list those skills, served from the same listener that
+  answers the distribution API
+
+#### Scenario: The CLI carries none of it
+- **WHEN** the packages reachable from the command-line binary are enumerated
+- **THEN** none of them is the catalog package, so the binary a user installs to
+  pack and publish a skill contains no template, no stylesheet, no script and no
+  vendored component bundle
+
+#### Scenario: The catalog is off unless it is asked for
+- **WHEN** the registry is run without the catalog being enabled
+- **THEN** it serves the distribution API and nothing else, exactly as it does
+  today, and no catalog route answers
+
+#### Scenario: The registry's own API is answered first and is never served from the catalog
+- **WHEN** a request arrives under the distribution API's path
+- **THEN** it is answered by the relay, before any catalog route is considered
+  and without consulting anything the catalog holds; and a configuration that
+  would mount the catalog over that path is refused at startup
 
 #### Scenario: The same catalog can be written to disk
 - **WHEN** the export subcommand is run against the same registry
 - **THEN** it writes a directory of static files, and every page in it carries
   the same content as the served page at the corresponding route
+
+#### Scenario: Exporting starts no listener
+- **WHEN** the export subcommand runs
+- **THEN** it opens no port and serves nothing; it renders and writes files
 
 #### Scenario: One renderer, two drivers
 - **WHEN** a page exists in one mode
@@ -32,9 +54,15 @@ so that a registry's skills can be browsed without installing anything else.
   holding a handler indefinitely
 
 #### Scenario: Nothing is written to the registry
-- **WHEN** either subcommand runs
-- **THEN** every request it makes to the registry is a read, and the local store
-  is not modified
+- **WHEN** either mode runs
+- **THEN** every request it makes to the upstream registry is a read, and no
+  local store is modified
+
+#### Scenario: The registry being browsed is the one being fronted
+- **WHEN** the served catalog is asked which registry it lists
+- **THEN** it is the upstream the process already relays to; there is no
+  separate setting naming a different registry, because a registry's own
+  catalog shows the registry's own skills
 
 #### Scenario: No runtime beyond the binary
 - **WHEN** the served or exported catalog is opened in a browser
@@ -49,6 +77,33 @@ so that a registry's skills can be browsed without installing anything else.
 - **THEN** its content, including every document converted from markup and every
   count, is already HTML; the browser is never asked to fetch data, render a
   template or convert a document in order to show the page's content
+
+### Requirement: The catalog's state is process-local and the relay stays stateless
+
+The catalog SHALL hold nothing durable and nothing shared, so that enabling it
+does not make the registry a stateful service.
+
+#### Scenario: Nothing is written to disk
+- **WHEN** a registry serving the catalog is inspected
+- **THEN** it has written no index, cache, table or counter of its own to disk;
+  everything the catalog holds is in memory and dies with the process
+
+#### Scenario: Replicas share nothing
+- **WHEN** several registry instances serve the catalog
+- **THEN** none of them reads, writes or coordinates through anything the others
+  hold, and any distribution API request still receives the same answer from any
+  of them
+
+#### Scenario: Two replicas may briefly list different skills
+- **WHEN** a skill is published between the startups of two instances
+- **THEN** they may list different sets of skills until both have restarted, and
+  the documentation says so — this is a property of a view built at startup, not
+  a defect to be fixed with shared state
+
+#### Scenario: The counts do not diverge between replicas
+- **WHEN** the same skill's count is read from two instances
+- **THEN** it is the same number, because counts come from the store they share
+  rather than from anything either instance accumulated
 
 ### Requirement: The skill list comes from one of two explicit sources
 
@@ -189,8 +244,15 @@ project already applies when it unpacks a layer fetched from a registry.
 
 #### Scenario: The guards are not reimplemented
 - **WHEN** the routine that fetches and unpacks a remote layer is read
-- **THEN** it is the project's existing remote-fetch routine, exported, rather
-  than a third copy of resolve-fetch-untar written for the catalog
+- **THEN** it is the project's existing remote-fetch routine, relocated so that
+  both the build language and the catalog call the same one, rather than a
+  second copy of resolve-fetch-untar written for the catalog
+
+#### Scenario: The build language does not come with it
+- **WHEN** the registry binary's dependencies are enumerated
+- **THEN** it does not link the Skillfile build language or the git, awk and
+  patch libraries that package pulls in, because obtaining one fetch routine
+  must not drag a build system into a registry
 
 ### Requirement: The detail page shows how the skill was built
 
@@ -219,15 +281,24 @@ present them, including which Skillfile stage contributed each file.
   no values form, because a catalog that assembles one from guesses is
   inventing a contract the installer will not honour
 
-### Requirement: The home page is the leaderboard
+### Requirement: The home page is a leaderboard where there are counts and an index where there are none
 
-The catalog's home page SHALL be a ranked table of skills, and ranking SHALL be
-expressed as navigation between named views rather than as a hidden default.
+The catalog's home page SHALL be a table of skills whose ordering is stated on
+the page. Where a statistics source is configured it SHALL be ranked by the
+pull count; where none is, it SHALL be a deterministically ordered index and
+SHALL NOT present itself as a ranking. Both are configurations, not error
+states.
 
 #### Scenario: Ranked rows above anything else
-- **WHEN** the home page is opened
+- **WHEN** the home page is opened with a statistics source configured
 - **THEN** its main content is a ranked table of skills, each row carrying at
   least a rank, the skill's name, the repository it lives in and its pull count
+
+#### Scenario: With no statistics source the page is still the entry page
+- **WHEN** the home page is opened with no statistics source configured
+- **THEN** it lists every skill in a stated deterministic order, with no pull
+  column, no rank column and no wording implying popularity — and it is a
+  complete page rather than a leaderboard with holes in it
 
 #### Scenario: A row is one link
 - **WHEN** any part of a leaderboard row is activated
@@ -398,19 +469,27 @@ produces, and SHALL never write a file outside that directory.
   statistics snapshot
 - **THEN** the two directories are identical
 
-### Requirement: The generated CLI reference stays generated
+### Requirement: The generated CLI reference stays generated and covers both binaries
 
-Adding the catalog command SHALL NOT bypass the documentation generator or its
-drift gate.
+Adding catalog settings SHALL NOT bypass the documentation generator or its
+drift gate, and the generator SHALL document the registry's command surface as
+well as the CLI's.
 
-#### Scenario: The reference page covers the new command
-- **WHEN** the documentation generator runs after the catalog command is added
-- **THEN** the generated CLI reference documents it, and the regenerated page is
+#### Scenario: The reference covers the new settings
+- **WHEN** the documentation generator runs after the catalog settings are added
+- **THEN** the generated reference documents them, and the regenerated pages are
   committed so the drift check passes
 
+#### Scenario: The registry's own flags are documented
+- **WHEN** the generated reference is read
+- **THEN** it documents the registry binary's commands and flags as well as the
+  CLI's, because settings on a binary the generator does not walk are settings
+  no drift gate can catch and no page describes
+
 #### Scenario: The generated page is not hand-edited
-- **WHEN** the catalog command's documentation changes
-- **THEN** the change is made in the generator, not in the generated page
+- **WHEN** the documentation for a command changes
+- **THEN** the change is made in the command definition, not in the generated
+  page
 
 ### Requirement: The project specification records the new packages and the new site surface
 
@@ -431,9 +510,25 @@ deployed.
 #### Scenario: The metrics section records the persistent destination
 - **WHEN** the specification's description of how measurements are emitted is
   read
-- **THEN** it names the exporter that sends them to a store outside the
-  registry, and it records that the user-agent is not among the attributes that
-  reach such a store
+- **THEN** it records that a counted download also emits a span, names that
+  span's attributes, states that this is the durable record, and records that
+  the user-agent is not among the attributes that reach a store
+
+#### Scenario: The clauses that forbade this are amended, in the open
+- **WHEN** the specification's decision ledger and its statelessness section are
+  read after this change
+- **THEN** the ledger row restricting the registry to one API surface records
+  that a read-only catalog may be served on the same listener, disabled by
+  default; and the statelessness section records that its prohibition is on the
+  relay path, with the catalog's index named as process-local, in-memory and
+  shared with nothing
+
+#### Scenario: The clause about rendering is not amended, and the reason is stated
+- **WHEN** the ledger row about where rendering happens is compared before and
+  after
+- **THEN** it is unchanged, and the change records why: that row is about
+  rendering a skill's values templates at install, which the catalog does not
+  do, and reading it as a prohibition on serving HTML would be a misreading
 
 #### Scenario: The testing section records the end-to-end tier
 - **WHEN** the specification's description of the test stack and its build tags
@@ -442,7 +537,13 @@ deployed.
   not part of the ordinary test run
 
 #### Scenario: What is deliberately unamended says so
-- **WHEN** the specification's sections on the registry's statelessness, its
-  write path and its API surface are compared before and after
+- **WHEN** the specification's sections on the registry's write path, on what
+  counts as a download and on verified counts are compared before and after
 - **THEN** they are unchanged, and the change says so, so that a later reader
   does not go looking for an amendment that was deliberately not made
+
+#### Scenario: The component table records the added capability
+- **WHEN** the specification's table of binaries and their roles is read
+- **THEN** the registry's role records that it may also serve a read-only
+  catalog, consistently with the section that already anticipates capabilities
+  requiring an index being added to it over time
