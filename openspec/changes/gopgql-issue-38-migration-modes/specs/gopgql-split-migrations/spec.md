@@ -136,9 +136,9 @@ that a project whose tables are managed elsewhere, or which does not yet want a
 graph, can use gopgql for the other half alone. Switching a half off SHALL affect
 what is generated and never what is applied.
 
-The halves a directory owns SHALL be fixed by its first generation: the flags
-scope a directory's first generation, after which the directory's own history
-decides, and a flag that contradicts that history SHALL be an error.
+A directory SHALL never stop owning a half its history owns: turning off a half
+the directory's history owns SHALL be an error rather than a silent re-scoping,
+for either half.
 
 #### Scenario: Tables off
 - **WHEN** the tables half is turned off
@@ -192,6 +192,40 @@ decides, and a flag that contradicts that history SHALL be an error.
 #### Scenario: The data survives dropping the graph
 - **WHEN** that migration is applied to a database holding rows
 - **THEN** the graph is gone and every row remains
+
+### Requirement: Only the graph half may start being owned later
+
+The halves a directory owns SHALL only ever grow, and which of them may be added
+SHALL be asymmetric. A directory that never owned the graph half MAY start owning
+it, because the property graph is derivable from the schema alone and the
+generation needs nothing out of the history to render it. A directory that never
+owned the tables half SHALL NOT start owning it, because a table migration is a
+delta and there is no truthful prior to take it against: the reconstructed prior
+state for tables no migration in the directory created carries no columns, so the
+delta would re-add columns the database already has. Generation SHALL refuse that
+case before writing anything, and the message SHALL name a fresh target directory
+as the way to have gopgql own the tables.
+
+#### Scenario: Turning the graph half on later is allowed
+- **WHEN** the graph half was off for every previous generation, so the
+  directory's history contains no property-graph creation, and a generation is run
+  with the graph half on
+- **THEN** generation succeeds and emits a single migration creating the property
+  graph — no migration dropping one, because the history holds no graph to drop,
+  and no table migration, because the tables half is still off
+
+#### Scenario: Turning the tables half on later is refused
+- **WHEN** the tables half was off for every previous generation, so no migration
+  in the directory created a table, and a generation is run with the tables half on
+- **THEN** generation fails with a distinguishable error and writes no migration,
+  and the message states that a fresh target directory is how gopgql comes to own
+  the tables
+
+#### Scenario: The refusal is what keeps the directory applyable
+- **WHEN** the tables half is turned on over a history that never created tables
+- **THEN** no migration reaches the directory, so nothing is applied that adds a
+  column the database already has, and no property-graph teardown belonging to a
+  generation that cannot complete is ever applied
 
 ### Requirement: Prior state is reconstructed from a history holding only one half
 

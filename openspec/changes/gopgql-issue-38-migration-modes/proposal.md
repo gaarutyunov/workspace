@@ -44,9 +44,12 @@ emitting consecutive migrations that each do one thing. See
 - **Either half can be turned off**: `--no-tables` (someone else owns them) or
   `--no-graph` (gopgql manages the tables and the graph comes later, or not at
   all). The flags scope what is **generated**; what is **applied** is always the
-  whole directory in version order. And they scope a directory's **first**
-  generation: after that the directory's own history decides what it owns, and a
-  flag contradicting it is an error rather than a silent re-scoping (design D4a).
+  whole directory in version order. A directory's ownership only ever **grows**:
+  turning off a half its history owns is an error rather than a silent re-scoping,
+  and of the two halves only the **graph** may start being owned later. Turning
+  the **tables** half on over a history that never owned tables is an error too,
+  because the graph is derivable from the SDL while a table migration is a diff
+  with no truthful prior to diff against (design D4a).
 - **The tables half is genuinely optional, not degraded.** With `--no-tables`,
   gopgql never looks at tables at all — it does not diff them, does not drop
   what it cannot see, and does not require the SDL to describe every table in
@@ -92,8 +95,10 @@ emitting consecutive migrations that each do one thing. See
   `DROP PROPERTY GRAPH` as clearing the graph, because the history now contains
   drops between the creates.
 - **`cmd/gopgql`**: `--no-tables` / `--no-graph` on `generate` and `migrate`, with
-  a sentinel error when a flag contradicts the folded history (D4a); `migrate`'s
-  apply step is `goose up` on the one directory.
+  sentinel errors where the flags contradict the folded history (D4a) — either
+  half turned **off** over a history that owns it, and the **tables** half left on
+  over a history that never owned tables; `migrate`'s apply step is `goose up` on
+  the one directory.
 - **Deleted relative to the merged design**: the per-half version tables
   (`goose_db_version_tables` / `goose_db_version_graph`), the shared generation
   counter that kept the two halves' numbering aligned, folding a directory only
