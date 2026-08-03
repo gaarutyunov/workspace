@@ -127,9 +127,13 @@ the house rules today.
 - **`goga/registry` is back in v1 — and it never needed generic methods**
   (design D8). It was deferred a revision ago *because* Go lacked them; that
   reasoning is superseded rather than merely outdated. `registry.Register` stores
-  a typed constructor `func(S) (P, error)` under a **plain adapter name**, with
-  both type parameters inferred, so no caller ever names the settings type and it
-  can stay unexported. Three ways to bind a port to an adapter, in order of
+  a typed constructor `func(context.Context, S) (P, error)` under a **plain
+  adapter name**, with both type parameters inferred, so no caller ever names the
+  settings type and it can stay unexported. The registry is **an injected value,
+  not a package-level default** — adapters are attached by an explicit
+  `Provide(r)` in the composition root rather than by a blank import, because
+  go-cloud's global mux is justified by needing to work *without* wire and goga
+  mandates it. Three ways to bind a port to an adapter, in order of
   preference: `wire.Bind` when the adapter is known at build time — which needs no
   registry at all, and is what `gocloud.dev`'s own composition roots use;
   the typed handle `Adapter[P, S].Open(cfg, opts…)` when the adapter is known but
@@ -290,7 +294,7 @@ CI actions, the spec-wide conventions — each requirement names its own.
   `github.com/google/go-cloud` at commit `35f55f24` (2026-08-04), and every claim
   in those decisions cites a file and line so a reviewer can check it. It
   includes a measured minimal-consumer build showing that one module plus
-  blank-imported adapters keeps unused adapter dependencies out of a consumer's
+  explicitly attached adapters keeps unused adapter dependencies out of a consumer's
   build list — and the three accidental leaks that got past that in go-cloud
   itself, which D19 turns into goga's rules and a CI check.
 - **`.github/actions/*`** in the goga repo, referenced as

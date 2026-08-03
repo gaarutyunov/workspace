@@ -177,6 +177,10 @@ to disable it.
 Where any framework API returns a result the caller reads incrementally, that
 result SHALL remain usable until the caller closes it.
 
+*(This rule was found as a defect in the design's own pseudocode, in a database
+method that has since been removed with the port. It is stated here, over any
+streaming API, rather than in the module that happened to surface it.)*
+
 #### Scenario: A returned stream is readable
 - **WHEN** a caller receives a stream and begins reading it
 - **THEN** it reads successfully, because neither the operation's timeout nor its

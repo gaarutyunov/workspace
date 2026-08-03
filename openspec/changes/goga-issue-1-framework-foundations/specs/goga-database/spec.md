@@ -69,6 +69,16 @@ the responsibility of calling code.
 - **THEN** that handle is instrumented, and neither package exports a way to
   obtain an uninstrumented one
 
+#### Scenario: The guarantee is enforced by lint here, not by the type
+- **WHEN** project code obtains a database handle without going through this
+  module
+- **THEN** the linter reports it — and this is the framework's only runtime
+  module where the guarantee is lint-level rather than compile-level, because
+  the handles returned are the standard library's and the driver's own types,
+  which any caller can construct uninstrumented
+- **AND** the framework states this plainly rather than describing the guarantee
+  as structural
+
 #### Scenario: Instrumentation cannot be switched off
 - **WHEN** a caller configures either package
 - **THEN** the instrumentation can be replaced but not disabled, and no option
@@ -90,6 +100,14 @@ back on failure, so that projects do not each write one.
 #### Scenario: A panicking transaction rolls back
 - **WHEN** the transaction body panics
 - **THEN** the transaction rolls back before the panic continues
+
+#### Scenario: Each handle gets its own helper, with identical semantics
+- **WHEN** a project uses the PostgreSQL driver's handle rather than the standard
+  one
+- **THEN** it gets a transaction helper for that handle, separate from the
+  standard one because the two transaction types are different — and the commit,
+  rollback, panic and timeout behaviour of the two is identical and tested to
+  stay identical
 
 #### Scenario: The helper does not introduce a wrapper type
 - **WHEN** a caller uses the transaction helper

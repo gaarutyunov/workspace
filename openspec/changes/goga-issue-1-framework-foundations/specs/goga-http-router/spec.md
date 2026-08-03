@@ -85,11 +85,19 @@ genuinely agree.
   listener that lacks the capability has to declare a stub, and adding the
   capability breaks no existing adapter
 
-#### Scenario: Listener adapters are interchangeable, and it is tested
-- **WHEN** a listener adapter is published
-- **THEN** it passes the module's conformance suite, which asserts drain
-  behaviour, timeout enforcement and the exclusion of operational paths from
-  tracing
+#### Scenario: A second listener brings a conformance suite with it
+- **WHEN** a second listener adapter is published
+- **THEN** a conformance suite is introduced at that point and both listeners
+  pass it — v1 ships one listener, and a conformance suite for one
+  implementation establishes nothing
+
+#### Scenario: Adopting projects get test helpers regardless
+- **WHEN** a project adopts the module
+- **THEN** the framework provides helpers to assert, against the project's own
+  handler, that a request is traced exactly once, that the operational paths are
+  not traced, that a configured timeout is enforced, and that an in-flight
+  request survives a drain — these are properties of the server rather than of a
+  listener, which is why they are helpers and not a conformance suite
 
 ### Requirement: Instrumentation is attached above the handler, exactly once
 

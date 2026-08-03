@@ -48,6 +48,18 @@ adapter-bearing module uses, rather than each module reimplementing the storage.
   unknown-name errors and inspection behave identically across modules without
   being written more than once
 
+#### Scenario: The registry is a value the composition root owns
+- **WHEN** an application assembles its adapters
+- **THEN** it constructs a registry, attaches each adapter to it explicitly, and
+  passes it to the modules that need it — there is no framework-wide default
+  registry, and no adapter attaches itself as a side effect of being imported
+
+#### Scenario: Two registries do not interfere
+- **WHEN** a test constructs its own registry and registers an adapter under a
+  name another test also uses
+- **THEN** neither affects the other, because duplicate detection is scoped to a
+  single registry
+
 #### Scenario: Registration is typed at the point of registration
 - **WHEN** an adapter registers itself
 - **THEN** what is stored is a constructor from that adapter's settings type to
@@ -61,10 +73,17 @@ adapter-bearing module uses, rather than each module reimplementing the storage.
 
 #### Scenario: The constructor shape is fixed across the framework
 - **WHEN** any adapter in any module is registered
-- **THEN** its constructor takes the settings value and returns the port and an
-  error, and a module that needs a context supplies it when the adapter is
-  opened rather than when it is registered, so one registration shape serves
-  every module
+- **THEN** its constructor takes a context and the settings value, and returns
+  the port and an error — one registration shape for every module
+
+#### Scenario: Construction can be cancelled
+- **WHEN** an adapter performs I/O to construct itself — dialling a collector,
+  binding a listener, opening a socket
+- **THEN** it receives the context the caller opened it with, so a startup that
+  is cancelled or times out does not block on a half-built adapter
+- **AND** the context is a parameter of the constructor rather than a field of
+  the settings, because settings are decoded from configuration and a context
+  is not configuration
 
 #### Scenario: The registry depends on nothing
 - **WHEN** the registry is compiled
@@ -157,15 +176,15 @@ An adapter SHALL register itself, and a caller SHALL select one by naming it.
   module graph
 
 #### Scenario: A duplicate registration is a programming error
-- **WHEN** two adapters register the same name in one module
-- **THEN** the conflict surfaces immediately at initialisation rather than
-  producing an arbitrary winner at first use
+- **WHEN** two adapters register the same name in one registry
+- **THEN** the conflict surfaces immediately rather than producing an arbitrary
+  winner at first use
 
 #### Scenario: An unknown adapter is self-diagnosing
 - **WHEN** a caller names an adapter nothing registered
 - **THEN** the failure names the module, the name that was asked for, the ones
-  that are registered, and the likely cause — a missing adapter import — and it
-  reads the same way whichever module produced it
+  that are registered, and the likely cause — an adapter that was never attached
+  to this registry — and it reads the same way whichever module produced it
 
 #### Scenario: The failure names types by their declared name
 - **WHEN** a resolution failure mentions the port or the adapter type
