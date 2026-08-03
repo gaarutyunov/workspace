@@ -23,18 +23,26 @@ for a caller to populate.
   name it, construct it or embed it, and the only populated instance in existence
   is the one the framework builds from the caller's options
 
-#### Scenario: There is no exported struct in the option surface
-- **WHEN** any module's public surface is examined for a struct a caller could
-  populate and pass
+#### Scenario: There is no exported struct in the caller-facing option surface
+- **WHEN** any module's public surface is examined for a struct a *caller* could
+  populate and pass to the framework
 - **THEN** none exists, so the alternative to options is unspellable rather than
   merely unaccepted
 
+#### Scenario: Types that cross the port to an adapter are exported, and that is not an exception
+- **WHEN** a port hands an adapter per-call options, or a conformance suite in a
+  third package constructs them
+- **THEN** those types are exported, because an adapter in another package must
+  name them in its method signatures to implement the port at all — and this is
+  not a way round the rule above, because no framework entry point accepts one
+  from a caller and constructing one yields nothing usable
+
 #### Scenario: An adapter receives the module's settings without naming the struct
-- **WHEN** an adapter in its own package implements its module's opener and needs
+- **WHEN** an adapter in its own package implements its module's port and needs
   values the caller gave the *module*
-- **THEN** it names a read-only interface of accessors, reads the values it needs
-  through it, and can neither construct nor mutate the settings behind it —
-  which is what allows the struct itself to stay unexported
+- **THEN** it names a read-only interface of accessors, or the exported
+  driver-side options type, and can neither construct nor mutate the module's own
+  settings behind it — which is what allows that struct to stay unexported
 
 #### Scenario: An adapter's own settings are configured by options too
 - **WHEN** an adapter has settings of its own, distinct from its module's
@@ -42,12 +50,20 @@ for a caller to populate.
   struct, and the adapter's settings type may itself stay unexported because no
   caller has to name it
 
-#### Scenario: The dynamic adapter case needs no parameter struct either
-- **WHEN** a surface is dynamic enough that a parameter struct would traditionally
-  be the fallback
-- **THEN** options still suffice, because an option is a function typed to the
-  settings it mutates and that type can be a type parameter resolved per adapter
-  — so the parameter-struct exception is not taken anywhere in the framework
+#### Scenario: Options remain statically typed wherever the adapter is known at build time
+- **WHEN** an adapter is selected statically or through its typed handle
+- **THEN** its options are functions typed to that adapter's own settings type,
+  fully checked by the compiler, and no parameter struct appears — so the
+  parameter-struct fallback is not taken on any path where it could be avoided
+
+#### Scenario: The dynamic path takes configuration as data, and says why
+- **WHEN** an adapter is chosen by a name that is only known at run time
+- **THEN** its configuration is supplied as a decoded data node rather than as a
+  typed struct the caller names, because a type cannot be recovered from a
+  runtime string — and the framework decodes that node into the adapter's own
+  settings type rather than asking the caller to assert it
+- **AND** the framework documents this as the one place the caller does not get
+  static checking, rather than describing every path as equally typed
 
 #### Scenario: An option can be held and passed without naming what it mutates
 - **WHEN** a caller stores or forwards a module's options
@@ -155,6 +171,31 @@ to disable it.
   telemetry
 - **THEN** the operations succeed against no-op providers, and telemetry appears
   as soon as a consuming binary configures it
+
+### Requirement: A streaming result outlives the call that returned it
+
+Where any framework API returns a result the caller reads incrementally, that
+result SHALL remain usable until the caller closes it.
+
+#### Scenario: A returned stream is readable
+- **WHEN** a caller receives a stream and begins reading it
+- **THEN** it reads successfully, because neither the operation's timeout nor its
+  instrumentation was released when the call returned
+
+#### Scenario: The recorded duration covers the read
+- **WHEN** the stream is closed
+- **THEN** the operation's recorded duration covers the whole read, not only the
+  call that started it
+
+#### Scenario: Closing releases everything, once
+- **WHEN** a stream is closed, whether after a full read or an abandoned one
+- **THEN** the timeout and the recording are released exactly once, and closing
+  again is harmless
+
+#### Scenario: A failed read is recorded as a failure
+- **WHEN** an error occurs partway through reading
+- **THEN** the operation is recorded as failed rather than as the success it
+  appeared to be when the call returned
 
 ### Requirement: Every wrapper exposes what it wraps
 

@@ -2,7 +2,7 @@
 
 **Milestone: M5 (`goga/migrate`). Adopter: gopgql, which already requires goose
 and ships its own migration package. It follows M4 because the migrator takes the
-portable database handle, and its readiness reporting plugs into the check shape
+standard database handle, and its readiness reporting plugs into the check shape
 M2 shipped.**
 
 ### Requirement: One migration engine for the house
@@ -17,7 +17,7 @@ chosen engine, and projects SHALL NOT each select their own.
 
 #### Scenario: Migrations run on the framework's database handle
 - **WHEN** the migrator is constructed
-- **THEN** it takes the portable database handle, and the bridge to whatever
+- **THEN** it takes the standard-library database handle, and the bridge to whatever
   interface the engine requires is the module's concern and not the caller's
 
 #### Scenario: The version table is named once

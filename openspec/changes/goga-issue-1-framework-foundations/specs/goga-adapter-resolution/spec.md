@@ -2,76 +2,102 @@
 
 **Milestone: the shared registry ships at M0 (`goga/registry`); per-module
 resolution is delivered with each adapter-bearing module, first at M1
-(`goga/telemetry`'s exporter tables), then M2 (`goga/serve`), M4
-(`goga/database`) and M6 (`goga/mcp`). The registry is generic over the port an
-adapter satisfies and returns adapters as their concrete type, which requires Go
-1.27 generic methods.**
+(`goga/telemetry`'s exporter tables), then M2 (`goga/serve`'s listener) and M6
+(`goga/mcp`'s transports). The registry stores a typed constructor per adapter
+name and needs no language feature newer than the framework's stated floor;
+`goga/database` has no adapter table at all (design D7).**
 
-### Requirement: One shared registry, generic over the port
+### Requirement: A port is bound to an adapter by one of three mechanisms, and the static ones are the default
 
-The framework SHALL provide a single registration table type, generic over the
-port interface an adapter satisfies, and every adapter-bearing module SHALL hold
-one for its own port rather than reimplementing the storage.
+The framework SHALL support binding a port to an adapter statically at build
+time, and SHALL provide the registry only for the case where configuration must
+choose at run time.
+
+#### Scenario: The adapter is known when the program is built
+- **WHEN** a composition root knows which adapter it wants
+- **THEN** it binds the port to the adapter through the dependency-injection
+  mechanism, with no registry, no name string and no adapter import for its side
+  effect
+
+#### Scenario: The adapter is known but its own settings must be configured
+- **WHEN** a composition root wants one named adapter and that adapter's own
+  options
+- **THEN** it uses the typed handle produced when the adapter was registered, so
+  both the port and the settings type are static and no name is resolved at run
+  time
+
+#### Scenario: Configuration chooses the adapter
+- **WHEN** the adapter is named in configuration and is not known when the
+  program is built
+- **THEN** the registry resolves it by name, and this is the only binding
+  mechanism whose failure is deferred to run time
+
+#### Scenario: A statically known adapter is not resolved through a string
+- **WHEN** project code resolves an adapter by a name that is a string literal
+- **THEN** the linter reports it, because a literal means the adapter was known
+  at build time and one of the static mechanisms was available
+
+### Requirement: One shared registry, storing a typed constructor per adapter
+
+The framework SHALL provide a single registration mechanism that every
+adapter-bearing module uses, rather than each module reimplementing the storage.
 
 #### Scenario: A module gains a pluggable surface
 - **WHEN** a module needs interchangeable adapters
-- **THEN** it instantiates the shared table for its own port and its own key
-  convention, so registration, duplicate handling, unknown-key errors and
-  inspection behave identically across modules without being written more than
-  once
+- **THEN** it uses the shared registry, so registration, duplicate handling,
+  unknown-name errors and inspection behave identically across modules without
+  being written more than once
 
-#### Scenario: The registry is generic over the port, not over a concrete type
-- **WHEN** the registry is declared for a surface
-- **THEN** its type parameter is the port interface that adapters satisfy, and an
-  adapter is a struct stored against that port
+#### Scenario: Registration is typed at the point of registration
+- **WHEN** an adapter registers itself
+- **THEN** what is stored is a constructor from that adapter's settings type to
+  the port, so an adapter that does not satisfy the port cannot be registered and
+  the contents of the registry are correct by construction
 
-#### Scenario: An adapter is recovered as its concrete type
-- **WHEN** a caller resolves an adapter whose concrete type it already knows
-- **THEN** the registry returns that concrete type, so the adapter's own surface
-  beyond the port is reachable without a type assertion written at the call site
+#### Scenario: Neither type is named by the registering package's callers
+- **WHEN** an adapter is registered
+- **THEN** both the port type and the settings type are inferred from the
+  constructor, so no other package names either of them
 
-#### Scenario: A concrete type that does not match is reported, not returned
-- **WHEN** a caller asks for a concrete type the stored adapter is not
-- **THEN** resolution fails with an error naming both the type requested and the
-  type stored, because the language cannot constrain the requested type to the
-  registry's port and the check therefore happens at resolution time
+#### Scenario: The constructor shape is fixed across the framework
+- **WHEN** any adapter in any module is registered
+- **THEN** its constructor takes the settings value and returns the port and an
+  error, and a module that needs a context supplies it when the adapter is
+  opened rather than when it is registered, so one registration shape serves
+  every module
 
 #### Scenario: The registry depends on nothing
 - **WHEN** the registry is compiled
-- **THEN** it imports no other framework package, so no module's use of it can
-  create a dependency cycle with the telemetry module
+- **THEN** it imports no other framework package and no third-party package, so
+  no module's use of it can create a dependency cycle with the telemetry module
 
-### Requirement: A module's own opener checks the port at compile time
+### Requirement: Going from a port to a concrete adapter type is an escape hatch, and it is honest about being checked at run time
 
-Where a module resolves an adapter it declares, the check that the adapter
-satisfies that module's port SHALL be made by the compiler rather than deferred
-to resolution time.
+Where a caller needs an adapter's own surface beyond the port, the framework
+SHALL provide one documented way to reach it, and SHALL NOT present it as a
+compile-time operation.
 
-#### Scenario: The module declares the adapter constraint
-- **WHEN** a module exposes a typed way to open one of its adapters
-- **THEN** the adapter type is constrained by a declaration naming both that
-  module's port and the settings the adapter consumes, so a type satisfying
-  neither is rejected before the program runs
+#### Scenario: A caller reaches the underlying implementation
+- **WHEN** project code holds a framework type and needs the underlying
+  implementation's own surface
+- **THEN** it uses the single escape-hatch method, which reports whether the
+  conversion succeeded rather than returning a value that may be wrong
 
-#### Scenario: A type that does not satisfy the port is rejected
-- **WHEN** project code asks a module's opener for a type that does not implement
-  that module's port
-- **THEN** the program does not compile, and the failure names the missing part
-  of the contract
+#### Scenario: The escape hatch failing is not an error
+- **WHEN** the escape hatch reports that the requested type is not available
+- **THEN** the calling code is expected to skip the implementation-specific
+  behaviour and continue, so the same code still runs against a different
+  adapter
 
-#### Scenario: The caller's options reach the adapter
-- **WHEN** an adapter needs the caller's settings to construct itself
-- **THEN** the module passes the adapter its own settings value, built from
-  options typed to that adapter, and the settings type itself may remain
-  unexported — so no caller-facing parameter struct appears and no caller needs to
-  name the type
+#### Scenario: The conversion is documented as a run-time check
+- **WHEN** an adapter author or a caller reads the escape hatch's documentation
+- **THEN** it states that the conversion is checked when it runs, because the
+  concrete type behind a port is not known to the compiler at that point
 
-#### Scenario: A module whose adapters read nothing passes nothing
-- **WHEN** no adapter of a given module reads any setting
-- **THEN** that module's opener takes none, and it declares no accessor
-  interface, because a parameter no implementation reads is an abstraction with
-  no user — the shared registry stores adapters and imposes no opener signature,
-  so modules are free to differ here
+#### Scenario: Every adapter documents what it supports
+- **WHEN** an adapter is published
+- **THEN** its package documentation lists the types its escape hatch supports,
+  including stating that it supports none
 
 ### Requirement: Adapter configuration is decoded into the adapter's own type
 
@@ -82,14 +108,19 @@ the caller's options over it.
 #### Scenario: Configuration is decoded to the adapter's expected type
 - **WHEN** an adapter is opened and configuration exists for it
 - **THEN** that configuration is unmarshalled into the settings type the adapter
-  declared, and the adapter is initialised from it
+  declared, and the adapter is constructed from it
 
 #### Scenario: Explicit options take precedence over configuration
 - **WHEN** both configuration and options supply the same setting
 - **THEN** the option wins, because it is the more specific and more explicit form
 
+#### Scenario: The settings type stays unexported
+- **WHEN** an adapter declares the settings it consumes
+- **THEN** that type may remain unexported, and a package that configures the
+  adapter correctly is still unable to name, construct or embed it
+
 #### Scenario: An adapter validates its own settings
-- **WHEN** an adapter is initialised with settings it cannot accept
+- **WHEN** an adapter is constructed with settings it cannot accept
 - **THEN** it reports the failure as an error naming the problem, and the module
   wraps it identifying the module and the adapter, rather than panicking or
   starting in a degraded state
@@ -99,31 +130,26 @@ the caller's options over it.
   mixes two adapters' options in one call
 - **THEN** the program does not compile
 
-#### Scenario: The accessor interface has one home
-- **WHEN** an adapter author looks for the accessor interface to name
-- **THEN** it is in the same package as the port interface being implemented,
-  which the adapter already imports, rather than in a different package per
-  module
+#### Scenario: The caller does not name a settings type on the dynamic path
+- **WHEN** an adapter is chosen by a name that is only known at run time
+- **THEN** the caller supplies the configuration as data and does not name the
+  adapter's settings type, because a type cannot be recovered from a runtime
+  string — and the framework does not offer a form that asks the caller to
+  assert one
 
 ### Requirement: Adapters self-register and are selected by name
 
 An adapter SHALL register itself, and a caller SHALL select one by naming it.
 
-#### Scenario: Selection is by scheme where there is a URL
-- **WHEN** a caller supplies a connection URL
-- **THEN** the adapter registered under that URL's scheme is used
+#### Scenario: Selection is by a plain adapter name
+- **WHEN** any adapter in any module is selected through the registry
+- **THEN** the key is the adapter's plain name, and neither the caller nor the
+  module composes or parses a URL in order to select it
 
-#### Scenario: Selection is by plain name where there is no URL
-- **WHEN** a surface selects its adapter by name alone — a router, an exporter, a
-  protocol transport, a deployer — with no connection URL to carry it
-- **THEN** that module's table is keyed by the name directly, and neither the
-  caller nor the module composes a URL whose scheme would not be the adapter's
-  name
-
-#### Scenario: A module keyed one way does not carry the other
-- **WHEN** a module resolves by name
-- **THEN** nothing in its resolution path parses or synthesises a URL, so the
-  failure where a synthesised scheme resolves to the wrong key cannot occur
+#### Scenario: A connection URL is configuration, not a selector
+- **WHEN** a module takes a connection URL or DSN
+- **THEN** that string is passed to the one implementation that module uses, and
+  its scheme does not choose an adapter
 
 #### Scenario: An adapter's dependency is optional
 - **WHEN** a project does not use a given adapter
@@ -131,7 +157,7 @@ An adapter SHALL register itself, and a caller SHALL select one by naming it.
   module graph
 
 #### Scenario: A duplicate registration is a programming error
-- **WHEN** two adapters register the same key in one module
+- **WHEN** two adapters register the same name in one module
 - **THEN** the conflict surfaces immediately at initialisation rather than
   producing an arbitrary winner at first use
 
@@ -141,15 +167,20 @@ An adapter SHALL register itself, and a caller SHALL select one by naming it.
   that are registered, and the likely cause — a missing adapter import — and it
   reads the same way whichever module produced it
 
+#### Scenario: The failure names types by their declared name
+- **WHEN** a resolution failure mentions the port or the adapter type
+- **THEN** it prints the declared type name rather than formatting a zero value,
+  so a nil interface does not render as an empty placeholder
+
 #### Scenario: The registered set is inspectable
 - **WHEN** a caller or a diagnostic needs to know what is available
 - **THEN** the module reports what is registered
 
 #### Scenario: A project can add an adapter but cannot ask for a raw one
 - **WHEN** a project registers an adapter the framework does not ship
-- **THEN** registration is exported so that it can, and lookup is not — no
-  framework entry point returns an adapter-level object, so the framework never
-  hands back something uninstrumented
+- **THEN** registration is exported so that it can, and what resolution returns
+  is the module's own instrumented type, so the framework never hands back
+  something uninstrumented
 
 ### Requirement: Resolution is observable
 
@@ -163,6 +194,12 @@ Adapter resolution SHALL be instrumented by the module that performs it.
 #### Scenario: A failed resolution is recorded
 - **WHEN** resolution fails
 - **THEN** the failure is recorded with its error type
+
+#### Scenario: The adapter is identified without the adapter declaring it
+- **WHEN** a resolution is recorded
+- **THEN** the adapter's identity is derived from the adapter itself rather than
+  from a name the adapter had to declare, so a newly written adapter is
+  identified correctly without its author doing anything
 
 #### Scenario: Resolution telemetry needs no special arrangement
 - **WHEN** a module records a resolution

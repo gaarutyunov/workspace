@@ -1,74 +1,83 @@
 ## ADDED Requirements
 
-**Milestone: M4 (`goga/database`, with `driver`, `pgxdb` and `sqldb`) — the
-owner's *"postgres which could land to gopgql and codiq"*. Adopter: gopgql; codiq
-when it exists. The last scenario, *Generated query code runs on the portable
-handle*, depends on the sqlc seam and lands at M12 with the generators.**
+**Milestone: M4 (`goga/database` and `goga/database/pgxdb`) — the owner's
+*"postgres which could land to gopgql and codiq"*. Adopter: gopgql; codiq when it
+exists. The last two scenarios depend on the sqlc seam and land at M12 with the
+generators.**
 
-### Requirement: Database access goes through a portable API with pluggable adapters
+**This capability was reversed in the current revision (design D7).** The
+previous version specified a portable database API with a replaceable adapter
+behind it. It no longer does: `gocloud.dev`, which this design follows for every
+other module and which ships driver-based ports for object storage, publish and
+subscribe, document stores, secrets and runtime configuration, deliberately did
+not build one for SQL — it returns the standard library's handle and instruments
+the driver underneath it. The requirements below follow that.
 
-Database access SHALL be provided as a portable API whose backend is a
-replaceable adapter, so replacing the backend does not change the calling code.
+### Requirement: Database access is provided as two honest handles, not one portable interface
 
-#### Scenario: A caller opens a database by connection URL
-- **WHEN** a caller supplies a connection URL and options
-- **THEN** the adapter matching the URL's scheme is used, and the caller receives
-  the portable handle
+The framework SHALL provide database access by returning the standard library's
+database handle and, separately, the PostgreSQL driver's own handle, and SHALL
+NOT introduce an interface that both satisfy.
 
-#### Scenario: PostgreSQL is served by the pgx adapter
-- **WHEN** a PostgreSQL URL is opened
-- **THEN** pgx is the adapter behind it
+#### Scenario: A caller wants the standard interface
+- **WHEN** a caller opens a database through the module's primary entry point
+- **THEN** it receives the standard library's database handle, already
+  instrumented, and every tool that speaks that interface works with it
+  unmodified
 
-#### Scenario: A second backend needs no caller changes
-- **WHEN** a different backend is introduced
-- **THEN** it is added as an adapter, and callers of the portable API compile and
-  behave unchanged
+#### Scenario: A caller wants PostgreSQL's own capabilities
+- **WHEN** a caller opens a database through the PostgreSQL package
+- **THEN** it receives that driver's native pool handle, already instrumented,
+  with bulk copy, batching and asynchronous notifications directly available and
+  nothing to unwrap
 
-#### Scenario: A second adapter exists before the split is relied on
-- **WHEN** the portable API is first released
-- **THEN** more than one adapter implements it, so the claim that the interface
-  is portable has been exercised rather than assumed
+#### Scenario: The two are not presented as interchangeable
+- **WHEN** a project moves between the two
+- **THEN** it changes an import and a type, and the framework does not offer a
+  configuration switch that pretends the change is transparent — because the two
+  handles do not have the same capabilities
 
-#### Scenario: The adapter surface is narrow
-- **WHEN** a new adapter is written
-- **THEN** it implements query, execute, transaction and close, and implements no
-  cross-cutting concern — no tracing, no metrics, no timeouts
+#### Scenario: The connection string does not select an implementation
+- **WHEN** a caller supplies a connection URL or DSN
+- **THEN** that string is passed to the driver as configuration, and its scheme
+  does not choose between the two packages
 
-#### Scenario: A missing adapter fails clearly at startup
-- **WHEN** a URL scheme has no registered adapter
-- **THEN** opening fails naming the registered schemes and the likely missing
-  import, rather than yielding an unusable handle
+#### Scenario: No capability is erased to fit a common shape
+- **WHEN** a caller needs bulk copy, batching, asynchronous notifications or
+  native types
+- **THEN** they are reached directly on the driver's own handle, with no escape
+  hatch, no conversion and no capability check
 
-### Requirement: The portable handle owns the instrumentation
+### Requirement: Both handles are instrumented before the caller receives them
 
-Instrumentation SHALL belong to the portable database handle rather than to any
-adapter.
+Instrumentation SHALL be applied when the handle is constructed, and SHALL NOT be
+the responsibility of calling code.
 
-#### Scenario: Every operation is traced and measured
-- **WHEN** a query, an execute or a transaction runs
+#### Scenario: Every statement is traced and measured
+- **WHEN** a query, an execute or a transaction runs on either handle
 - **THEN** it produces a span with the official database attributes, records its
   duration, and on failure records the error type
 
-#### Scenario: A new adapter is instrumented on the day it is written
-- **WHEN** an adapter is added
-- **THEN** its operations are traced and measured without the adapter's author
-  adding instrumentation
+#### Scenario: Instrumentation is applied beneath the standard interface
+- **WHEN** the standard library handle is constructed
+- **THEN** the instrumentation is installed on the driver beneath it, so the
+  returned value is the ordinary standard-library type and not a wrapper the
+  caller has to unwrap
 
-#### Scenario: The handle cannot be constructed uninstrumented
-- **WHEN** an adapter returns its result
-- **THEN** it returns the adapter-level type, and only the module's open entry
-  point can produce the portable handle — so no code path yields an
-  uninstrumented one
+#### Scenario: There is no uninstrumented path out of the module
+- **WHEN** any exported entry point of either package returns a handle
+- **THEN** that handle is instrumented, and neither package exports a way to
+  obtain an uninstrumented one
 
-#### Scenario: Backend-level detail is not lost
-- **WHEN** the adapter can report backend-level timing or statistics
-- **THEN** those are recorded too, nested within the logical operation rather
-  than replacing it
+#### Scenario: Instrumentation cannot be switched off
+- **WHEN** a caller configures either package
+- **THEN** the instrumentation can be replaced but not disabled, and no option
+  exists that removes it
 
 ### Requirement: Transactions are correct by default
 
-The portable API SHALL provide a transaction helper that commits on success and
-rolls back on failure.
+The module SHALL provide a transaction helper that commits on success and rolls
+back on failure, so that projects do not each write one.
 
 #### Scenario: A successful transaction commits
 - **WHEN** the transaction body returns without error
@@ -82,66 +91,35 @@ rolls back on failure.
 - **WHEN** the transaction body panics
 - **THEN** the transaction rolls back before the panic continues
 
-#### Scenario: A query timeout is applied
-- **WHEN** a query runs with a configured timeout
-- **THEN** it is bounded by that timeout rather than running indefinitely
+#### Scenario: The helper does not introduce a wrapper type
+- **WHEN** a caller uses the transaction helper
+- **THEN** it operates on the standard library's handle and hands the body the
+  standard library's transaction, so the types flowing through the application
+  are unchanged by using it
 
 #### Scenario: A transaction's timeout covers the whole transaction
 - **WHEN** a transaction body runs several statements
 - **THEN** the configured bound applies to the transaction as a whole, so it
   cannot outlive its budget one statement at a time
 
-### Requirement: A streaming result outlives the call that returned it
+### Requirement: The tools that need a particular handle get it directly
 
-A query that returns rows SHALL keep those rows usable until the caller closes
-them.
+Tools that require a specific database handle SHALL be served without a bridge
+the caller has to build.
 
-#### Scenario: Returned rows are readable
-- **WHEN** a caller receives rows and begins reading them
-- **THEN** they read successfully, because neither the timeout nor the
-  instrumentation for that query was released when the call returned
+#### Scenario: The migration engine gets a standard handle
+- **WHEN** the migration engine requires a standard-library database handle
+- **THEN** it is available — directly from the primary entry point, or from a
+  documented conversion on the PostgreSQL pool — so no caller constructs the
+  bridge
 
-#### Scenario: The recorded duration covers the read
-- **WHEN** the rows are closed
-- **THEN** the operation's recorded duration covers fetching and reading them,
-  not only issuing the statement
-
-#### Scenario: Closing releases everything, once
-- **WHEN** rows are closed, whether after a full read or an abandoned one
-- **THEN** the timeout and the recording are released exactly once, and closing
-  again is harmless
-
-#### Scenario: A failed read is recorded as a failure
-- **WHEN** an error occurs partway through reading rows
-- **THEN** the operation is recorded as failed rather than as the success it
-  appeared to be when the call returned
-
-### Requirement: The backend and the standard interface both stay reachable
-
-The module SHALL expose both the native backend handle and a standard-library
-database handle.
-
-#### Scenario: Backend-specific features remain available
-- **WHEN** a caller needs a capability the portable API does not model, such as
-  bulk copy, batching or asynchronous notifications
-- **THEN** the native handle is available for it
-
-#### Scenario: A tool requiring the standard interface is supported
-- **WHEN** a tool requires a standard-library database handle — the migration
-  engine does
-- **THEN** the module provides one, so no caller has to construct the bridge
-
-#### Scenario: An adapter without a standard handle says so
-- **WHEN** an adapter cannot provide a standard-library handle
-- **THEN** the request fails with a distinguishable error rather than a nil handle
-
-#### Scenario: Generated query code runs on the portable handle
+#### Scenario: Generated query code runs on the handle it was generated for
 - **WHEN** a project uses generated type-safe query code
-- **THEN** that code compiles against the portable handle and inherits its
-  instrumentation without any generated line changing
+- **THEN** that code compiles against the handle its generator targeted and
+  inherits that handle's instrumentation, with no generated line changing
 
-#### Scenario: The generated-query seam states which adapter it requires
-- **WHEN** the generator's own interface is expressed in one backend driver's
-  types, as the house query generator's is
-- **THEN** the seam requires that adapter and fails with a distinguishable error
-  under any other, rather than being described as adapter-neutral
+#### Scenario: The generated-query seam is satisfied by the driver handle itself
+- **WHEN** the query generator's interface is expressed in one driver's types, as
+  the house query generator's is
+- **THEN** the driver's own handle satisfies that interface directly, so the seam
+  is a compile-time assertion rather than a conversion that can fail at run time

@@ -92,6 +92,46 @@ module uses, so that instrumentation is uniform and its presence is checkable.
 - **THEN** they can assert that the expected span was produced, so the invariant
   is tested rather than trusted
 
+### Requirement: The instrumentation is unreachable by adapters, so "no opt-out" is structural
+
+The mechanism that makes every module instrumented SHALL be the type system and
+the package boundary, rather than a rule adapter authors are asked to follow.
+
+#### Scenario: An adapter cannot reach the instrumentation
+- **WHEN** an adapter author looks for the per-operation instrumentation
+- **THEN** it is in a package the adapter cannot import, so an adapter cannot
+  instrument, re-instrument or bypass it even deliberately
+
+#### Scenario: There is no way to produce an uninstrumented framework object
+- **WHEN** an adapter returns its result to the framework
+- **THEN** the only thing that can turn it into the type an application receives
+  is the module's own constructor, which attaches instrumentation — so an adapter
+  has no way to hand an application an uninstrumented object
+
+#### Scenario: The adapter's identity is derived, not declared
+- **WHEN** an operation records which adapter performed it
+- **THEN** the identity is derived from the adapter value itself rather than from
+  a name the adapter declared, so a newly written adapter is labelled correctly
+  without its author adding anything
+
+#### Scenario: One value serves as both the error classification and the metric label
+- **WHEN** an operation fails
+- **THEN** the same classification is used to set the span status and to label the
+  duration metric, so the two cannot disagree and an adapter that classifies its
+  errors correctly gets correct metrics without further work
+
+#### Scenario: The telemetry module stays importable by everything
+- **WHEN** the telemetry module's dependencies are examined
+- **THEN** it imports only OpenTelemetry and the standard library, because every
+  other module imports it and any dependency it acquires is acquired by every
+  consuming project — a module that is mandatory must be cheap enough to be
+  mandatory
+
+#### Scenario: A dependency added to a shared module is caught before release
+- **WHEN** a change adds a dependency to the telemetry module or the registry
+- **THEN** the framework's own continuous integration fails, rather than the
+  dependency being discovered by a consuming project
+
 ### Requirement: Operational endpoints stay out of request traces
 
 Health, readiness and metrics endpoints SHALL NOT be recorded as application

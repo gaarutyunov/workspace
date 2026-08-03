@@ -64,7 +64,7 @@ Generated files SHALL be committed and SHALL be verified current.
 Where generated code needs a runtime, the framework SHALL provide the interface it
 compiles against, so the generated output inherits framework behaviour unmodified.
 
-#### Scenario: Generated query code uses the portable database handle
+#### Scenario: Generated query code runs on the handle it was generated for
 - **WHEN** type-safe query code is generated for the house database engine
 - **THEN** it compiles against the framework's database handle and inherits its
   instrumentation, with no generated line edited
@@ -81,9 +81,11 @@ compiles against, so the generated output inherits framework behaviour unmodifie
 - **THEN** the framework's server construction instruments it on the same terms as
   the HTTP server, and the generated output is untouched
 
-#### Scenario: Generated HTTP servers mount through the router interface
+#### Scenario: Generated HTTP servers need no routing seam
 - **WHEN** a server is generated from an interface description
-- **THEN** it mounts through the framework's router interface
+- **THEN** it is already a standard HTTP handler, so it is passed to the
+  framework's server directly and needs no framework routing interface to mount
+  through
 
 #### Scenario: Attribute definitions are generated, not hand-written
 - **WHEN** telemetry attributes are needed
