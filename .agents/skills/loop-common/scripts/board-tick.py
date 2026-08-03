@@ -568,6 +568,22 @@ def spec_branch_key(branch: str) -> tuple[str, int] | None:
     return m.group("repo"), int(m.group("num"))
 
 
+def spec_pr_rank(pr: dict) -> tuple[int, int]:
+    """How much a spec PR deserves to be *the* spec PR when several collide.
+
+    A respun spec collides with the attempts it supersedes — `spec/gopgql-issue-38`,
+    `…-v2` and `…-d4a` all parse to (gopgql, 38) — so the duplicates have to be
+    ranked. Rank explicitly rather than letting the last write win: `gh pr list`
+    returns newest-first, so "later PRs win" silently selected the *oldest*
+    attempt, and it depended on an ordering `gh` never promised.
+
+    OPEN outranks MERGED outranks CLOSED, then the highest number wins. An OPEN
+    respin is where the owner is commenting *now*, which is the whole reason the
+    digest reads spec PRs; a CLOSED one was abandoned and its feedback is stale.
+    """
+    return {"OPEN": 2, "MERGED": 1}.get(pr.get("state", ""), 0), pr.get("number") or 0
+
+
 def attach_spec_prs(items: list[Item]) -> None:
     """Find each task's spec PR.
 
@@ -597,8 +613,7 @@ def attach_spec_prs(items: list[Item]) -> None:
     by_task: dict[tuple[str, int], dict] = {}
     for pr in prs:
         key = spec_branch_key(pr.get("headRefName", ""))
-        if key:
-            # Later PRs win — a respun spec supersedes an earlier attempt.
+        if key and (key not in by_task or spec_pr_rank(pr) > spec_pr_rank(by_task[key])):
             by_task[key] = pr
     for item in items:
         pr = by_task.get((item.repo, item.number))
