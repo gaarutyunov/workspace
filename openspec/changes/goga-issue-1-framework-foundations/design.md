@@ -711,7 +711,7 @@ func Open[P any](ctx context.Context, r *Registry, name string, raw Settings) (P
 // variadic options statically checked on the path that does not need a string.
 type Adapter[P any, S any] struct{ /* name, reg */ }
 
-func Provide[P any, S any](r *Registry, name string, ctor func(context.Context, S) (P, error)) Adapter[P, S]
+func Provide[P any, S any](r *Registry, name string, ctor func(context.Context, S) (P, error)) (Adapter[P, S], error)
 
 // Both P and S are static here: there is nothing to instantiate at the call
 // site, and a foreign adapter's option is a COMPILE error.
@@ -756,6 +756,40 @@ operation the registry performs *on* them beyond storing and returning them, and
 any narrower constraint would be a lie. The type safety is bought at the two ends
 instead: `Register` takes a typed constructor, and `Adapter[P, S]` keeps both
 parameters static at the call site.
+
+#### The decoder is injected, because the registry cannot choose it
+
+**Found by the audit; neither the review nor the revision caught it.** The
+registry decodes a raw configuration node into the adapter's settings type. This
+document also constrains `goga/registry` to the standard library. Those two
+requirements are in direct conflict, and the conflict is silent:
+
+- the only struct-tag decoder in the standard library is `encoding/json`;
+- **every adapter settings struct in this document is tagged `koanf:`**, because
+  koanf is the house configuration library (D-config).
+
+Decoding `{"endpoint": "...", "idle_timeout": 5}` into a struct tagged
+`koanf:"idle_timeout"` with `encoding/json` yields `IdleTimeout == 0`, **with no
+error**. `Endpoint` survives only by `encoding/json`'s case-insensitive fallback.
+A configured adapter would come up misconfigured, silently, with no diagnostic —
+measured, not reasoned:
+
+```
+decoded: Endpoint="http://x" IdleTimeout=0  (err=nil)
+```
+
+The fix is to stop having the registry choose:
+
+```go
+// Decode is supplied by the caller; goga/config provides the koanf-backed one.
+type Decode func(raw Settings, dst any) error
+
+func New(decode Decode) *Registry   // panics if decode is nil
+```
+
+The registry stays dependency-light, the seam becomes explicit instead of
+smuggled, and a decoder that rejects unknown keys — rather than dropping them —
+becomes a property `goga/config` can offer and the conformance tests can assert.
 
 #### What the spike settled, including one thing that cannot be done
 
@@ -841,6 +875,31 @@ revision cannot recur because there is no longer a second key convention.
 `goga/database` has no table (D7). `goga/client` has none: one transport, no
 second candidate, and a one-entry table is the abstraction D7 warns about.
 
+#### The registry is the mechanism *under* each module's surface, not a replacement for it
+
+**Corrected here after an independent audit.** An earlier pass of this revision
+rewrote `telemetry`, `mcp` and `components` to call `registry.Provide` and
+`registry.Open` directly, deleting their own typed registration surfaces. That
+went too far in the other direction, and the audit was right that the
+module-owned surfaces were the better of the two: they take a `context.Context`,
+and they take a module-owned `Settings` accessor interface rather than an
+untyped `map[string]any`.
+
+So both survive, at different levels:
+
+- **Each adapter-bearing module keeps its own typed surface** — its port, its
+  `Settings` accessor interface, and a registration function named for what it
+  registers (`mcp.RegisterTransport`, not a bare `registry.Register`). This is
+  what an adapter author and a composition root actually touch.
+- **`goga/registry` is what those surfaces are implemented over** — one copy of
+  the storage, the name→constructor mapping, the settings decode, the duplicate
+  check, the port check and the diagnostics, rather than five copies.
+
+That is the arrangement the owner asked for — a registry that maps ports to
+adapters — without the contradiction the audit found, where `goga/mcp` specified
+`TransportOpener` and D8's own worked example specified something incompatible
+seven hundred lines earlier.
+
 #### The registry is a value, not a global
 
 **Decided here, because the previous revision's text pointed both ways.** There
@@ -904,8 +963,19 @@ The owner's phrase describes two different operations and they have different
 answers, so it is worth separating them plainly:
 
 - **Choosing an adapter for a port by name, returning it as the port.** That is
-  `Open[P]` above, and it is fully checked: `Register` takes a `func(S) (P,
-  error)`, so what is *in* the registry is correct by construction.
+  `Open[P]` above. **Registration is checked by construction; retrieval had to be
+  made so.** `Register` takes a typed constructor, so what goes *in* is correct —
+  but the audit found that the stored entry recorded only the settings type, so
+  `Open[P]` was a bare structural assertion that accepted any interface the
+  adapter happened to satisfy. An adapter registered for `mcp.Transport` could be
+  retrieved as an unrelated `Dialer` with the same method set, and it succeeded.
+  The entry now records `reflect.TypeFor[P]()` as well, `Open` compares it, and
+  the mismatch is a named error — a case this document previously specified
+  nowhere:
+
+  ```
+  goga: adapter "http" was registered for mcp.Transport, not mcp.Dialer
+  ```
 - **Going from the port back down to the concrete adapter type** — a `*DB` in
   hand and pgx's `CopyFrom` wanted. That is a **downcast, and it is a runtime
   assertion by necessity, not by choice.** No amount of generics changes it: the
@@ -1893,6 +1963,46 @@ files are expected and fine"* (`internal/docs/design.md:806-826`). goga's answer
 is already chosen and is strictly better: testcontainers (D-gogatest). Real
 Postgres, no replay files, no scrubbing, no Terraform.
 
+### D8b: a recommendation to the owner about `goga/registry` — not a decision
+
+**Flagged rather than acted on, because the owner asked for the registry by name
+twice.** An independent audit of D8 made a case for deleting `goga/registry`
+outright, and it is strong enough that he should see it rather than have it
+resolved here.
+
+The evidence, all of it from this document:
+
+- **Before this revision, not one module used it.** D8's table assigned registry
+  tables to `serve`, `telemetry`, `mcp` and `components`; all four specified
+  something else, and `serve` had no table at all. The registry's only appearance
+  outside D8 was a worked example that **directly contradicted `goga/mcp`'s own
+  `TransportOpener`** seven hundred lines later — two incompatible registration
+  APIs for the same adapter in one document.
+- **The module-owned surfaces were the better of the two.** They took a
+  `context.Context` and a module-owned `Settings` accessor interface; the
+  registry took neither, and both had to be added to it above.
+- **The document's own surfaces had independently converged** on the shape that
+  does not need it.
+
+The counter-case, which is why this revision keeps it:
+
+- The owner asked for it explicitly, twice, and *"a structure that can cast
+  interfaces (ports) into adapters"* is a direct description of it.
+- With this pass it is no longer duplicated: the module surfaces are implemented
+  over it, so the storage, decode, duplicate check, port check and diagnostics
+  exist once rather than four times.
+- Without it, the config-driven path — an adapter named in configuration and
+  resolved at startup — has to be written per module.
+
+Two options for the owner:
+
+- **(a) Keep it as now specified**: shared mechanism, typed module surfaces on
+  top. *This is what the spec says.*
+- **(b) Delete `goga/registry`**, and let each module own its table outright.
+  Smaller spec, less indirection, and where the document had already arrived on
+  its own — at the cost of four copies of the same thirty lines, and of dropping
+  something the owner asked for by name.
+
 ### D21a: a recommendation to the owner about `goga/components` — not a decision
 
 **Flagged, not acted on, because the owner put this module in scope by name.**
@@ -2029,6 +2139,17 @@ type Settings map[string]any
 // option unusable with goga.Apply, which the compiler confirms. This is the one
 // framework package goga/registry imports.
 //
+// DIRECTION, and it was contested. The audit proposed the reverse — declare
+// Option in registry and alias it from root goga — to keep registry importing
+// nothing. This design keeps root goga as the home, because Option is used by
+// EVERY module for its own settings, including the ones with no adapters at all
+// (config, cli, client, migrate). If registry owned it, `goga/config` would
+// depend on the adapter registry in order to name its own option type, which is
+// backwards. The cost is one import of a package that is itself standard-library
+// only, so the property the leaf rule protects — no cycles, no heavy
+// dependencies — is untouched; the depguard rule is written to permit exactly
+// this one edge and nothing else.
+//
 // Its language gate is go1.23, not 1.24 — measured against the compiler, which
 // rejects it at `go 1.22` with "generic type alias requires go1.23 or later".
 // The 1.24 floor is chosen for the support window and because generic aliases
@@ -2047,21 +2168,39 @@ type Registry struct {
 	m  map[string]entry
 }
 
-func New() *Registry
+// New takes the DECODER (see D8): the registry must not choose it, because
+// adapter settings are tagged `koanf:` and the only stdlib struct-tag decoder is
+// encoding/json, which drops those fields silently. goga/config supplies it.
+// Panics if decode is nil — that is a wiring error, not a runtime condition.
+func New(decode Decode) *Registry
+
+// Decode is the injected seam. A decoder SHOULD reject unknown keys rather than
+// ignore them, so a mistyped setting is a startup error and not a zero value.
+type Decode func(raw Settings, dst any) error
 
 // Register records a constructor under a plain adapter NAME. BOTH type
 // parameters are inferred from ctor, so no caller — and no other package — ever
 // writes S. That is what lets an adapter keep its settings struct unexported
 // (D14).
 //
-// PANICS on a duplicate name: registering the same name twice in one registry is
-// a programming error. Because the registry is an injected value and not a
-// package-level default (D8), the panic is scoped to that registry, so a test
-// that builds its own is isolated by construction.
+// Register RETURNS AN ERROR on a duplicate name rather than panicking. The
+// previous revision panicked, following gocloud.dev — but that was justified by
+// a duplicate being a programming error inside an init() against a package-level
+// table. With the registry an injected value (D8) there is no init(), the
+// duplicate is detected while ordinary startup code is running, and a panic
+// there is worse than a returned error. `New` still panics on a nil decoder,
+// because that is a wiring mistake with no sensible recovery.
+//
+// It records BOTH type parameters: the settings type, and the PORT — the latter
+// so that Open can check what a caller asks for against what was registered.
 //
 // The constructor signature is FIXED at func(context.Context, S) (P, error) and
-// goga holds it. Adapter construction is I/O in every adapter-bearing module.
-func Register[P any, S any](r *Registry, name string, ctor func(context.Context, S) (P, error))
+// goga holds it. What is load-bearing is that ONE shape is fixed and held: a
+// different shape per adapter would break inference. *Which* shape is free, and
+// ctx is the better choice, because adapter construction is I/O in every
+// adapter-bearing module. (The first spike reported the ctx-less shape as
+// necessary; re-measured, inference is unaffected by a leading context.)
+func Register[P any, S any](r *Registry, name string, ctor func(context.Context, S) (P, error)) error
 
 // Open is the CONFIG-DRIVEN path: the adapter is named by a runtime string, so
 // P is result-only and must be instantiated explicitly. Decodes raw into the
@@ -2075,12 +2214,18 @@ func Register[P any, S any](r *Registry, name string, ctor func(context.Context,
 //
 // reflect.TypeFor[P]() is used in these messages, never %T on the zero value —
 // %T on a nil interface prints "<nil>".
+// Open checks the recorded port against P before constructing, so an adapter
+// registered for one port cannot be retrieved as an unrelated interface that
+// happens to have the same method set.
 func Open[P any](ctx context.Context, r *Registry, name string, raw Settings) (P, error)
 
 // Names is a free function rather than a method purely for symmetry with
 // Register/Open/Provide, which MUST be free functions because they carry their
 // own type parameters (D8-A). Keeping all four in one form means the Go 1.27
 // switch is a uniform edit rather than a partial one.
+//
+// It TAKES THE READ LOCK. This looks read-only enough to skip and is not:
+// -race flags it immediately against a concurrent Register.
 func Names(r *Registry) []string
 
 // Adapter[P,S] is the TYPED HANDLE. Both type parameters are static, so there
@@ -2094,7 +2239,9 @@ type Adapter[P any, S any] struct {
 func Provide[P any, S any](r *Registry, name string, ctor func(context.Context, S) (P, error)) Adapter[P, S]
 
 // Open applies raw config first, then the caller's options ON TOP. Precedence
-// is deliberate: options are the explicit, more specific form (D14).
+// is deliberate: options are the explicit, more specific form (D14). An option
+// returning an error is wrapped as "goga: applying option: %w", the same shape
+// goga.Apply uses, so the two paths report the same failure the same way.
 func (a Adapter[P, S]) Open(ctx context.Context, raw Settings, opts ...Option[S]) (P, error)
 
 func (a Adapter[P, S]) Name() string
@@ -2122,8 +2269,25 @@ func WithIdleTimeout(d time.Duration) registry.Option[settings] {
 	}
 }
 
+// Adapter is an EXPORTED ALIAS of the instantiated handle, and every adapter
+// package declares one. Without it the handle is unusable under D9: a
+// downstream wire provider that takes it as a parameter, or a composition root
+// that holds it as a field, cannot NAME the type — `settings` is unexported, and
+// the compiler says "name settings not exported by package httptransport". The
+// handle would work only as a local `:=` inside one function, so
+// `wire.NewSet(Provide)` would contribute a node nothing could depend on.
+//
+// The alias fixes that without exporting `settings`: the alias name is exported,
+// the type argument is not, and a consumer names the alias. Verified as a
+// provider parameter, a struct field and a second provider's input.
+//
+// Note this is an alias to an ALREADY-INSTANTIATED generic type, which is not
+// the version-gated feature — it compiles at go1.22. Only aliases carrying their
+// own type parameters need go1.23 (D17).
+type Adapter = registry.Adapter[mcp.Transport, settings]
+
 // Provide is the wire-facing entry point and the typed handle in one.
-func Provide(r *registry.Registry) registry.Adapter[mcp.Transport, settings] {
+func Provide(r *registry.Registry) (Adapter, error) {
 	return registry.Provide(r, "http", newTransport)
 }
 
@@ -2180,15 +2344,17 @@ func WithPropagators(names ...string) Option // delegates to contrib/autoprop
 // supplied by an option and is absent for the common case:
 func WithExporterRegistry(r *registry.Registry) Option
 
-// A house exporter registers itself the same way every goga adapter does. The
-// port is OTel's own exporter interface; the settings type stays unexported in
-// the adapter's package:
-//
-//	// package myexporter
-//	func Provide(r *registry.Registry) registry.Adapter[sdktrace.SpanExporter, settings] {
-//		return registry.Provide(r, "myexporter", newExporter)
-//	}
-//	func newExporter(ctx context.Context, s settings) (sdktrace.SpanExporter, error)
+// This module's typed surfaces, implemented over goga/registry (D8). Unlike
+// goga/mcp there is no module-owned Settings accessor, because an exporter reads
+// its endpoint, headers and protocol from the environment through autoexport and
+// the resource is attached to the provider rather than the exporter — D5's rule
+// that a module passes settings to an adapter only where an adapter reads them.
+func RegisterTraceExporter[S any](r *registry.Registry, name string,
+	ctor func(ctx context.Context, s S) (sdktrace.SpanExporter, error)) error
+func RegisterMetricExporter[S any](r *registry.Registry, name string,
+	ctor func(ctx context.Context, s S) (sdkmetric.Exporter, error)) error
+func RegisterLogExporter[S any](r *registry.Registry, name string,
+	ctor func(ctx context.Context, s S) (sdklog.Exporter, error)) error
 //
 // Setup resolves a configured name that autoexport does not recognise through
 // registry.Open, passing the ctx it was called with — an exporter dials at
@@ -2838,18 +3004,23 @@ type Settings interface {
 	Endpoint() string
 }
 
-// Transports go through the SHARED registry (D8): this module declares no table
-// and no opener interface of its own. Transport is the port; each transport
-// package registers a constructor and keeps its settings type unexported.
-//
-//	// package httptransport
-//	func Provide(r *registry.Registry) registry.Adapter[mcp.Transport, settings] {
-//		return registry.Provide(r, "http", newTransport)
-//	}
-//	func newTransport(ctx context.Context, s settings) (mcp.Transport, error)
-//
-// The ctx is load-bearing here rather than ceremonial: the HTTP and SSE
-// transports bind a listener at construction (D8).
+// Settings is this module's accessor interface — the values the caller gave the
+// MODULE, which a transport reads. Distinct from the transport's OWN settings
+// type, which the registry decodes from configuration and which stays
+// unexported in the transport's package (D14).
+type Settings interface {
+	ToolTimeout() time.Duration
+	ServerName() string
+}
+
+// RegisterTransport is this module's typed surface. It is IMPLEMENTED OVER
+// goga/registry (D8) — the storage, decode, duplicate check, port check and
+// diagnostics are the registry's, and this signature is what an adapter author
+// and a composition root actually touch. The ctx is load-bearing rather than
+// ceremonial: the HTTP and SSE transports bind a listener at construction.
+func RegisterTransport[S any](r *registry.Registry, name string,
+	ctor func(ctx context.Context, ms Settings, as S) (Transport, error)) error
+
 func WithTransportRegistry(r *registry.Registry) Option
 func WithTransport(name string) Option // resolved through the registry above
 
@@ -3044,14 +3215,14 @@ type Settings interface {
 	ConfigPath() string
 }
 
-// Deployers go through the SHARED registry (D8): no table and no opener
-// interface of this module's own. Deployer is the port.
-//
-//	// package weaverdeployer
-//	func Provide(r *registry.Registry) registry.Adapter[components.Deployer, settings] {
-//		return registry.Provide(r, "weaver", newDeployer)
-//	}
-//	func newDeployer(ctx context.Context, s settings) (components.Deployer, error)
+// Settings is this module's accessor interface, as in goga/mcp. RegisterDeployer
+// is this module's typed surface, implemented over goga/registry (D8).
+type Settings interface {
+	ConfigPath() string
+}
+
+func RegisterDeployer[S any](r *registry.Registry, name string,
+	ctor func(ctx context.Context, ms Settings, as S) (Deployer, error)) error
 
 func WithDeployerRegistry(r *registry.Registry) Option
 
@@ -3323,9 +3494,10 @@ is no "not enforced" column, by decision.
   runtime error]** — the residual cost of D8. Static binding (`wire.Bind`) and
   the typed handle are both compile-checked; only `registry.Open[P](r, name, …)`
   can fail at startup, and only because configuration is allowed to choose. It is
-  bounded — `Register` takes a typed constructor, so what is *in* the registry is
-  correct by construction — and it is mitigated by the error naming every
-  registered adapter and the likely missing `Provide(r)` call. The risk worth watching
+  bounded — `Register` takes a typed constructor and records the port, so both
+  what is *in* the registry and what comes *out* of it are checked — and it is
+  mitigated by the error naming every registered adapter and the likely missing
+  `Provide(r)` call. The risk worth watching
   is projects reaching for the string path when they meant the typed one, which
   is why D8 states the default explicitly and `goga/lint` flags a
   `registry.Open` whose name argument is a string literal: a literal means the

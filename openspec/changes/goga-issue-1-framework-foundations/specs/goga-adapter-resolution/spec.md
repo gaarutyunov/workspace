@@ -54,6 +54,20 @@ adapter-bearing module uses, rather than each module reimplementing the storage.
   passes it to the modules that need it — there is no framework-wide default
   registry, and no adapter attaches itself as a side effect of being imported
 
+#### Scenario: A registered adapter can be injected
+- **WHEN** a composition root passes the handle returned by registration to
+  another provider, or holds it as a field
+- **THEN** it can name that handle's type without naming the adapter's settings
+  type, because the adapter package exports an alias for it — a handle usable
+  only as a local variable would be unusable under the framework's
+  dependency-injection rule
+
+#### Scenario: Concurrent registration and inspection are safe
+- **WHEN** one goroutine registers an adapter while another lists what is
+  registered
+- **THEN** neither observes a partially updated registry, and the race detector
+  reports nothing
+
 #### Scenario: Two registries do not interfere
 - **WHEN** a test constructs its own registry and registers an adapter under a
   name another test also uses
@@ -63,8 +77,21 @@ adapter-bearing module uses, rather than each module reimplementing the storage.
 #### Scenario: Registration is typed at the point of registration
 - **WHEN** an adapter registers itself
 - **THEN** what is stored is a constructor from that adapter's settings type to
-  the port, so an adapter that does not satisfy the port cannot be registered and
-  the contents of the registry are correct by construction
+  the port, so an adapter that does not satisfy the port cannot be registered
+
+#### Scenario: Retrieval is checked against what was registered
+- **WHEN** a caller resolves an adapter as a port
+- **THEN** the port it asks for is compared against the port the adapter was
+  registered for, and a mismatch is an error naming both — a structural check
+  alone is not sufficient, because an unrelated interface with the same method
+  set would otherwise be accepted
+
+#### Scenario: A module keeps its own typed registration surface
+- **WHEN** a module offers adapters
+- **THEN** adapter authors and composition roots use that module's own named
+  registration function, which takes a context and the module's settings
+  accessor — the shared registry is what that surface is implemented over, not
+  what callers use directly
 
 #### Scenario: Neither type is named by the registering package's callers
 - **WHEN** an adapter is registered
@@ -129,6 +156,19 @@ the caller's options over it.
 - **THEN** that configuration is unmarshalled into the settings type the adapter
   declared, and the adapter is constructed from it
 
+#### Scenario: The decoder is supplied, not assumed
+- **WHEN** the registry decodes configuration into an adapter's settings type
+- **THEN** it uses a decoder given to it at construction rather than choosing
+  one, because the framework's configuration library and its struct tags are not
+  the registry's to know — a registry that picked a standard-library decoder
+  would silently ignore every field tagged for the configuration library
+
+#### Scenario: An unknown setting is an error, not a zero value
+- **WHEN** configuration contains a key the adapter's settings type does not
+  declare, or a key whose tag the decoder does not match
+- **THEN** it is reported at startup rather than discarded, so a mistyped or
+  renamed setting cannot leave an adapter running on a default nobody chose
+
 #### Scenario: Explicit options take precedence over configuration
 - **WHEN** both configuration and options supply the same setting
 - **THEN** the option wins, because it is the more specific and more explicit form
@@ -175,9 +215,12 @@ An adapter SHALL register itself, and a caller SHALL select one by naming it.
 - **THEN** that adapter's third-party dependency does not enter the project's
   module graph
 
-#### Scenario: A duplicate registration is a programming error
+#### Scenario: A duplicate registration is reported, not fatal
 - **WHEN** two adapters register the same name in one registry
-- **THEN** the conflict surfaces immediately rather than producing an arbitrary
+- **THEN** registration returns an error naming the conflict rather than
+  panicking, because the registry is an explicitly constructed value and the
+  duplicate is detected while ordinary startup code is running
+- **AND** the conflict surfaces immediately rather than producing an arbitrary
   winner at first use
 
 #### Scenario: An unknown adapter is self-diagnosing
