@@ -774,14 +774,139 @@ class TestSpecBranchKey(unittest.TestCase):
         self.assertEqual(bt.spec_branch_key("spec/ui-kit-6-2fa-support"), ("ui-kit", 6))
         self.assertEqual(bt.spec_branch_key("spec/goga-12-multi-digit"), ("goga", 12))
 
+    # Every branch below is a real head ref in gaarutyunov/workspace (or, for
+    # mcp-anything, the naming a repo with two hyphens would produce). Hyphens in
+    # the repo name are the hard case: the parse has to know which hyphen run
+    # starts the issue number, and the only signal is "the first `-<digits>`
+    # that leaves a valid remainder".
+    REAL_BRANCHES = [
+        ("spec/goga-1-framework-foundations", ("goga", 1)),
+        ("spec/gopgql-issue-38-v2", ("gopgql", 38)),
+        ("spec/gopgql-issue-38-d4a", ("gopgql", 38)),
+        ("spec/gopgql-14-http", ("gopgql", 14)),
+        ("spec/mcp-anything-issue-142", ("mcp-anything", 142)),
+        ("spec/site-review-issue-2", ("site-review", 2)),
+        ("spec/ui-kit-issue-10", ("ui-kit", 10)),
+        ("spec-ui-kit-6", ("ui-kit", 6)),
+        ("spec-gopgql-14", ("gopgql", 14)),
+        ("spec/garutyunov-com-issue-5", ("garutyunov-com", 5)),
+        ("spec/epos-issue-44", ("epos", 44)),
+    ]
+
+    def test_every_real_branch_style(self):
+        for branch, expected in self.REAL_BRANCHES:
+            with self.subTest(branch=branch):
+                self.assertEqual(bt.spec_branch_key(branch), expected)
+
     def test_rejects_non_spec_branches(self):
-        for branch in ("main", "issue-38", "spec/nonumber"):
+        # `fix/digest-spec-pr-blindspots` is a real branch and contains "spec":
+        # a substring match rather than an anchored one would claim it.
+        for branch in (
+            "main",
+            "issue-38",
+            "spec/nonumber",
+            "fix/digest-spec-pr-blindspots",
+            "archive-issue-12",
+        ):
             with self.subTest(branch=branch):
                 self.assertIsNone(bt.spec_branch_key(branch))
 
     def test_rejects_a_number_not_separated_from_its_slug(self):
         # Better to miss than to guess: `1abc` is not issue 1.
         self.assertIsNone(bt.spec_branch_key("spec/goga-1abc"))
+
+
+class TestAttachSpecPrs(unittest.TestCase):
+    """When several spec branches collide on one key, the right PR must win.
+
+    Accepting a trailing slug means a respun spec no longer gets a key of its
+    own: `spec/gopgql-issue-38`, `…-v2` and `…-d4a` are all (gopgql, 38). Picking
+    the wrong one of those points the digest at a stale PR's comments — the same
+    class of failure as not finding the PR at all.
+    """
+
+    def setUp(self):
+        self._gh = bt.gh
+        self.addCleanup(lambda: setattr(bt, "gh", self._gh))
+
+    def _attach(self, prs, repo="gopgql", number=38):
+        # `gh pr list` returns newest first; mirror that so the test would catch
+        # a re-introduction of "last write wins".
+        listing = sorted(prs, key=lambda p: p["number"], reverse=True)
+        bt.gh = lambda *a, **k: json.dumps(listing)
+        item = make_item(repo=repo, number=number)
+        bt.attach_spec_prs([item])
+        return item
+
+    @staticmethod
+    def _pr(number, branch, state):
+        return {
+            "number": number,
+            "headRefName": branch,
+            "state": state,
+            "url": f"https://example.test/pull/{number}",
+        }
+
+    def test_newest_of_several_merged_respins_wins(self):
+        item = self._attach(
+            [
+                self._pr(33, "spec/gopgql-issue-38", "MERGED"),
+                self._pr(37, "spec/gopgql-issue-38-v2", "MERGED"),
+                self._pr(43, "spec/gopgql-issue-38-d4a", "MERGED"),
+            ]
+        )
+        self.assertEqual(item.spec_pr_number, 43)
+        self.assertEqual(item.spec_pr_state, "MERGED")
+
+    def test_open_respin_beats_an_older_merged_spec(self):
+        # The one that changes an answer: a merged spec would read as approved
+        # and hide the respin the owner is still reviewing.
+        item = self._attach(
+            [
+                self._pr(33, "spec/gopgql-issue-38", "MERGED"),
+                self._pr(50, "spec/gopgql-issue-38-v3", "OPEN"),
+            ]
+        )
+        self.assertEqual(item.spec_pr_number, 50)
+        self.assertTrue(item.spec_pr_state == "OPEN")
+
+    def test_open_beats_merged_even_when_it_is_the_lower_number(self):
+        item = self._attach(
+            [
+                self._pr(50, "spec/gopgql-issue-38-v3", "MERGED"),
+                self._pr(33, "spec/gopgql-issue-38", "OPEN"),
+            ]
+        )
+        self.assertEqual(item.spec_pr_number, 33)
+
+    def test_an_abandoned_closed_respin_never_wins(self):
+        item = self._attach(
+            [
+                self._pr(33, "spec/gopgql-issue-38", "MERGED"),
+                self._pr(60, "spec/gopgql-issue-38-abandoned", "CLOSED"),
+            ]
+        )
+        self.assertEqual(item.spec_pr_number, 33)
+
+    def test_a_lone_closed_spec_pr_is_still_reported(self):
+        # Ranked last, but a closed spec PR is better than pretending none exists.
+        item = self._attach([self._pr(60, "spec/gopgql-issue-38", "CLOSED")])
+        self.assertEqual(item.spec_pr_number, 60)
+
+    def test_goga_1_finds_pr_36(self):
+        # The live regression: PR #36 on a trailing-slug branch, previously
+        # unmatched, leaving goga#1 reading as "in review with no PR".
+        item = self._attach(
+            [self._pr(36, "spec/goga-1-framework-foundations", "OPEN")],
+            repo="goga",
+            number=1,
+        )
+        self.assertEqual(item.spec_pr_number, 36)
+        self.assertEqual(item.spec_pr_url, "https://example.test/pull/36")
+
+    def test_a_non_spec_branch_is_not_attached(self):
+        item = self._attach([self._pr(99, "fix/digest-spec-pr-blindspots", "OPEN")])
+        self.assertIsNone(item.spec_pr_number)
 
 
 # ── unsubmitted (PENDING) review comments ───────────────────────────────────
