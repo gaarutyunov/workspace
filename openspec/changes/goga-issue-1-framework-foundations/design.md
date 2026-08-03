@@ -688,9 +688,12 @@ type Settings map[string]any
 
 // Option is generic over the ADAPTER's settings type, so an option for one
 // adapter cannot be passed to another. It is a generic type ALIAS of the root
-// package's Option (Go 1.24+), NOT a second declaration — two identical
-// declarations would be distinct types and an adapter's option would then be
-// unusable with goga.Apply. This is why registry imports the root goga package.
+// package's Option, NOT a second declaration — two identical declarations would
+// be distinct types and an adapter's option would then be unusable with
+// goga.Apply. This is why registry imports the root goga package.
+//
+// Language gate: go1.23, measured — at `go 1.22` the compiler says "generic type
+// alias requires go1.23 or later". It is NOT what sets the 1.24 floor; see D17.
 type Option[S any] = goga.Option[S]
 
 // Register records a constructor. BOTH type parameters are inferred from ctor —
@@ -2021,11 +2024,17 @@ package registry
 // into the adapter's own type inside Register's closure.
 type Settings map[string]any
 
-// Option is a generic type ALIAS of goga.Option (Go 1.24+, and the reason the
-// floor is 1.24 rather than 1.22). It must be an alias, not a second identical
-// declaration: distinct named types would make an adapter's option unusable with
-// goga.Apply, which the compiler confirms. This is the one framework package
-// goga/registry imports.
+// Option is a generic type ALIAS of goga.Option. It must be an alias, not a
+// second identical declaration: distinct named types would make an adapter's
+// option unusable with goga.Apply, which the compiler confirms. This is the one
+// framework package goga/registry imports.
+//
+// Its language gate is go1.23, not 1.24 — measured against the compiler, which
+// rejects it at `go 1.22` with "generic type alias requires go1.23 or later".
+// The 1.24 floor is chosen for the support window and because generic aliases
+// were only enabled by default in 1.24 (GOEXPERIMENT=aliastypeparams before
+// that), so a `go 1.23` module would build here and fail on a stock 1.23
+// toolchain. See D17.
 type Option[S any] = goga.Option[S]
 
 type entry struct {
