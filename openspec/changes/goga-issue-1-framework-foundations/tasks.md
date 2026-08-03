@@ -14,7 +14,7 @@ Every milestone from M1 lands with **all six** of:
 | 1 | **implementation** | the package |
 | 2 | **tests** | including this module's own telemetry assertions and its entry in `TestEveryModuleIsInstrumented` |
 | 3 | **skill reference** | this module's routing-table row and enforcement-matrix row, written as the module lands |
-| 4 | **linter** | at least one rule enforcing *this* module's conventions — custom analyzer where nothing off the shelf fits — plus the `depguard` entry banning direct use of the dependency this module wraps |
+| 4 | **linter** | at least one rule enforcing *this* module's conventions — custom analyzer where nothing off the shelf fits — plus, **for every module that genuinely wraps a dependency**, the `depguard` entry banning direct use of it. The qualifier is load-bearing and M2 is why: after design D22 goga does not wrap gin or chi, so banning them would fire on correct code. **A wrapper may not ban what it does not wrap**, and a milestone in that position says so in one line rather than shipping a rule with nothing to enforce |
 | 5 | **CI action** | a composite action wherever this milestone introduces a tool that must run in CI; milestones that introduce none say so |
 | 6 | **migration** | a real project adopts it. **A separate task that blocks this milestone's merge** — not follow-up work |
 
@@ -43,8 +43,17 @@ actions that belong to no module; what is left of M13 is a closing audit.
 
 **One thing is deferred rather than scheduled**, recorded at the end:
 `goga/components` (design D12, D16 — no consumer exists). **`goga/registry` is no
-longer deferred** — Go 1.27 ships generic methods, the spike confirmed the shape,
-and it lands in M0 (design D8).
+longer deferred** — and *not* because Go 1.27 arrived. The spike compiled the
+normative registry on stock `go1.26.4` at language version `go 1.22`; generic
+methods buy call syntax on one path and no capability at all. It lands in M0 on
+the **Go 1.24** floor (design D8, D17).
+
+**One open owner decision runs through this file: D8-A.** Everything below is
+written for the spec's recommendation — package-level generic functions on Go
+1.24 — with the 1.27 form costed where it would land (0.1, 0.4a, 0.4d, 0.6, 11.4,
+13.6). Flipping it is a four-line diff in `goga/registry` plus a `go.mod` line
+and a linter-build change; each of those tasks says so, so the owner's answer has
+somewhere to land rather than requiring this file to be rewritten.
 
 ---
 
@@ -54,31 +63,34 @@ goga is empty: one commit, a one-line README. Nothing can be delivered from it
 until this exists. It is deliberately the only milestone with no external
 adopter, and it is small.
 
-- [ ] 0.1 `go mod init github.com/gaarutyunov/goga`; **`go 1.27rc2`** (design D17), dropping the `rc2` suffix when 1.27.0 ships. The RC is the owner's accepted cost — *"even if it's alpha or beta version"* — and M0 is where its consequences are absorbed rather than discovered: record in the README that `GOTOOLCHAIN=auto` will silently switch a 1.26 developer onto the RC, and that `GOTOOLCHAIN=local` fails hard.
+- [ ] 0.1 `go mod init github.com/gaarutyunov/goga`; **`go 1.24`** (design D17) — the oldest release still in upstream support at v1, and nothing in the design needs newer: the registry's only real floor is `reflect.TypeFor`, added in Go 1.22. **If the owner answers D8-A with 1.27**, this line becomes `go 1.27` **plus `toolchain go1.27rc2`** — a bare `go 1.27` breaks under `GOTOOLCHAIN=auto`, which tries to fetch a GA release that does not exist — and the README then has to record that `GOTOOLCHAIN=auto` silently switches a 1.26 developer onto the RC while `GOTOOLCHAIN=local` fails hard. Go's module rule propagates the floor into every consumer, so this one line is the whole cost of that answer.
 - [ ] 0.2 Package layout **flat, no `pkg/`, no `internal/`** for goga's own code, per the issue. Adapters are sub-packages of their module (`database/pgxdb`) so an adapter's dependency stays optional.
 - [ ] 0.3 The root `goga` package: `goga.Option[S]` and `goga.Apply` (design D14). It holds **only** these and imports nothing but the standard library. The composition root is `goga/app` and arrives at M9 — every module imports the root, and the composition root imports every module, so the two cannot be one package.
 - [ ] 0.4 `.golangci.yml`, `Makefile`, `.goreleaser.yaml` — these double as the templates goga ships (design D3's carve-out).
-- [ ] 0.4a **`goga/registry`** (design D8): `Table[P]` — `Register` panicking on a duplicate, `New` returning the port, `Keys()`, and the Go 1.27 generic method `Get[A any](key) (A, error)` returning the adapter's concrete type. It is a **leaf**: standard library only, no `Instrumentation`, so `registry` → `telemetry` → `registry` cannot form. Tests cover the duplicate panic, the unknown key, a successful concrete cast, and the mismatched-`A` runtime error — the last because `A` cannot be constrained to `P` (*"cannot use a type parameter as constraint"*) and the runtime check is therefore load-bearing rather than defensive.
+- [ ] 0.4a **`goga/registry`** (design D8), keyed on a plain adapter **name** — not a URL scheme, because goga picks adapters at build time in the composition root and encoding a compile-time fact as a runtime string buys nothing here. Three exported forms, all package-level generic **functions**: `Register[P, S any](r, name, ctor func(S) (P, error))` — both type parameters inferred from the constructor, so `S` may stay **unexported** in the adapter's own package; `Open[P any](r, name, raw Settings) (P, error)` — the config-driven path, `P` result-only and therefore explicitly instantiated; and the typed handle `Adapter[P, S]` returned by registration, whose `Open(raw, opts ...Option[S])` is fully static and is what keeps variadic options type-safe. Precedence is **config first, options second**. `Register` panics on a duplicate name (a duplicate in an `init()` is a programming error, not a runtime condition). Errors name types with `reflect.TypeFor[P]()`, never `%T` on a zero value, which prints `<nil>` for a nil interface. It is a **leaf**: standard library only, no `Instrumentation`, so `registry` → `telemetry` → `registry` cannot form.
+  - **`Table[P]` and `Get[A any]` are dropped.** `Get[A]` was an unconstrained downcast — `A` cannot be constrained to `P` — so it compiled for any `A` and failed at run time. The downcast that survives is `As` (design D20), on the portable type, honest about being a runtime assertion.
+  - Tests cover the duplicate panic, the unknown name, a successful typed open, settings decoded into an adapter's unexported struct, an option for the wrong adapter failing to **compile** on the `Adapter[P, S]` path, and the wrong-port runtime error from `Open[P]`.
+  - **D8-A:** this shape is the Go 1.24 one. The 1.27 form converts the three functions to methods (`r.Open[DB](…)`), four lines, no behaviour change and no consumer-visible change on the `Adapter[P, S]` path.
 - [ ] 0.4b **`goga/lint` scaffold** (design D18): the golangci-lint plugin module, the `analysistest` harness, and **one worked analyzer end to end** so M1 has a pattern to copy rather than a mechanism to invent. `mcp-anything` already depends on `golangci/plugin-module-register`, so this is assembly, not research.
 - [ ] 0.4c **The skill skeleton** (design D18): the routing table and enforcement-matrix headings, with no rows. Every milestone from M1 adds its own; nothing is written here that a module has not yet delivered.
-- [ ] 0.4d **The linter must be built from source against a bumped `golang.org/x/tools`** (design D17). Verified: golangci-lint v2.7.2 as shipped refuses to run on a Go 1.27 target, and rebuilt on go1.27rc2 it still fails with *"export data version 4 is greater than maximum supported version 2"* because it pins x/tools v0.39.0; rebuilt against **v0.48.0** it reports `0 issues` on generic-method code. So `go-lint` builds golangci-lint rather than using the upstream prebuilt action, with a TODO to revert the day upstream ships a release on a new enough x/tools.
+- [ ] 0.4d **Conditional on D8-A, and only on the 1.27 answer.** On the Go 1.24 default this task is **not needed** and `go-lint` uses the upstream prebuilt golangci-lint action (0.6). The measurements are kept because they are the evidence for the owner's decision, not because they are scheduled work: golangci-lint v2.7.2 as shipped **refuses to run on a Go 1.27 target**; rebuilt on go1.27rc2 it still fails — *"export data version 4 is greater than maximum supported version 2"* — because it pins `x/tools` v0.39.0; rebuilt against **v0.48.0** it reports `0 issues` on generic-method code. So *if* the owner picks 1.27, `go-lint` must build golangci-lint from source with an `x/tools` bump for as long as the RC lasts, and 11.4 is the task that reverts it. **On 1.24 that cost disappears entirely** and M0 is that much smaller (design D17).
 - [ ] 0.5 `go.mod` `tool` directive block for the whole generator set — wire (`goforj/wire`), oapi-codegen, mockgen, sqlc, buf, OTel Weaver, goose — following `skill-test/go-service`, which already does this.
-- [ ] 0.6 The three composite actions goga's own CI needs now: `setup-go` (Go version defaults to what `go.mod` says), `go-lint` (gofmt gate, `go vet`, golangci-lint **built from source per 0.4d**, not the official prebuilt action, because the released binary cannot lint a Go 1.27 target at all — D17), `go-test` (race, atomic coverage, summary and artifact). Actions SHA-pinned internally; projects pin **goga** and nothing else.
+- [ ] 0.6 The three composite actions goga's own CI needs now: `setup-go` (Go version defaults to what `go.mod` says), `go-lint` (gofmt gate, `go vet`, golangci-lint via the **upstream prebuilt action** — the released binary lints a Go 1.24 target fine, and the from-source build in 0.4d is needed only on the 1.27 answer to D8-A), `go-test` (race, atomic coverage, summary and artifact). Actions SHA-pinned internally; projects pin **goga** and nothing else. **`go-lint` must pass the project's build tags**: a file behind `//go:build wireinject` is excluded from the default build and no linter sees it, so M9's hand-written injector ships unlinted unless the tag is named.
 - [ ] 0.7 The cross-cutting Go conventions of design D15, written down once here and applied by every milestone that follows: named result parameters on any method that opens a span; `Instrumentation.Start` returns the closer, never a `(span, start)` pair; a method returning a streaming result never cancels that result's context; one signal handler per process, owned by `cli`; errors wrapped `fmt.Errorf("goga/<module>: <op>: %w", err)` with a typed error wherever a caller must branch.
-- [ ] 0.8 The house settings shape, also once (design D5, D14): each module declares an **unexported** `settings` struct plus `type Option = goga.Option[settings]`; where the module has adapters it also exports a `Settings` **interface** of accessors for them to read. **No exported struct anywhere in the option surface, and no goga entry point takes a settings value.**
-- [ ] 0.9 **Read Yokai's module decomposition and `gocloud.dev/blob`'s portable/driver split before fixing package boundaries** (design D7, Risks).
+- [ ] 0.8 The house settings shape, also once, and it is **two rules, one per side of the port** (design D5, D14 — *revised*): the **caller-facing** side is an **unexported** `settings` struct plus `type Option = goga.Option[settings]`, and no goga entry point takes a settings value; the **driver-facing** side is an **exported** `Options` struct in the module's `driver` package, because adapters in other packages name it in their signatures and the conformance suite (D21) constructs it. *(Changed from "no exported struct anywhere in the option surface" — that rule made the conformance suite, which lives in a third package, unable to build the options it must pass.)* New `driver.Options` fields are additive and an adapter may ignore any it does not support.
+- [ ] 0.9 **Package boundaries follow the go-cloud reading, which is done** — `gocloud.dev` was read at commit `35f55f24` and the conclusions are in D7, D19, D20 and D21, including the one that reversed `goga/database`. What remains here is applying them: one module, one package per module, one package per adapter (D19); `driver` packages exempt from the v1 freeze and saying so in their package doc (D22); `As` as the single downcast shape (D20). *(Changed from "read … before fixing package boundaries": the research is no longer pending work.)*
 
 **Six parts.** M0 is the one milestone that does not carry all six, and
 deliberately: it *is* parts 3, 4 and 5's mechanism, and it has no package for a
 project to adopt. Implementation and tests are 0.1–0.9; the skill and lint
-**scaffolds** are 0.4b–0.4c; the actions are 0.6 and 0.4d. **Part 6 does not
-apply** — there is nothing here to migrate a project onto, which is the same
-reason D16 already called M0 the only milestone with no external adopter.
+**scaffolds** are 0.4b–0.4c; the actions are 0.6 (and 0.4d only on the 1.27
+answer to D8-A). **Part 6 does not apply** — there is nothing here to migrate a
+project onto, which is the same reason D16 already called M0 the only milestone
+with no external adopter.
 
 **Gate:** goga's own CI is green on an empty-but-buildable module, with the
-plugin harness running its one worked analyzer and the linter build pinned per
-0.4d. No external adoption to wait for; this is the only milestone where that is
-true.
+plugin harness running its one worked analyzer. No external adoption to wait for;
+this is the only milestone where that is true.
 
 ---
 
@@ -97,7 +109,7 @@ attribute keys would violate its own capability on day one. It is generated, not
 adopted, and it ships here.
 
 - [ ] 1.1 `Setup` establishing tracer, meter **and** structured logger — all three or none — installed globally *and* returned.
-- [ ] 1.2 Exporter tables, name-keyed, **this module's own `registry.Table[P]`** (design D8): `RegisterTraceExporter` / `RegisterMetricExporter` / `RegisterLogExporter`, each panicking on a duplicate name, with no exported lookup. Standard names delegate to `contrib/exporters/autoexport`, which mcp-anything already depends on; house names are additive. An unknown name fails at startup naming the supported values rather than silently disabling telemetry.
+- [ ] 1.2 Exporter tables, name-keyed, **this module's own registry** built on `registry.Register` / `Adapter[P, S]` (design D8 — not `Table[P]`, which is dropped): `RegisterTraceExporter` / `RegisterMetricExporter` / `RegisterLogExporter`, each panicking on a duplicate name, with no exported lookup. Standard names delegate to `contrib/exporters/autoexport`, which mcp-anything already depends on; house names are additive. An unknown name fails at startup naming the supported values rather than silently disabling telemetry.
 - [ ] 1.3 Official semantic conventions for resource attributes, from generated `goga/semconv` constants — never string literals.
 - [ ] 1.4 Ordered shutdown flushing every provider, errors **joined** rather than first-wins.
 - [ ] 1.5 Prometheus reader attached by default; a push exporter additive. Propagators via `contrib/propagators/autoprop`.
@@ -138,36 +150,53 @@ seam evidence is here: `sysgo` requires gin directly and generates gin handlers,
 library, and `mcp-anything` uses chi — three router positions across three
 projects, two of them generated by one tool.
 
-**Same milestone, same package tree:** `muxrouter`, `chirouter`, `ginrouter`.
-They are sub-packages so that a project pays for no router dependency it did not
-ask for, and there is no useful version of this milestone with one router.
+**This milestone is substantially smaller than the previous revision's, and the
+reduction is the point (design D22).** It used to ship a `Router` port plus
+`muxrouter`, `chirouter` and `ginrouter`. **The port is now `http.Handler`, and
+those three adapters do not exist** — gin, chi and `http.ServeMux` are already
+`http.Handler`s, so they need no goga adapter, no pattern translation and no
+`Use`-before-`Handle` rule. The seam that remains is the **listener**.
+
+**Same milestone, same package tree:** `goga/serve/driver` (two methods), the
+stdlib listener, and `goga/serve/servetest` (the D21 conformance suite). None is
+adopted separately.
 
 - [ ] 2.1 `Server` with bounded graceful shutdown on context cancellation, and header/read/write timeouts **set** rather than left unbounded.
 - [ ] 2.2 **It installs no signal handling of its own** — it takes a `context.Context` and returns when cancelled. See the note under the Gate: the *"exactly one handler in the process"* half of this rule is M8's, and until then the adopting project keeps its own.
 - [ ] 2.3 **Probe and metrics endpoints registered on a mux outside the `otelhttp` wrapper** so they never pollute request traces, with **no option that can move them inside**. go-service discovered this by hand; encoding it is the point of the wrapper.
 - [ ] 2.4 `WithHealthCheck` / `WithReadinessCheck`. `migrate.Pending` becomes a supported readiness input at M5; the option shape must already admit it.
-- [ ] 2.5 `Router` interface — `http.Handler` + `Handle` + `Use` + `Unwrap` — narrow enough that oapi-codegen's generated server needs nothing more. Two things are **normative**, not adapter detail: the pattern syntax is the framework's (`/users/{id}`) and each adapter translates it; and `Use` must be called before the first `Handle`, with adapters panicking otherwise. Unspecified, the same middleware silently covers all routes on mux, only later routes on gin, and panics on chi — three coverages from one program, which is the failure the seam exists to prevent.
-- [ ] 2.6 The router table: `RegisterRouter(name, opener)`, name-keyed, **this module's own** (design D8). There is no URL here, so there is no scheme to get wrong — the earlier revision's `"router://"+name`, which resolved the scheme `router` and could never have found the gin adapter, is not expressible.
-- [ ] 2.7 `RouterOpener.Open` takes **no settings**: gin, chi and mux each build an engine and read nothing the caller configured — `serve.New` applies the middleware, the handlers and the timeouts itself. So there is no `serve.Settings`, per design D5's rule that a module passes settings to an opener only where an adapter reads them. An opener parameter nothing reads is an abstraction with no user, and a shared registry was the only thing that would have forced one. *(The first milestone that actually exercises the settings-across-a-package-boundary shape is M4, where `pgxdb` reads pool sizing through `driver.Settings`.)*
-- [ ] 2.8 Three adapters: **`muxrouter`** (standard library, the default), **`chirouter`** (mcp-anything's current router), **`ginrouter`** (sysgo's current router and the owner's target for skill-test). `ginrouter` translates `{id}` to gin's `:id`, uses `gin.Recovery()` and **omits `gin.Logger()`** — slog is the house logger.
-- [ ] 2.9 **No router adapter carries instrumentation**: `serve.New` wraps whatever `Router` it gets in `otelhttp` exactly once, so all three are instrumented identically and no adapter author can forget (design D6).
-- [ ] 2.10 Resolution is instrumented — `goga.serve.resolve` names the adapter that was selected (design D6). The span belongs to the **module**, not to `registry.Table`, which is a leaf carrying no `Instrumentation` (design D8).
-- [ ] 2.11 **Adopt in epos**: its registry server moves onto `serve`, with the probes off the traced router.
+- [ ] 2.5 **The port is `http.Handler`** (design D22). `New` takes the application's handler; a `*gin.Engine`, a `*chi.Mux`, an `*http.ServeMux` and oapi-codegen's generated server all satisfy it unchanged. *(Replaces the `Router` interface with its framework-owned pattern syntax and per-adapter translation. The previous revision's own evidence killed it: the same `Use` call covers everything on mux, only later routes on gin, and panics on chi — three behaviours a routing DSL would have had to paper over before anyone wrote a handler.)*
+- [ ] 2.6 `goga/serve/driver`: `Server` with exactly `ListenAndServe(addr string, h http.Handler) error` and `Shutdown(ctx) error` — **neither method knows what a route is**. `TLSServer` is a separate **optional** interface that `serve.Server` type-asserts, so no adapter that does not serve TLS grows a stub (design D7's additive rule). `driver.Options` — the read/header/write timeouts — is **exported**, because adapters in other packages name it and `servetest` constructs it (D14).
+- [ ] 2.7 Selection is by `WithDriver(d driver.Server)`, defaulting to the standard library. **No `RouterOpener`, no `RegisterRouter`, no URL scheme** — there is one in-tree listener and a project supplying its own passes it directly, so a name-keyed table here would have a single entry (design D8, D10's single-implementation rule).
+- [ ] 2.8 One in-tree listener: the **standard library `*http.Server`**. h2c and a unix socket are the plausible second and third, and they are listeners rather than routers — they arrive when a project needs one. *(Replaces the three router adapters.)*
+- [ ] 2.9 **Instrumentation belongs to `serve`, not to any listener**: `serve.New` wraps the application handler in `otelhttp` exactly once, so every listener is instrumented identically and no adapter author can forget (design D6, D7 — cross-cutting behaviour lives on the portable type).
+- [ ] 2.10 `As(i any) bool` (design D20) — reaches the underlying `*http.Server`, or a listener's own type. Returning false is **not an error**: a caller skips the tweak and still runs against another listener. It is a runtime assertion and the doc comment says so.
+- [ ] 2.11 **Adopt in epos**: its registry server moves onto `serve`, with the probes off the traced handler. Its existing router is unchanged — that is the milestone's claim, tested.
 - [ ] 2.12 **Adopt in gopgql**: its HTTP surface, still without `goga/mcp`, which is M6.
 
-**The six parts (D18).** *Implementation:* 2.1–2.10. *Tests:* the three
-adapters against one conformance suite, so `Router`'s normative claims — pattern
-syntax, `Use`-before-`Handle` — are asserted identically for mux, gin and chi.
+**The six parts (D18).** *Implementation:* 2.1–2.10. *Tests:* `servetest`, the
+conformance suite (D21) — it runs against the stdlib listener and any later one,
+asserting graceful drain, timeout application and the `As` contract. **It is a
+suite for the listener port, not for routing**, and D21 is explicit that suites
+exist only where a port has more than one implementation; this one is written now
+because a second listener is expected, and it is the harness that makes that
+second listener cheap. Plus a test that epos's and gopgql's *existing* routers
+serve unmodified — the whole justification for narrowing the port.
 
-- [ ] 2.13 **Skill section**: the router row — *"needs an HTTP server →
-  `serve.New`; needs a different router → blank-import an adapter"* — and the
-  enforcement-matrix row for probes-off-the-traced-router.
+- [ ] 2.13 **Skill section**: the serving row — *"needs an HTTP server →
+  `serve.New(handler)`; keep your router, it is already an `http.Handler`"* — and
+  the enforcement-matrix row for probes-off-the-traced-handler.
 - [ ] 2.14 **Linter**: `gogaserve`, reporting a direct `http.Server` literal or
-  `http.ListenAndServe` in project code. Plus `depguard`: `gin-gonic/gin` and
-  `go-chi/chi` importable only from their adapter packages, so a project that
-  wants gin gets it by blank import rather than by depending on it directly —
-  which is the owner's *"we don't use direct dependencies in code"* in its most
-  literal form.
+  `http.ListenAndServe` in project code — the rule that has something to enforce,
+  since bypassing `serve.New` is what loses the timeouts and the drain.
+  **No `depguard` entry bans `gin-gonic/gin` or `go-chi/chi`**, and the reversal
+  is why: goga no longer wraps them, so a project's handler legitimately imports
+  gin directly and a ban would fire on correct code. This is the general rule
+  from the enforcement sweep — *a wrapper may not ban what it does not wrap* —
+  and M2 is where the previous revision had it backwards. The owner's *"we don't
+  use direct dependencies"* still holds for every module that genuinely wraps its
+  tool (M1, M3, M4, M5, M6, M8); it cannot hold for a dependency goga deliberately
+  stopped abstracting.
 - [ ] 2.15 **CI action**: none new.
 
 **Gate:** epos's and gopgql's server PRs merged. **Known incompleteness to state
@@ -216,38 +245,55 @@ order asserted as a table, since three projects got it wrong three ways.
 
 The owner: *"For example postgres which could land to gopgql and codiq."* pgx has
 three current consumers (gopgql, go-service, mcp-anything) and appears in no
-house guidance. Design D7 follows `gocloud.dev`'s portable-API/driver split.
+house guidance.
 
-**Same milestone:** `goga/database/driver` (the interfaces), `pgxdb`, `sqldb`.
-The second adapter is not optional — see 4.8.
+**This milestone has no port, and that is the revision's largest reversal
+(design D7).** The previous one specified `driver.DB` / `driver.Tx` /
+`driver.Rows`, a portable `*database.DB`, a URL-scheme table and a second `sqldb`
+adapter to prove the port portable. All of it is gone. The reason is that
+`gocloud.dev` — the model for this whole design — builds driver ports for blobs,
+queues, documents, secrets and config and **declined to build one for SQL**:
+`postgres/postgres.go` returns `*sql.DB` and instruments by wrapping the sql
+driver. Two packages, two honest return types, both instrumented at construction.
 
-- [ ] 4.1 `driver.DB`, `driver.Tx`, `driver.Rows` — narrow, and carrying **no** telemetry, exactly as `gocloud.dev/blob` keeps the tracer on `Bucket` and not on `s3blob`.
-- [ ] 4.2 `driver.Settings` and `driver.Opener` — the accessor interface an adapter reads and the opener it implements, both declared by this module rather than by a shared generic (design D8). This is what keeps `database`'s settings struct unexported (design D5).
-- [ ] 4.3 Portable `*database.DB` with unexported fields and `Open` as its **only** constructor — so no code path can produce an uninstrumented `*DB`. This is design D6 enforced structurally.
-- [ ] 4.4 The driver table: `database.Register(scheme, opener)` for third-party adapters, `Schemes()` for diagnostics, and **no exported lookup** — nothing outside the module needs a raw `driver.DB`, and not exporting one closes the last goga-owned path around design D6.
-- [ ] 4.5 `UnknownSchemeError` names the registered schemes **and** hints at the missing blank import, so a typo is self-diagnosing. Adapters self-register from `init()` and are selected by blank import, as in `gocloud.dev`.
-- [ ] 4.6 Portable methods `Query`, `Exec`, `Tx`, `Close` — each a span (`goga.database.query`) plus duration and `error.type`, with the query timeout applied from settings. Resolution gets its own span (`goga.database.resolve`).
-- [ ] 4.7 **`Query` returns a streaming result, so the portable `Rows` owns the cancel and the span** and closes both — once, idempotently — in `Rows.Close`. A `defer cancel()` in `Query` hands the caller rows that fail on the first `Next()` with `context canceled`, and a `defer end(err)` records a query duration that excludes the query (design D15). `Exec` is non-streaming and keeps the plain deferred shape; `Tx`'s timeout bounds the whole callback rather than each statement in it.
-- [ ] 4.8 `Tx` commits on nil, rolls back on error **and on panic**. Three projects would otherwise each write this.
-- [ ] 4.9 `SQLDB()` — the `database/sql` bridge, `stdlib.OpenDBFromPool` for pgx, so no caller learns that goose needs it. Returns `ErrNoSQLDB` for an adapter with no such handle.
-- [ ] 4.10 `Unwrap()` returning the native handle (`*pgxpool.Pool`), because pgx's `CopyFrom`, `Batch` and `LISTEN/NOTIFY` must stay reachable.
-- [ ] 4.11 **A second adapter in the same milestone: `goga/database/sqldb`**, over any `database/sql` driver (`sqlite://` for tests, `mysql://`). ~100 lines, and the only way to learn whether `driver.DB` is portable before three projects depend on it — a portable API with one implementation is an untested claim. It also gives M7's fixtures a container-free path.
-- [ ] 4.12 `pgxdb` registering `postgres://` and `pgx://`, using **`exaring/otelpgx`** for wire-level spans plus `otelpgx.RecordStats` — already the house choice in mcp-anything. Two span levels on purpose; check they nest rather than double-count (Risks).
-- [ ] 4.13 `WithSQLCommenter` injecting trace context into SQL comments.
-- [ ] 4.14 Read gopgql's `migrate/` package (`diff.go`, `fold.go`, `rename.go`) before finalising the surface — it is the most PostgreSQL-specific code in the house.
-- [ ] 4.15 **Adopt in gopgql**: its pgx usage moves behind the portable handle and inherits M1's telemetry.
+**Same milestone:** `goga/database`, `goga/database/pgxdb`, `goga/database/sqlcdb`.
+*(`sqlcdb` moves here from M12 — it is a seam onto this module's return type and
+has nothing to do with the codegen templates.)*
 
-**The six parts (D18).** *Implementation:* 4.1–4.14. *Tests:* the portable
-conformance suite run against **both** `pgxdb` and `sqldb` — 4.11 exists so that
-suite has a second implementation to be meaningful.
+- [ ] 4.1 `database.Open(ctx, dsn DSN, opts ...Option) (*sql.DB, error)` — returns the **standard library's** `*sql.DB`, instrumented. Not a goga type: there is nothing a wrapper adds that `otelsql` and `database/sql` do not, and one would make goose, sqlc and every existing helper take an unwrap step. `DSN` is a named type so wire's type-keyed graph can supply it (design D9); it is **content handed to one known driver, never an adapter selector** (design D8). *(Replaces `driver.DB`/`Tx`/`Rows` and the portable `*database.DB`.)*
+- [ ] 4.2 **Instrumentation by wrapping the sql driver** (`otelsql.WrapDriver`), exactly as `gocloud.dev/postgres` does. This is how design D6 holds without a portable type: **there is no exported way to get an uninstrumented handle out of this package**, which is the same guarantee the portable type used to provide structurally. *(Replaces `driver.Settings`/`driver.Opener`.)*
+- [ ] 4.3 Options are caller-facing and therefore over an **unexported** `settings` (design D14): `WithMaxOpenConns`, `WithMaxIdleConns`, `WithConnMaxLifetime`, `WithSQLCommenter`, `WithTelemetry` — the last **replaces** the instrumentation and can never disable it.
+- [ ] 4.4 `Tx(ctx, db, fn, opts...)` — a **free function over `*sql.DB`**, not a method on a wrapper, so the type flowing through the application stays `*sql.DB`. Commits on nil, rolls back on error **and on panic**. Three projects would otherwise each write this, and under D2 it is the one piece of the old portable type whose justification survived the reversal.
+- [ ] 4.5 `var Set = wire.NewSet(openWithCleanup)` — cleanup is `func()`, the only shape wire takes (design D9). Getting it wrong here means every later module inherits a shutdown nothing calls.
+- [ ] 4.6 **`goga/database/pgxdb` is a separate package returning pgx's own `*pgxpool.Pool`**, instrumented with **`exaring/otelpgx`** plus `otelpgx.RecordStats` — already the house choice in mcp-anything. **Nothing is erased**: `CopyFrom`, `SendBatch`, `LISTEN/NOTIFY` and pgx's native types are directly available, because no interface sits in between pretending they are portable. *(Replaces `Unwrap()`, which existed only to escape the port that no longer exists.)*
+- [ ] 4.7 **No `SQLDB()` bridge and no `stdlib.OpenDBFromPool` dance.** `database.Open` already returns `*sql.DB`, so goose (M5) takes it directly; a project that wants the pgx pool calls `pgxdb` instead. Two entry points, each returning the thing its caller actually wants. *(Replaces 4.9 of the previous revision.)*
+- [ ] 4.8 **No adapter table, no `Register(scheme, …)`, no `Schemes()`, no `UnknownSchemeError`** (design D8). There is no port to select an implementation of; the choice between `database` and `pgxdb` is an import, made at build time in the composition root, and checked by the compiler. This is the concrete form of D8's "encoding a compile-time fact as a runtime string costs compile-time checking and buys late binding goga does not use".
+- [ ] 4.9 **`goga/database/sqlcdb`** — satisfy sqlc's generated `DBTX` interface (`Exec`, `Query`, `QueryRow`, `CopyFrom`, `SendBatch`) so generated sqlc code inherits telemetry with no generated line changing. **`DBTX`'s signatures are pgx types, so this seam is pgx-only**: it is built on `pgxdb`'s pool and returns `ErrNotPgx` for anything else rather than being documented as adapter-neutral. *(Moved from 12.6; its consumer is still anticipated — see the Gate.)*
+- [ ] 4.10 Read gopgql's `migrate/` package (`diff.go`, `fold.go`, `rename.go`) before finalising the surface — it is the most PostgreSQL-specific code in the house.
+- [ ] 4.11 **Adopt in gopgql**: its pgx usage moves onto `pgxdb` and inherits M1's telemetry. **This is now a smaller migration than the previous revision implied** — gopgql keeps `*pgxpool.Pool` and gains instrumentation, rather than rewriting every call site onto a portable handle.
 
-- [ ] 4.16 **Skill section**: the database row, the URL-scheme selection rule, and
-  the enforcement-matrix row for "no exported lookup returns a raw `driver.DB`".
-- [ ] 4.17 **Linter**: `gogatelemetry` — a type embedding a goga *driver*
-  interface directly, bypassing the portable type, which is the one remaining path
-  around design D6. Plus `depguard`: `jackc/pgx` importable only from
-  `goga/database/*`, by **import path** and not by module (design D11's note).
-- [ ] 4.18 **CI action**: **`go-test-integration` ships here, not at M7.**
+**The six parts (D18).** *Implementation:* 4.1–4.10. *Tests:* **no conformance
+suite** — design D21 restricts suites to ports with more than one implementation,
+and this module now has no port at all. What replaces it: that `Open` returns a
+handle whose driver is wrapped (no uninstrumented path exists), that `Tx` rolls
+back on panic, and that `sqlcdb` satisfies `DBTX` against a real container. The
+previous revision's suite-over-`pgxdb`-and-`sqldb` is gone with `sqldb` itself.
+
+- [ ] 4.12 **Skill section**: the database row — *"needs SQL → `database.Open`,
+  which is a `*sql.DB`; needs pgx specifically → `pgxdb`"* — and the
+  enforcement-matrix row for "no exported path returns an uninstrumented handle".
+  **No URL-scheme selection rule**, because there is no scheme.
+- [ ] 4.13 **Linter**: `gogadatabase`, reporting `sql.Open` / `sql.OpenDB` /
+  `pgxpool.New` in project code — with no port to embed, **that is now the only
+  way to obtain an uninstrumented handle**, so it is the rule that carries D6
+  here. *(Replaces `gogatelemetry`, which reported a type embedding a goga driver
+  interface — there are no driver interfaces in this module any more.)* Plus
+  `depguard`: `jackc/pgx` importable only from `goga/database/*`, by **import
+  path** and not by module (design D11's note). **The `Unwrap()` carve-out is
+  gone with `Unwrap()`**: a project needing pgx's own API imports `pgxdb` and
+  gets `*pgxpool.Pool` legitimately, so the ban no longer has to make an
+  exception for the escape hatch.
+- [ ] 4.14 **CI action**: **`go-test-integration` ships here, not at M7.**
   Applying D18 surfaced this: M4 is the first milestone whose tests need a
   container, so it is the first milestone with a tool that has to run in CI, and
   the previous revision left those tests running under `go-test` until M7 — three
@@ -257,7 +303,12 @@ suite has a second implementation to be meaningful.
   than introducing it.
 
 **Gate:** gopgql's database PR merged and reviewed. codiq does not exist
-(checked 2026-07-30), so it is a later adopter, not a gate.
+(checked 2026-07-30), so it is a later adopter, not a gate. **`sqlcdb` (4.9) has
+no consumer that can validate it** — its adopter was always codiq — so under
+D18 part 6 it cannot satisfy a merge gate of its own. It ships here because it
+belongs to this module's return type rather than to M12's templates; if the owner
+wants the gate enforced strictly, 4.9 parks with M12's sqlc half until codiq
+exists. Flagged rather than absorbed.
 
 ---
 
@@ -265,7 +316,9 @@ suite has a second implementation to be meaningful.
 
 Pinned as the house migration engine (design D10). `gopgql` already requires
 `pressly/goose/v3 v3.26.0` and ships its own `migrate/` package. It follows M4
-because it takes the portable handle.
+because it takes M4's `*sql.DB` — **which is now goose's native input**, so the
+`SQLDB()` bridge the previous revision needed here is gone with the port
+(design D7).
 
 - [ ] 5.1 Wrap `goose.Provider`; goose's own API already takes variadic `ProviderOption`, consistent with design D14.
 - [ ] 5.2 **Embedded migrations by default** (`WithFS(embed.FS)`), so a binary carries its own schema.
@@ -337,7 +390,7 @@ Where the knowledge is most expensive and most duplicated: three incompatible
 testcontainers strategies, and a godog bootstrap copy-pasted 5× in gopgql and 8×
 in epos. It follows the modules it has to provide fixtures for.
 
-- [ ] 7.1 `Postgres(t, ...opts)` returning a ready portable `*database.DB`, with **one** decided lifecycle and reset strategy, documenting why — weighing gopgql's snapshot/restore, epos's rejection of `CleanupContainer`, and go-service's shared-network stack.
+- [ ] 7.1 `Postgres(t, ...opts)` returning a ready **`*sql.DB`** — M4's own return type, instrumented the same way — with **one** decided lifecycle and reset strategy, documenting why — weighing gopgql's snapshot/restore, epos's rejection of `CleanupContainer`, and go-service's shared-network stack.
 - [ ] 7.2 Cleanup registered on the container's own lifetime, **not** the suite's `*T` — epos rejected `testcontainers.CleanupContainer` because that fills the disk across a long run, and the fixture must encode that conclusion.
 - [ ] 7.3 Deterministic ordering: migrations before seed data, regardless of file naming (go-service had to rename scripts `01-`/`02-`/`03-` to force it). `WithMigrations` runs through M5's `goga/migrate`, so tests and production share one migration path.
 - [ ] 7.4 Teardown that runs on failure and does not accumulate containers.
@@ -348,7 +401,7 @@ in epos. It follows the modules it has to provide fixtures for.
 - [ ] 7.9 `T(ctx)` — the supported way for a step to reach the test handle. Both projects invented their own.
 - [ ] 7.10 **Adopt in gopgql**: replace the 5× duplicated godog bootstrap and the `Snapshot`/`Restore` strategy. gopgql also has **172** hand-rolled `t.Errorf`/`t.Fatalf` against the workspace's own testify rule; migrating them belongs here rather than to the lint milestone that will later enforce it.
 - [ ] 7.11 **Adopt in epos**: the 8× duplicated bootstrap, and its `track()` cleanup replaced by the fixture that encodes the same conclusion.
-- [ ] 7.12 *(moved to M4 by D18 — see 4.18.)* `go-test-integration` shipped with the first milestone whose tests need a container, which is M4, not this one. What remains here is the extension in 7.15.
+- [ ] 7.12 *(moved to M4 by D18 — see 4.14.)* `go-test-integration` shipped with the first milestone whose tests need a container, which is M4, not this one. What remains here is the extension in 7.15.
 
 **The six parts (D18).** *Implementation:* 7.1–7.9. *Tests:* the fixtures have
 their own — a fixture that leaks containers or reuses a dirty database is the
@@ -474,7 +527,7 @@ actions:
 - [ ] 11.1 `gogaparamstruct` — an exported constructor whose final **non-variadic** parameter is a struct (or pointer to one) declared in the same package with at least one exported field, and which takes no variadic option parameter. The looser "final parameter is a struct" fires on `New(t *testing.T)` and on `migrate.New(db *database.DB, …)`; a lint rule that cries wolf gets disabled. *(In goga itself this rule has nothing to find, because the settings structs are unexported — design D5, and D14 confirms this now holds for adapter settings too. Its job is project code.)* It is cross-cutting by construction: it is the one rule that is about the *shape* of every goga surface rather than about one module's dependency.
 - [ ] 11.2 `gogalayout` — run against goga itself: flat, no `pkg/`, no `internal/`. Also cross-cutting, and also not attributable to a module.
 - [ ] 11.3 The remaining composite actions, which have no Go dependency and belong to no module: `go-vuln` (one action replacing three mechanisms), `go-release` (goreleaser, with a `docker` flag covering the only real divergence), `pages-deploy` / `pr-preview` carrying the `keep_files` fix so the third repo does not learn it the hard way. `gopgql` and `epos` share a docs-workflow bug fixed by copy-paste today (*"same bug, same fix as gopgql#24"*).
-- [ ] 11.4 **Revisit 0.4d**: if golangci-lint has shipped a release built on a new enough `golang.org/x/tools` by now, drop goga's build-from-source step and return to the upstream prebuilt action (design D17).
+- [ ] 11.4 **Revisit 0.4d — only if the owner answered D8-A with 1.27.** On the Go 1.24 default there is nothing to revisit: `go-lint` uses the upstream prebuilt action from M0 and never built from source. On the 1.27 answer, this is where the from-source build is dropped once golangci-lint ships a release on a new enough `golang.org/x/tools` (design D17).
 - [ ] 11.5 **Skill section**: the two cross-cutting rules' enforcement-matrix rows.
 - [ ] 11.6 **Adopt in gopgql and epos**: the shared actions replace four golangci-lint invocations at three versions.
 
@@ -490,11 +543,11 @@ invocation, the config and the runtime seam — not the generator (design D11).
 why it is late and why its parts are gated separately below.
 
 - [ ] 12.1 One `//go:generate` entry point per project, so `go generate ./...` is the whole generation story and M9's check has a single thing to run.
-- [ ] 12.2 `oapi-codegen.yaml` template; mount the generated `StrictServerInterface` through M2's `serve.Router` so one generated server runs on stdlib, gin or chi. *(Current consumers: go-service, sysgo — this half can land now.)*
+- [ ] 12.2 `oapi-codegen.yaml` template. **No mounting seam is needed**: oapi-codegen's generated server is an `http.Handler`, and after design D22 that *is* `goga/serve`'s port, so it is passed to `serve.New` directly and runs on stdlib, gin or chi with nothing in between. *(Changed from "mount the generated `StrictServerInterface` through M2's `serve.Router`" — the `Router` port no longer exists, and this is the clearest evidence that narrowing it was right: the seam this task existed to build turned out to be unnecessary.)* *(Current consumers: go-service, sysgo — this half can land now.)*
 - [ ] 12.3 `mockgen` `tool` directive and `//go:generate` lines; freshness enforced by M9's check, never by review.
 - [ ] 12.4 `goga/semconv`'s project-facing half: the documented pattern for a project to keep its own registry and generate into its own package, while goga's own attributes stay in goga.
 - [ ] 12.5 `sqlc.yaml` template — engine postgresql, `sql_package: pgx/v5`, `emit_pointers_for_null_types`. *(Anticipated consumer: codiq.)*
-- [ ] 12.6 **`goga/database/sqlcdb`** — satisfy sqlc's generated `DBTX` interface (`Exec`, `Query`, `QueryRow`, `CopyFrom`, `SendBatch`) from M4's portable `*database.DB`, so generated sqlc code inherits design D6's telemetry with no generated line changing. **`DBTX`'s signatures are pgx types, so this seam is pgx-only**: `New` returns `ErrNotPgx` for any other adapter rather than being documented as adapter-neutral. *(Anticipated consumer: codiq.)*
+- [ ] 12.6 *(moved to M4 as task 4.9.)* `goga/database/sqlcdb` is a seam onto `pgxdb`'s pool, not a codegen template, so it ships with the module whose type it adapts. Its adopter is still codiq, and M4's Gate records that it cannot satisfy a merge gate until codiq exists.
 - [ ] 12.7 `buf.yaml` + `buf.gen.yaml` templates — lint plus breaking-change detection against `main`, `protoc-gen-go` and `protoc-gen-go-grpc`. *(Anticipated consumer: codiq.)*
 - [ ] 12.8 **`goga/grpc`** — server and client constructors for buf-generated stubs with `otelgrpc` stats handlers, reflection and health service on by default, `Register(func(grpc.ServiceRegistrar))` so the generated output is untouched. gRPC gets the same treatment HTTP gets. The client constructor is `NewClient`, not `Dial`: `grpc.Dial` is deprecated upstream, and a house wrapper that ships it teaches it to every adopter. *(Anticipated consumer: codiq.)*
 
@@ -533,9 +586,9 @@ section headings and the routing table, not its prose.
 - [ ] 13.1 Audit the routing table for completeness and staleness: one row per delivered module, no row for a module that has no milestone. Entries for undelivered modules are absent, not aspirational.
 - [ ] 13.2 Confirm it does **not** re-teach cobra, koanf, otel, pgx, goose or the MCP SDK — that is the library's job now, and duplicating it is how guidance drifts. This is an audit rather than a writing task because each milestone wrote its own section and the drift, if any, is between them.
 - [ ] 13.3 Audit the **enforcement matrix**: every house convention paired with the mechanism that enforces it (compile, lint, or merge), and **no row whose mechanism is empty**. Per design D5 an unenforced convention is a goga defect; under D18 it is also evidence that some milestone shipped incomplete, so a gap here is a bug report against a specific milestone, not a caveat to publish.
-- [ ] 13.4 Confirm the escape hatch is named per module (`Unwrap()`, `Config.K`, `Server.HTTP()`, `Migrator.Provider()`, `mcp.Server.SDK()`).
+- [ ] 13.4 Confirm every wrapper exposes its underlying object, in the **two** shapes design D2 and D20 allow: a **named accessor** where the module has one concrete underlying type (`Config.K`, `Client.HTTP()`, `Migrator.Provider()`, `mcp.Server.SDK()`), and **`As(i any) bool`** on a portable type that has adapters (`serve.Server`). Audit that no module invented a third shape, and that every `As` doc comment says it is a runtime assertion whose `false` is not an error. *(`database.Unwrap()` is gone with the port — `database.Open` returns `*sql.DB` and `pgxdb` returns `*pgxpool.Pool`, so there is nothing to unwrap.)*
 - [ ] 13.5 State the milestone status of each module, so an agent reading it mid-programme does not route a project to a package that does not exist yet. **`goga/components` in particular has no milestone** (D12, D16).
-- [ ] 13.6 Record the **Go version requirement** prominently (D17): adopting any goga package moves the project to Go 1.27, and until 1.27.0 ships that is a release candidate.
+- [ ] 13.6 Record the **Go version requirement** prominently (D17): adopting any goga package requires **Go 1.24**. Go's module rule propagates the floor into every consumer, so confirm no module has raised it. **If the owner answered D8-A with 1.27**, this line instead records that adopting any goga package moves the project onto a pre-GA toolchain, and that `GOTOOLCHAIN=local` builds fail outright.
 
 **Gate:** the skill is in use on the next adoption PR without the agent reaching
 past it into the wrapped libraries.
@@ -558,10 +611,14 @@ written by an agent reading it.
 
 ## Deferred — no milestone
 
-*(`goga/registry` was here in the previous revision. It is no longer deferred:
-Go 1.27 ships generic methods, the spike the owner asked for confirmed the shape
-compiles, and it lands in **M0** as task 0.4a. Design D8 records what was proven
-and the one part of the owner's formulation that does not compile.)*
+*(`goga/registry` was here in the previous revision. It is no longer deferred —
+and the reason is not that Go 1.27 arrived. The spike the owner asked for
+compiled the normative registry on stock `go1.26.4` at language version
+`go 1.22`, so the feature the deferral was waiting on turned out not to be
+needed. It lands in **M0** as task 0.4a on the Go 1.24 floor. Design D8 records
+what was proven, the one part of the owner's formulation that does not compile
+(`OpenWith[P, S]` type-checks but leaves `S` unchecked against the adapter name),
+and D8-A leaves the 1.27 question open for the owner.)*
 
 ### `goga/components` — until a consumer exists
 
