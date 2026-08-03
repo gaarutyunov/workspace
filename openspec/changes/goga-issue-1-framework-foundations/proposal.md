@@ -53,6 +53,28 @@ the house rules today.
   next."* `tasks.md` is ordered by milestone, not by module, and each milestone
   names the project that adopts it. A milestone closes when that adoption is
   merged — not when the package builds.
+- **Every milestone carries all six parts; splitting functionality from
+  enforcement is not allowed** (design D18). The owner's definition of done:
+  implementation, tests, skill reference, **a linter** — custom-written where
+  nothing off the shelf fits, enforcing that project code does not use a wrapped
+  dependency directly — a **CI action** where the milestone introduces a tool that
+  runs in CI, and a **migration of a real project**, which is a separate task that
+  nonetheless **blocks the milestone's merge**. *This reverses the previous
+  revision's structure, which collected all linting into M11 and the whole skill
+  into M13 — so eleven of fourteen milestones shipped an API whose conventions
+  nothing checked, which is the exact failure this proposal is written against.*
+  `goga/lint` and the skill stop being milestones and become columns; M0 grows
+  the plugin scaffold and the skill skeleton so that M1 has somewhere to write.
+- **goga requires Go 1.27, and it is a release candidate today** (design D17).
+  The owner accepted this — *"even if it's alpha or beta version"* — and the spec
+  states the cost rather than letting it surface in CI: the requirement
+  propagates into every consumer's `go.mod`; with the default `GOTOOLCHAIN=auto`
+  a developer on 1.26 silently downloads and builds with 1.27rc2, while
+  `GOTOOLCHAIN=local` fails hard; and **the current golangci-lint release cannot
+  lint Go 1.27 code at all** — it is fixed by building it from source against a
+  newer `golang.org/x/tools`, which goga's `go-lint` action must do until
+  upstream ships one. That is the single place where the Go 1.27 decision and the
+  six-part rule pull against each other, and M0 owns it.
 - **Every module that does anything at runtime has telemetry, with no
   exemptions** (design D6). This is the
   owner's rule — *"Every part of the framework must have telemetry"* — and it is
@@ -63,18 +85,20 @@ the house rules today.
   modules that perform a runtime operation; `semconv` (generated constants),
   `lint` (analysers) and `di` (provider sets) have no operation to instrument,
   and a test asserts the instrumented set is exactly the rest.
-- **Variadic functional options everywhere; no parameter structs** (design D14).
-  Each module declares an **unexported** `settings` struct — no other package can
-  name it, construct it or embed it — plus an exported `Option` alias over it. An
-  adapter in its own package reads what it needs through an exported **accessor
-  interface** (`driver.Settings`, `mcp.Settings`) declared beside the port it
-  implements — and only where an adapter reads anything at all: router and
-  exporter openers take none. Never through the struct. No
-  goga entry point accepts a settings value, so options are the only form that
-  does anything, and a lint rule covers project code. *The previous revision had
-  to export an opaque struct here; dropping the registry is what restored the
-  unexported form, and with it the claim that the compiler makes a parameter
-  struct unspellable.*
+- **Variadic functional options everywhere; no parameter structs, and no
+  exception for adapters** (design D14). Each module declares an **unexported**
+  `settings` struct — no other package can name it, construct it or embed it —
+  plus an exported `Option` alias over it. An adapter in its own package reads
+  the *module's* resolved values through an exported **accessor interface**
+  (`driver.Settings`, `mcp.Settings`), and only where an adapter reads anything
+  at all: router and exporter openers take none. An adapter's **own** settings
+  are a generic type parameter inferred at the call site, so that struct can stay
+  unexported too. No goga entry point accepts a settings value, so options are
+  the only form that does anything, and a lint rule covers project code. *The
+  owner asked whether variadic options could themselves be generic per adapter,
+  so that even the dynamic adapter case needs no struct param. A spike against
+  go1.27rc2 says yes — see below — so the permission they granted for struct
+  params is not needed and not taken.*
 - **A database module with multiple adapters, built on pgx** (design D7),
   following `gocloud.dev`'s portable-API/driver split: a portable `*database.DB`
   that owns the telemetry, a narrow `driver.DB` that adapters implement, and
@@ -82,17 +106,20 @@ the house rules today.
   `exaring/otelpgx` — already the house choice in mcp-anything — and a
   `database/sql`-backed `sqldb` adapter is the second, in v1, because a portable
   API with one implementation is an untested claim.
-- **No shared registry in v1; each module owns its adapter table** (design D8),
-  on the owner's instruction: *"we should skip the registry because go doesn't
-  ship generic methods yet."* Every adapter-bearing module keeps its own
-  ~30-line table — `Register` panicking on a duplicate, an unexported lookup,
-  `Schemes()` — which is exactly `gocloud.dev/blob`'s arrangement. The registry
-  returns when Go can express it: generic over the **port interface** an adapter
-  satisfies, storing structs and returning concrete types, per the owner's other
-  comment. Removing it settles three things at once — settings go back to
-  unexported, one of the two import cycles the Go review found disappears, and
-  the URL-versus-name lookup split that produced a real bug in an earlier
-  revision cannot recur.
+- **`goga/registry` is back in v1, on Go 1.27 generic methods** (design D8), on
+  the owner's instruction — *"in go 1.27 generic methods are implemented, so
+  let's use it even if it's alpha or beta version, and use it for registry"* —
+  and after the spike they asked for. `registry.Table[P]` is generic over the
+  **port** an adapter satisfies, stores structs, and carries the generic method
+  `Get[A any](name) (A, error)` that returns the adapter's **concrete** type, so
+  pgx's `CopyFrom` is reachable with no assertion at the call site. Each module
+  holds its own `Table[P]` with its own key, and layers a typed
+  `Open[A Adapter[S], S any]` over it that checks the port at compile time. **One
+  thing the owner described does not compile**: constraining the method's type
+  parameter by the registry's own (`Get[A P]`) is rejected — *"cannot use a type
+  parameter as constraint"* — so the shared `Get` checks the port at run time and
+  the module's `Open` is what recovers the compile-time check. Full evidence,
+  including the exact errors, is in design D8.
 - **goose is the migration engine** (design D10), pinned as a house decision,
   with embedded migrations by default, a boot-time advisory lock so two replicas
   cannot both migrate, and `Pending()` as a readiness input.
@@ -126,11 +153,13 @@ the house rules today.
 
 Design D16 has the reasoning and the full table; this is the order and the
 adopter, because that is what the owner has to agree to. Every milestone is one
-package, and none starts until the previous one's adoption is merged.
+package, none starts until the previous one's adoption is merged, and every one
+from M1 lands with all six parts of D18 — implementation, tests, skill section,
+linter rule, CI action where one is needed, and a merged adoption PR.
 
 | # | package | adopter, then second |
 |---|---|---|
-| M0 | *(the repo itself — `go.mod`, layout, root `goga`, lint/release config, three actions)* | goga |
+| M0 | *(the repo itself — `go.mod` on Go 1.27, layout, root `goga`, **`goga/registry`**, the **lint plugin scaffold**, the **skill skeleton**, lint/release config, actions)* | goga |
 | M1 | `goga/telemetry` (+ generated `goga/semconv`) | **gopgql**, then **epos** |
 | M2 | `goga/serve` (+ `muxrouter`, `ginrouter`, `chirouter`) | **epos**, then **gopgql** |
 | M3 | `goga/config` | **epos**, then **skill-test/go-service**, **mcp-anything** |
@@ -141,11 +170,11 @@ package, and none starts until the previous one's adoption is merged.
 | M8 | `goga/cli` | **epos**, then **gopgql** |
 | M9 | `goga/di` + `goga/app` (+ `go-generate-check`) | **skill-test/go-service**, then **sysgo** |
 | M10 | `goga/client` | **skill-test/go-service**, then **mcp-anything** |
-| M11 | `goga/lint` (+ `go-vuln`, `go-release`, `pages-deploy`) | **gopgql**, then **epos** |
+| M11 | *(dissolved — `go-vuln`, `go-release`, `pages-deploy` only)* | **gopgql**, then **epos** |
 | M12 | `goga/codegen` templates + `goga/grpc` | **skill-test/go-service**; **codiq** for sqlc/buf |
-| M13 | the skill | every adopting project |
+| M13 | *(dissolved — the skill's closing audit only)* | every adopting project |
 | — | `goga/components` | **no consumer today** — does not start until there is one |
-| — | `goga/registry` | deferred until Go ships generic methods |
+| — | `goga/registry` | ships in M0; a leaf every adapter-bearing module uses |
 
 Telemetry, HTTP, config and postgres are in the owner's own order, with the
 owner's own adopters. The rest follow the survey's consumer evidence.
@@ -170,10 +199,12 @@ CI actions, the spec-wide conventions — each requirement names its own.
   module that has it)*: variadic functional options with no parameter structs,
   telemetry in every module with no exemptions, and an escape hatch to the
   underlying object from every wrapper.
-- `goga-adapter-resolution` *(with each adapter-bearing module, from M2)*: how a
-  module selects an adapter — self-registration, one duplicate rule, one
-  unknown-adapter error, optional dependencies, instrumented resolution — now
-  that each module owns its own table rather than sharing a generic registry.
+- `goga-adapter-resolution` *(the shared `goga/registry` at M0; per-module
+  resolution with each adapter-bearing module, from M1)*: how a module selects an
+  adapter — self-registration, one duplicate rule, one unknown-adapter error,
+  optional dependencies, instrumented resolution — plus the generic cast to an
+  adapter's concrete type and the typed per-adapter options and configuration
+  that ride on the same seam.
 - `goga-config` *(M3)*: configuration loading with an explicit, documented
   precedence, returning both a typed struct and the raw koanf.
 - `goga-observability` *(M1, and one requirement at M2)*: telemetry and logging
@@ -217,6 +248,14 @@ CI actions, the spec-wide conventions — each requirement names its own.
 ## Impact
 
 - **New repo content**: `goga` is currently empty. Everything here is additive.
+- **Every adopting project's `go.mod` moves to Go 1.27** (D17), because a module
+  cannot require a lower Go version than something it depends on. That is gopgql,
+  epos, skill-test/go-service, mcp-anything and sysgo, from their first adopted
+  package onward — including packages that never touch the registry.
+- **The spike backing D8, D14 and D17 is at `projects/goga-spike-go127/`** in the
+  workspace (gitignored, so it is evidence rather than shipped code), built with
+  **go1.27rc2**. It has one directory per question and compiles its negative
+  cases to confirm they fail.
 - **`.github/actions/*`** in the goga repo, referenced as
   `gaarutyunov/goga/.github/actions/<name>@v1`.
 - **Existing projects are migrated one package at a time, and that migration is

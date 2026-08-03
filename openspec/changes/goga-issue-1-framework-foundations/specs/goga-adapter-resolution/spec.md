@@ -1,54 +1,103 @@
 ## ADDED Requirements
 
-**Milestone: delivered with each adapter-bearing module, first at M2
-(`goga/serve`), then M4 (`goga/database`) and M6 (`goga/mcp`). There is no
-milestone for a shared registry — the owner has deferred it until Go ships
-generic methods — so this capability specifies how a module resolves an adapter,
-and the rules every module's own table must follow identically.**
+**Milestone: the shared registry ships at M0 (`goga/registry`); per-module
+resolution is delivered with each adapter-bearing module, first at M1
+(`goga/telemetry`'s exporter tables), then M2 (`goga/serve`), M4
+(`goga/database`) and M6 (`goga/mcp`). The registry is generic over the port an
+adapter satisfies and returns adapters as their concrete type, which requires Go
+1.27 generic methods.**
 
-### Requirement: Each module owns its adapter table, to one shape
+### Requirement: One shared registry, generic over the port
 
-Every module with interchangeable adapters SHALL keep its own registration table
-in its own package, and every such table SHALL behave identically, so that six
-tables cannot drift into six behaviours.
+The framework SHALL provide a single registration table type, generic over the
+port interface an adapter satisfies, and every adapter-bearing module SHALL hold
+one for its own port rather than reimplementing the storage.
 
 #### Scenario: A module gains a pluggable surface
 - **WHEN** a module needs interchangeable adapters
-- **THEN** it declares its own table — registration, lookup, and an inspectable
-  list of what is registered — following the same shape as every other module's,
-  rather than inventing its own semantics for duplicates, unknown names or
-  errors
+- **THEN** it instantiates the shared table for its own port and its own key
+  convention, so registration, duplicate handling, unknown-key errors and
+  inspection behave identically across modules without being written more than
+  once
 
-#### Scenario: There is no shared registry to depend on
-- **WHEN** a module resolves an adapter
-- **THEN** it does so without a framework-wide registry type, because a registry
-  that stores an implementation against a port interface and returns that
-  implementation's own concrete type cannot be expressed in the language today
+#### Scenario: The registry is generic over the port, not over a concrete type
+- **WHEN** the registry is declared for a surface
+- **THEN** its type parameter is the port interface that adapters satisfy, and an
+  adapter is a struct stored against that port
 
-#### Scenario: The deferred registry is described, not designed around
-- **WHEN** the shared registry becomes expressible
-- **THEN** it is generic over the port interface an adapter satisfies, stores the
-  structs that satisfy it and returns their concrete types, and the modules'
-  tables collapse into it with no change to any registration call
+#### Scenario: An adapter is recovered as its concrete type
+- **WHEN** a caller resolves an adapter whose concrete type it already knows
+- **THEN** the registry returns that concrete type, so the adapter's own surface
+  beyond the port is reachable without a type assertion written at the call site
 
-#### Scenario: Adapters are typed, not asserted
-- **WHEN** an adapter is resolved
-- **THEN** it comes back as the module's declared adapter type without a type
-  assertion at the call site
+#### Scenario: A concrete type that does not match is reported, not returned
+- **WHEN** a caller asks for a concrete type the stored adapter is not
+- **THEN** resolution fails with an error naming both the type requested and the
+  type stored, because the language cannot constrain the requested type to the
+  registry's port and the check therefore happens at resolution time
+
+#### Scenario: The registry depends on nothing
+- **WHEN** the registry is compiled
+- **THEN** it imports no other framework package, so no module's use of it can
+  create a dependency cycle with the telemetry module
+
+### Requirement: A module's own opener checks the port at compile time
+
+Where a module resolves an adapter it declares, the check that the adapter
+satisfies that module's port SHALL be made by the compiler rather than deferred
+to resolution time.
+
+#### Scenario: The module declares the adapter constraint
+- **WHEN** a module exposes a typed way to open one of its adapters
+- **THEN** the adapter type is constrained by a declaration naming both that
+  module's port and the settings the adapter consumes, so a type satisfying
+  neither is rejected before the program runs
+
+#### Scenario: A type that does not satisfy the port is rejected
+- **WHEN** project code asks a module's opener for a type that does not implement
+  that module's port
+- **THEN** the program does not compile, and the failure names the missing part
+  of the contract
 
 #### Scenario: The caller's options reach the adapter
 - **WHEN** an adapter needs the caller's settings to construct itself
-- **THEN** the module passes them as a read-only accessor interface that the
-  adapter names in its own signature, while the settings type itself stays
-  unexported — so an adapter reads a value it can neither construct nor mutate,
-  and no caller-facing parameter struct appears
+- **THEN** the module passes the adapter its own settings value, built from
+  options typed to that adapter, and the settings type itself may remain
+  unexported — so no caller-facing parameter struct appears and no caller needs to
+  name the type
 
 #### Scenario: A module whose adapters read nothing passes nothing
 - **WHEN** no adapter of a given module reads any setting
 - **THEN** that module's opener takes none, and it declares no accessor
   interface, because a parameter no implementation reads is an abstraction with
-  no user — the modules are free to differ here now that no shared registry
-  imposes one signature on all of them
+  no user — the shared registry stores adapters and imposes no opener signature,
+  so modules are free to differ here
+
+### Requirement: Adapter configuration is decoded into the adapter's own type
+
+Where configuration selects and configures an adapter, the framework SHALL decode
+the configuration into the settings type that adapter declares, and SHALL apply
+the caller's options over it.
+
+#### Scenario: Configuration is decoded to the adapter's expected type
+- **WHEN** an adapter is opened and configuration exists for it
+- **THEN** that configuration is unmarshalled into the settings type the adapter
+  declared, and the adapter is initialised from it
+
+#### Scenario: Explicit options take precedence over configuration
+- **WHEN** both configuration and options supply the same setting
+- **THEN** the option wins, because it is the more specific and more explicit form
+
+#### Scenario: An adapter validates its own settings
+- **WHEN** an adapter is initialised with settings it cannot accept
+- **THEN** it reports the failure as an error naming the problem, and the module
+  wraps it identifying the module and the adapter, rather than panicking or
+  starting in a degraded state
+
+#### Scenario: Options are typed to one adapter
+- **WHEN** project code passes an option belonging to a different adapter, or
+  mixes two adapters' options in one call
+- **THEN** the program does not compile
 
 #### Scenario: The accessor interface has one home
 - **WHEN** an adapter author looks for the accessor interface to name
@@ -118,5 +167,10 @@ Adapter resolution SHALL be instrumented by the module that performs it.
 #### Scenario: Resolution telemetry needs no special arrangement
 - **WHEN** a module records a resolution
 - **THEN** it uses the same instrumentation handle it uses for every other
-  operation, with no separately declared interface and no dependency running both
-  ways between a registry and the telemetry module
+  operation, with no separately declared interface
+
+#### Scenario: The shared registry is not the thing instrumented
+- **WHEN** the resolution span is emitted
+- **THEN** it is emitted by the module that owns the port, not by the shared
+  registry, so the registry carries no telemetry dependency and no dependency
+  runs both ways between it and the telemetry module

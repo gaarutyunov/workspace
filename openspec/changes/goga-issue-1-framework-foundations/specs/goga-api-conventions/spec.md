@@ -29,11 +29,25 @@ for a caller to populate.
 - **THEN** none exists, so the alternative to options is unspellable rather than
   merely unaccepted
 
-#### Scenario: An adapter receives the caller's settings without naming the struct
-- **WHEN** an adapter in its own package implements its module's opener
+#### Scenario: An adapter receives the module's settings without naming the struct
+- **WHEN** an adapter in its own package implements its module's opener and needs
+  values the caller gave the *module*
 - **THEN** it names a read-only interface of accessors, reads the values it needs
   through it, and can neither construct nor mutate the settings behind it —
   which is what allows the struct itself to stay unexported
+
+#### Scenario: An adapter's own settings are configured by options too
+- **WHEN** an adapter has settings of its own, distinct from its module's
+- **THEN** they are supplied by options typed to that adapter, not by a parameter
+  struct, and the adapter's settings type may itself stay unexported because no
+  caller has to name it
+
+#### Scenario: The dynamic adapter case needs no parameter struct either
+- **WHEN** a surface is dynamic enough that a parameter struct would traditionally
+  be the fallback
+- **THEN** options still suffice, because an option is a function typed to the
+  settings it mutates and that type can be a type parameter resolved per adapter
+  — so the parameter-struct exception is not taken anywhere in the framework
 
 #### Scenario: An option can be held and passed without naming what it mutates
 - **WHEN** a caller stores or forwards a module's options
@@ -58,6 +72,30 @@ for a caller to populate.
 #### Scenario: Adding an option does not break callers
 - **WHEN** a new option is added to a module
 - **THEN** existing call sites continue to compile unchanged
+
+### Requirement: The language version requirement is explicit and justified
+
+The framework SHALL state the Go version it requires, and SHALL require a version
+newer than the current stable release only where a capability depends on it.
+
+#### Scenario: The requirement is discoverable before adoption
+- **WHEN** a project considers adopting any part of the framework
+- **THEN** the required Go version is stated in the framework's own documentation
+  and skill, because the requirement propagates into the adopting project's own
+  module and cannot be scoped to the package that needs it
+
+#### Scenario: A pre-release toolchain is named as such
+- **WHEN** the required version is a release candidate rather than a stable release
+- **THEN** that is stated plainly rather than implied, together with the
+  consequence that a default toolchain setting will fetch and use it silently
+  while a pinned one will fail the build outright
+
+#### Scenario: Enforcement tooling keeps working across the version bump
+- **WHEN** the framework requires a language version its linting tools cannot yet
+  process
+- **THEN** the framework ships a way to run those tools anyway, because a version
+  bump that silently disables the enforcement would defeat the framework's own
+  reason for existing
 
 ### Requirement: Every part of the framework is instrumented
 

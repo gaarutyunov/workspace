@@ -1,12 +1,31 @@
 ## ADDED Requirements
 
-**Milestone: M13 (the skill), last of the delivered milestones — it routes to
-entry points, so it needs entry points to route to, and a routing table written
-before the packages exist would name things that do not. The exception is the
-last requirement, *Guidance does not contradict itself*: the contradiction it
-describes is live in already-merged workspace guidance, so it is fixed alongside
-the milestones rather than after them, because every adoption PR is written by an
-agent reading that guidance.**
+**Milestone: distributed, not deferred. The skill's skeleton — the routing table
+and enforcement-matrix headings, with no rows — ships at M0, and **every
+milestone from M1 adds its own rows as it lands**, because the definition of done
+forbids splitting a module from its documentation and its enforcement. M13 is
+reduced to a closing audit: completeness, staleness, and no enforcement-matrix
+row with an empty mechanism. The exception is the last requirement, *Guidance
+does not contradict itself*: the contradiction it describes is live in
+already-merged workspace guidance, so it is fixed alongside the milestones rather
+than after them, because every adoption PR is written by an agent reading that
+guidance.**
+
+### Requirement: The skill grows with the framework, one section per milestone
+
+Each module SHALL contribute its own routing-table and enforcement-matrix entries
+as it is delivered, and the skill SHALL NOT be written as a single pass after the
+modules exist.
+
+#### Scenario: A module lands
+- **WHEN** a milestone delivers a module
+- **THEN** that milestone also adds the module's routing entry and the
+  enforcement mechanism for each convention it introduces, so the skill is never
+  describing packages that do not exist and never lagging packages that do
+
+#### Scenario: A milestone is not done without its documentation
+- **WHEN** a module is implemented and tested but its skill entries are absent
+- **THEN** the milestone is not complete, on the same footing as missing tests
 
 ### Requirement: One skill, describing entry points rather than tools
 

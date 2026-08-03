@@ -1,16 +1,29 @@
 ## ADDED Requirements
 
 **Milestone: split, because the actions are not a package and each one lands with
-the milestone whose enforcement it carries. `setup-go`, `go-lint` and `go-test`
-at M0, for goga's own CI. `go-test-integration` at M7 with the test fixtures.
-`go-generate-check` at M9, where it is the enforcement for generated wiring.
-`go-vuln`, `go-release` and `pages-deploy` at M11, adopted by gopgql and epos —
-they have no Go dependency and ride with the lint plugin.**
+the milestone that first needs it — which is what the definition of done requires
+of part five. `setup-go`, `go-lint` and `go-test` at M0, for goga's own CI.
+`go-test-integration` at **M4**, the first milestone whose tests need a
+container, extended at M7 with the godog reporting. `go-generate-check` at M9,
+where it is the enforcement for generated wiring. `go-vuln`, `go-release` and
+`pages-deploy` at M11, adopted by gopgql and epos — they belong to no module.**
 
 ### Requirement: Shared actions encapsulate how the tooling is launched
 
 The invocation of each tool SHALL be provided as a composite action, so projects
 own their triggers and jobs but not the commands.
+
+#### Scenario: An action ships with the milestone that needs it
+- **WHEN** a milestone introduces a tool that has to run in CI
+- **THEN** the composite action for it ships in that same milestone, so no
+  milestone runs a new class of test or generator without the CI treatment it
+  needs
+
+#### Scenario: The linter can run against the framework's own language version
+- **WHEN** the aggregating linter cannot process the Go version the framework
+  targets
+- **THEN** the lint action builds a linter that can, rather than skipping the
+  check or pinning the framework to an older language version
 
 #### Scenario: One place defines each tool's invocation
 - **WHEN** a project runs linting, testing or releasing
