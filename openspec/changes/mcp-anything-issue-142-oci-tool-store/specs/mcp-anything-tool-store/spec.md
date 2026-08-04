@@ -68,11 +68,17 @@ rename. It SHALL close every content reader before any delete.
 - **THEN** the store still resolves every tool that was present before the
   interrupted write, and `index.json` is not truncated
 
-#### Scenario: A non-local filesystem is refused
-- **WHEN** the configured store path is on a filesystem where advisory locking is
-  unreliable
+#### Scenario: A network filesystem is refused
+- **WHEN** the configured store path is on a positively identified network
+  filesystem, such as NFS or SMB
 - **THEN** the proxy fails at startup with an error naming the path, rather than
   starting and corrupting the index later
+
+#### Scenario: An unrecognised filesystem warns and continues
+- **WHEN** the filesystem type of the configured store path cannot be determined
+- **THEN** the proxy logs a warning naming the path and starts, because refusing
+  on "unknown" would break ordinary local filesystems the check has not been
+  taught
 
 ### Requirement: The searchable index is derived, in-memory and annotation-only
 
@@ -83,6 +89,16 @@ SHALL NOT be persisted. It SHALL be rebuilt at startup and refreshed after every
 
 Tool name, description, runtime and the flattened parameter list SHALL be stored
 in manifest annotations so that this is possible.
+
+The index SHALL be an immutable value swapped atomically on rebuild, not mutated
+in place: a reader SHALL never observe a partially rebuilt index and SHALL never
+need a lock.
+
+#### Scenario: Searching during a rebuild is race-free and consistent
+- **WHEN** searches run continuously while tools are added and deleted, under the
+  race detector
+- **THEN** no race is reported, and every search returns a result set consistent
+  with some single point in time rather than a mixture of two
 
 #### Scenario: Indexing reads no blobs
 - **WHEN** the proxy starts against a store containing tools
@@ -141,6 +157,70 @@ explicit operation, and SHALL NOT push to any registry as a side effect of `Add`
 #### Scenario: Adding does not publish
 - **WHEN** a tool is added without requesting promotion
 - **THEN** no request is made to any remote registry
+
+### Requirement: A shared store is registry-backed, and the unsupported combination refuses to start
+
+A local OCI layout is per-process and, in Kubernetes, per-pod: it does not
+coordinate between replicas. The proxy SHALL therefore support a registry-backed
+store mode in which a configured OCI registry is the store and the local layout
+is a pull-through cache, refreshed on a configured interval and on cache miss. In
+this mode `Add` SHALL pack, push to the registry, and invalidate the local cache,
+so the tool is live on the writing pod immediately.
+
+The `tool_store` configuration SHALL carry an explicit `shared` flag, defaulting
+to false. The proxy SHALL refuse to start when `shared` is true and the store is
+local-only, rather than serving an inconsistent tool set silently. The Helm chart
+and the operator SHALL set `shared` from the replica count they render, because a
+pod cannot read its own replica count.
+
+#### Scenario: The unsupported combination is refused loudly
+- **WHEN** the proxy starts with `shared` true and a local-only store
+- **THEN** it exits with an error naming both the store mode and the flag, and
+  serves no requests
+
+#### Scenario: A chart rendering multiple replicas fails at template time
+- **WHEN** the Helm chart is rendered with a replica count above one and a
+  local-only tool store
+- **THEN** templating fails with the same explanation, rather than producing a
+  Deployment whose pods will refuse to start
+
+#### Scenario: The default single-process deployment is unaffected
+- **WHEN** the proxy runs with a local-only store and `shared` unset
+- **THEN** it starts normally and no registry is contacted
+
+#### Scenario: A registry-backed add is live locally at once
+- **WHEN** a tool is added on a proxy in registry-backed mode
+- **THEN** it is pushed to the registry and callable on that same proxy
+  immediately, without waiting for a refresh interval
+
+#### Scenario: Another replica converges within one interval
+- **WHEN** a tool is added through one replica in registry-backed mode
+- **THEN** a second replica serves it after at most one refresh interval, and the
+  configuration documents that interval as the staleness bound
+
+### Requirement: Registry access is configured, credentialed and bounded
+
+Every remote registry operation — pull, push and promotion copy — SHALL take a
+`context.Context` and a configured per-operation timeout, and SHALL obtain
+credentials from configuration. Secrets SHALL be referenced with the repository's
+`${ENV_VAR}` indirection and SHALL NOT be written literally in a config file. TLS
+settings SHALL be configurable per registry host, including an explicit
+plain-HTTP opt-in for a local registry.
+
+#### Scenario: No ambient credentials are used unless requested
+- **WHEN** the proxy pushes to a registry and no credentials are configured for
+  that host
+- **THEN** it does not silently fall back to an ambient Docker config file unless
+  the deployment has opted into that fallback
+
+#### Scenario: A hung registry does not hang the tool call
+- **WHEN** a registry stops responding mid-push
+- **THEN** the operation fails within the configured timeout with an error naming
+  the registry, and the proxy continues serving every other tool
+
+#### Scenario: A secret is not readable from the rendered config
+- **WHEN** a deployment configures registry credentials
+- **THEN** the config file contains an `${ENV_VAR}` reference and not the secret
 
 ### Requirement: OCI access is confined to one package
 

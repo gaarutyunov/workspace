@@ -8,9 +8,16 @@ support MCP servers, not only scripts.
 
 This design is written against the code as it stands on `main`, not against
 SPEC.md, because the two have drifted — SPEC.md §5 still describes an `internal/`
-layout the repo replaced with `pkg/`, and pins go-sdk v1.3.0 where `go.mod` says
-v1.4.1. Where they disagree, the code wins and SPEC.md is corrected by this
-change.
+tree that is now nearly empty (`internal/crdutil` is all that remains; the rest
+moved to `pkg/`), and pins go-sdk v1.3.0 where `go.mod` says v1.4.1. Where they
+disagree, the code wins and SPEC.md is corrected by this change.
+
+SPEC.md §1's "No database. No persistent state. Every pod is identical." is
+**already false on `main`** — `pkg/session/postgres`, `pkg/session/redis` and
+`pkg/cache/redis` all exist. That matters for how this change is read: it is not
+introducing durability into a stateless proxy, it is adding a second durable
+thing to a proxy that already has optional ones. The claim in §1 needs correcting
+regardless of this change; this change corrects it.
 
 ### What already exists, because "do not remove existing functionality" owes an account
 
@@ -87,7 +94,10 @@ Each of these was checked against the artefact named, not inferred:
 ## Decisions
 
 The nine questions the research left open are settled here as D1–D9, each with
-the alternative that was rejected. D10–D13 settle what drafting turned up.
+the alternative that was rejected. D10–D13 settle what drafting turned up. D14–D18
+settle what spec review turned up — all five are integration facts about the
+existing code that the first draft got wrong or left silent, and each would have
+been discovered during implementation at a much worse moment.
 
 ### D1: Adopt epos#51's `vnd.epos.tool.*` format unchanged
 
@@ -165,6 +175,16 @@ over NFS and SMB, and the proxy fails loudly at startup rather than corrupting a
 index slowly. In Kubernetes this means an `emptyDir` or a local PV, never a
 shared `ReadWriteMany` volume — which is also why D5 exists.
 
+**Detection is best-effort, and the asymmetry is deliberate.** Filesystem type is
+`statfs` magic numbers on Linux, `f_fstypename` on Darwin, and something else
+again on Windows, and the proxy ships on all three via goreleaser. So: a
+**positively identified** network filesystem (NFS, SMB/CIFS, and the obvious
+others) is a startup refusal naming the path; an **undeterminable** filesystem
+logs a warning naming the path and continues. Refusing on "don't know" would
+break ordinary local filesystems the detection simply has not been taught, and
+this check exists to catch the one configuration people actually reach for by
+mistake — a shared volume — not to prove locality.
+
 ### D4: The index is derived, in-memory, and reads annotations only
 
 At startup, and after every `Add` or `Delete`, the proxy walks `index.json`,
@@ -182,6 +202,17 @@ The index is a pure function of the layout. It is never written to disk, never
 migrated, and a crash loses nothing. **"No database" does not mean "no index" —
 it means the index is not the source of truth.** Say this plainly, because the
 first person to want faster startup will propose persisting it.
+
+**Concurrency: an immutable snapshot behind an `atomic.Pointer`.** The index is
+read by `Search` while `Add` and `Delete` rebuild it, and `make test` runs
+`-race`, so the model has to be stated rather than left to the implementor. A
+rebuild constructs a **new** index value and swaps it in; nothing is mutated in
+place and no reader takes a lock. This is the pattern `config.Loader` already
+uses for `atomic.Pointer[ProxyConfig]` and that `upstream.Registry` already
+follows by being "immutable after construction and safe for concurrent reads"
+(`pkg/upstream/registry.go:95`) — reusing it means one concurrency model in the
+proxy rather than two. A `Search` that began before an `Add` completes reads a
+consistent older snapshot, which is the correct answer for a scratchpad.
 
 - *Rejected — SQLite or bbolt for the index.* It is a database with a different
   name, and it reintroduces exactly what the owner removed: a second durable
@@ -234,6 +265,21 @@ describes. An agent extracting "the call I keep making to create a GitHub issue"
 is extracting one operation, not importing the GitHub API. Bulk import of a whole
 API remains what the existing `http` upstream is for, declared in config, and is
 untouched.
+
+**The base URL and the credential must not be independently choosable, or
+`Add` becomes a credential-exfiltration primitive.** An agent that can name both
+an arbitrary base URL *and* an existing named `outbound_auth` entry has asked the
+proxy to attach that upstream's token to a request at a URL the agent chose. D11
+dismisses OpenAPI as "network egress only", which is true of the *existing* http
+upstream — where an operator wrote the base URL — and false of an `Add`-ed one.
+
+The rule, therefore: an `Add`-ed OpenAPI tool MAY name an existing
+`outbound_auth` entry **only** when its base URL is the base URL of the upstream
+that owns that credential. Any other base URL is permitted but is sent
+**unauthenticated**. Requesting a credential for a foreign base URL is an error
+naming both, not a silent downgrade — a silent downgrade would leave an agent
+believing the call was authenticated. Deployments wanting a broader pairing
+configure an explicit allowlist; there is no wildcard.
 
 - *Rejected — one artifact per whole OpenAPI document.* It gives the derived
   index one entry covering N tools, so `Search` can no longer return tools, which
@@ -288,6 +334,25 @@ Two rules, in order:
 The direction is not arbitrary: an operator's reviewed declaration must not be
 silently displaced by an agent's mid-session write. The reverse rule would make a
 cluster's behaviour depend on what an agent did five minutes ago.
+
+**Where this meets the existing fatal checks, and why they are not weakened.**
+`registry.New` today treats *both* a shared `tool_prefix` and a duplicate
+prefixed name as construction errors (`pkg/upstream/registry.go:125,135`), and
+`Rebuild` validates prefixes before that. Rule 2 above must not turn those into
+warnings — a config with two upstreams claiming one prefix is a deployment
+mistake and must keep failing loudly. The two rules live at different points in
+the pipeline and that is what keeps them consistent:
+
+- **Declared versus declared** — config and CRD upstreams, including an `mcp`
+  upstream — stays **fatal**, unchanged, inside `registry.New`.
+- **Store versus declared** resolves **before** `registry.New` is called. The
+  store is presented as one synthetic upstream (D14), and its entry list is
+  filtered against the declared names first: a colliding stored tool is dropped
+  from the list, logged, and marked shadowed in `Search`. `registry.New`
+  therefore never sees the collision and never has to be taught to tolerate one.
+
+So `Add`'s pre-flight rejection (rule 2) and the load-time fatal error are the
+same rule applied at two different times, not two rules that disagree.
 
 - *Rejected — last-write-wins.* Makes the proxy non-deterministic across
   restarts, since the store survives a restart and a race does not.
@@ -350,16 +415,28 @@ would have, the feature is a net loss, so its response shape is a specified
 contract and not an implementation detail.
 
 A result carries: the fully-qualified tool name, the description (truncated to a
-configured budget, default 200 characters), and a **flattened parameter list** —
-one line per top-level parameter as `name: type` plus required/optional, with no
-nested schemas, no per-property descriptions, no enums and no examples. The full
+configured budget, default 200 characters, **truncated on rune boundaries** — the
+repo's own `.claude/rules/review-patterns.md` lists byte-slicing a user-facing
+string as a repeat review finding), and a **flattened parameter list** — one line
+per top-level parameter as `name: type` plus required/optional, with no nested
+schemas, no per-property descriptions, no enums and no examples. The full
 `inputSchema` is never returned.
 
 This is safe because `Execute` validates arguments server-side against the full
 schema and returns an actionable error naming the offending parameter. The agent
-needs to know *which* parameters exist, not their complete JSON Schema. Today's
-`ToolDef` (`pkg/search/search.go:17`) returns the full schema; that field is
-removed.
+needs to know *which* parameters exist, not their complete JSON Schema.
+
+**This is a new result type, and `search.ToolDef` is left alone.** An earlier
+draft removed `InputSchema` from `search.ToolDef` (`pkg/search/search.go:20`).
+That is wrong twice over: it changes what the *existing* `search_tools` tool
+returns in every deployment — including one with no store configured, which this
+change promises is byte-for-byte unaffected — and it breaks
+`tests/integration/tool_search_test.go:202`, which asserts `inputSchema` is
+non-nil for every hit. `store_search` gets its own bounded result type; the
+existing `search_tools` contract is untouched. Narrowing `search_tools` may well
+be worth doing on its own token-economy merits, but it is a separate change with
+a separate compatibility story, and it is filed as a follow-up rather than
+smuggled in here.
 
 The budget is enforced, not merely intended: a `Search` response has a configured
 maximum size, results are truncated to fit, and the response says how many were
@@ -383,6 +460,121 @@ This was not in the research and is a genuine gap: the existing `search_tools` i
 an opt-in extra for a large configured catalogue, where requiring an embedding
 provider is reasonable. `Search` in #142 is the *primary* discovery path, and a
 primary path may not have a network dependency.
+
+### D14: The store is one synthetic upstream, and `Rebuild` must re-materialise it
+
+"`Add` mutates the live registry" is not implementable as stated. `Registry` is
+"immutable after construction and safe for concurrent reads"
+(`pkg/upstream/registry.go:95`). The seam that does exist is
+`upstream.RegistryManager` (`pkg/upstream/refresher.go:16`) —
+`UpdateUpstream(name, entries, specYAMLRoot)` and `RemoveUpstream(name)` — which
+rebuilds and swaps the whole registry under the manager's lock. `Add` and
+`Delete` go through that, presenting the store as **one synthetic upstream**
+named for the store prefix (`scratch` by default).
+
+Modelling it as one upstream rather than N is what makes D9's precedence rule and
+the existing prefix machinery fall out for free, and it is the smallest thing
+that fits a seam already there.
+
+**The failure this decision exists to prevent:** `Manager.Rebuild(ctx, cfg)`
+(`pkg/mcp/manager.go:201`) reconstructs the upstream set from `cfg.Upstreams`,
+and it is invoked by the fsnotify config watcher in `pkg/config/loader.go`.
+Unless the store's entries are re-materialised **inside** `Rebuild`, any
+unrelated edit to the config file silently deletes every added tool from the live
+registry, with no error and no log line — the tools are still in the store, so
+they come back on the next restart, which makes the bug intermittent and
+maddening. `Rebuild` must therefore treat the store as a source of upstreams
+alongside `cfg.Upstreams`. This is a required behaviour with a test, not a note.
+
+### D15: Wire names are snake_case, and the four tools survive the `tools/list` collapse
+
+Two integration facts decide this, and both were missed by the first draft.
+
+**Naming.** Issue #142 writes "Search, Execute, Add, Delete" as prose. Every MCP
+tool this proxy actually exposes is snake_case (`search_tools`,
+`github__create_issue`), and `Registry.Dispatch` rejects names without the `__`
+separator. A bare `Add` is also a plausible collision with an upstream's own
+tool. The wire names are therefore **`store_search`, `store_execute`,
+`store_add`, `store_delete`**, and the spec uses those. The capitalised words
+remain the right way to talk about them in prose.
+
+**Visibility.** `listToolsMiddleware` (`pkg/mcp/manager.go:627`) returns *only*
+`search_tools` from `tools/list` whenever tool search is enabled for an endpoint.
+Left alone, that is precisely the deployment most likely to configure a store —
+and the four store tools would be invisible in it. So the middleware returns
+`search_tools` (when enabled) **plus the four store tools**, which is the minimum
+that keeps the feature reachable while preserving the collapse's whole point.
+
+That settles the redundancy question too:
+
+- **Stored tools are ordinary registry entries** under the store prefix, so
+  `scratch__create_issue` is dispatchable by name like any other tool. A client
+  that already knows the name pays nothing extra.
+- **They are omitted from `tools/list`** whenever the store is configured.
+  Listing them is exactly the per-session token cost the feature exists to avoid.
+- **`store_execute` is how an agent calls one it just found**, without a
+  `tools/list` round trip. It is a name→dispatch shim over the same registry
+  entry, not a second execution path with its own semantics.
+
+`store_search` does **not** replace `search_tools`: the two coexist, search
+different sets (the store versus the configured catalogue) and return different
+shapes (D12). A deployment with both enabled has both, and that is intended.
+
+### D16: The registry connection is configured, credentialed and bounded
+
+Promotion (D5) and the registry-backed store (§ *Multiple replicas*) both talk to
+a remote registry, and neither says how. Unspecified, this is where an
+implementor invents something. The `tool_store` config block therefore carries,
+explicitly:
+
+- **Credentials**, via the repo's existing `${ENV_VAR}` indirection for anything
+  secret — never a literal in the config file. `oras-go` needs a `remote.Client`
+  with a credential function; the config supplies username/password or a bearer
+  token per registry host, and falls back to an ambient Docker config file only
+  when the deployment opts in.
+- **A per-operation timeout** on every pull, push and `oras.Copy`, defaulted, and
+  a `context.Context` threaded from the caller. The repo's own
+  `.claude/rules/review-patterns.md` lists missing HTTP client timeouts as a
+  repeat finding.
+- **A refresh interval** for the pull-through cache, defaulted, and the explicit
+  statement that this interval *is* the staleness bound the multi-replica section
+  describes.
+- **TLS settings** per host, including a plain-HTTP opt-in for a local registry,
+  because a laptop-local `zot` is the intended promotion target for testing.
+
+### D17: No Cobra in this change; promotion is an MCP argument, and the CLI is a follow-up
+
+D5 mentions "a CLI subcommand" for promotion. `cmd/proxy/main.go` has no CLI
+framework at all — no flags, no subcommands; it calls `mcpanything.LoadConfig()`
+and `proxy.Start(ctx)`, and `spf13/cobra` is present only as an indirect
+dependency of golangci-lint. Introducing Cobra means a `NewRootCmd()` factory,
+turning today's `main()` into a `serve` subcommand, and a new direct dependency —
+a structural change to the binary that has nothing to do with issue #142 and that
+the proposal's Impact section does not carry.
+
+So promotion in this change is the `promote: true` argument to `store_add` plus a
+`Promote` operation on the store package, and **no CLI is added**. A promotion
+subcommand is a good idea and is filed as a follow-up, where the Cobra adoption
+can be scoped and reviewed on its own.
+
+### D18: Tests follow the target repo's conventions, not the workspace's defaults
+
+The first draft specified godog feature files. **The repo has never used godog**:
+there are no `.feature` files, godog is not in `go.mod`, and `tests/integration`
+and `tests/e2e` are plain Go tests over Testcontainers behind build tags, as
+`.claude/rules/integration-tests.md` and `.claude/rules/e2e-tests.md` document.
+Adding a BDD framework for one feature would leave the repo with two testing
+idioms. The tests here are plain Go, table-driven, in the existing directories.
+
+The same reasoning resolves a live conflict with the workspace-level rules. This
+workspace's `go-test-assertions.md` mandates testify and `go-test-mocks.md`
+mandates generated gomock. mcp-anything uses **neither** — no `stretchr/testify`
+import anywhere (it is indirect only), no `mockgen`, hand-rolled fakes
+throughout. Introducing both into one new package would make that package the odd
+one out in its own repo while satisfying a rule written for the workspace's
+greenfield Go projects. **Consistency within the repo wins**, and the divergence
+is recorded here rather than silently taken, so that the owner can overrule it in
+review if the intent was the reverse.
 
 ## Multiple replicas: where "no Postgres" is under strain
 
@@ -426,9 +618,30 @@ pull-through cache.**
   fail. The local-only mode has no such dependency, which is a genuine argument
   for the laptop case and against the cluster case.
 - **With no registry configured, multi-replica is unsupported.** The proxy MUST
-  detect this — a replica count above one with a local-only store — and refuse to
-  start, rather than serving an inconsistent tool set silently. A loud refusal at
-  startup is the whole value of naming this problem.
+  refuse to start in that combination rather than serving an inconsistent tool
+  set silently. A loud refusal at startup is the whole value of naming this
+  problem.
+
+  **How the pod knows, since it cannot read its own replica count.** A pod has no
+  access to its Deployment's `spec.replicas`; discovering it would mean a
+  Kubernetes API read of the owning Deployment plus the RBAC to allow it, which
+  the proxy does not have today and should not acquire for this. The check is
+  therefore driven by **declared** configuration, not by discovery:
+
+  - The `tool_store` block carries an explicit `shared: true|false`, defaulting
+    to `false` (a single process owns this store).
+  - The proxy refuses to start when `shared: true` and the store is local-only.
+    That is the whole rule, and it is one comparison.
+  - **The Helm chart and the operator set it**, because they are the components
+    that *do* know the replica count — the chart renders `replicaCount` and the
+    operator writes the `MCPProxy`'s replica count into the rendered config. A
+    chart rendering `replicaCount: 3` with a local-only store fails at template
+    time with the same message, which is better than failing at pod start.
+
+  The cost of this design is honest and worth stating: a hand-rolled Deployment
+  that scales to three replicas without setting `shared` gets no refusal. The
+  chart and the operator are the supported paths and they are covered; a
+  hand-written manifest is not, and the config reference says so.
 
 **Rejected alternatives**, each for a reason worth recording:
 
