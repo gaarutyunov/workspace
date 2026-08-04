@@ -154,7 +154,7 @@ shown.
 | # | Was | Is now | Evidence |
 |---|---|---|---|
 | D7 | `goga/database/driver.DB`, a six-method port, with `pgxdb` and `sqldb` behind it | **No port.** `goga/database` returns an otelsql-wrapped `*sql.DB`; `goga/database/pgxdb` returns an instrumented `*pgxpool.Pool` | `gocloud.dev` builds driver ports for blobs, queues, documents, secrets and config, and **declined to build one for SQL** — `postgres/postgres.go` returns `*sql.DB` and instruments by wrapping the sql driver |
-| D8 | Registry deferred out of v1 *because Go had no generic methods*; then restored *because Go 1.27 has them* | **Registry in v1, and it never needed generic methods.** Name-keyed, typed constructor, package-level generic functions | The normative registry compiles and runs on stock `go1.26.4` at language version `go 1.22`; the 1.27 form differs in four lines |
+| D8 | Registry deferred out of v1 *because Go had no generic methods*; then restored *because Go 1.27 has them* | **Registry in v1, as generic methods on `*Registry`, on the Go 1.27 floor.** Name-keyed, typed constructor, `r.Open[P](ctx, name, raw)` | The owner decided D8-A on 2026-08-04. The method form compiles on `go1.27rc2` with both type parameters still inferred from the constructor; `go.mod` is `go 1.27` + `toolchain go1.27rc2` |
 | D8 | Adapters keyed by URL scheme, after `blob.URLMux` | **Keyed by plain adapter name.** URL/DSN retained only as *content* for `database` and `client` | URL openers solve twelve-factor late binding; goga picks adapters at build time in the composition root. `s3blob.go:150-219` is what the URL key degenerates into |
 | D14 | "No exported struct anywhere in goga's option surface" | **Unexported caller-facing settings; exported driver-facing option structs.** Two sides of the port, two rules | The conformance suite (D21) lives in a third package and must construct them; go-cloud exports all of `driver.ReaderOptions`, `WriterOptions`, `ListOptions` |
 | D8 | Registry ownership left ambiguous — the normative code was a value, the prose said "adapter tables are package-level `var`s" | **An injected value; no package-level default.** Adapters attach via `Provide(r)`; blank imports are gone | go-cloud calls its global mux *"the single sanctioned exception"* to minimize-global-state and justifies it by needing to work **without** wire (`internal/docs/design.md:108-121`). goga mandates wire (D9), so the justification does not transfer |
@@ -165,8 +165,9 @@ Two of these change what the owner was previously shown in a way he may want to
 push back on, and neither is buried: **D7** removes a database abstraction he
 asked for by name, and **D22** narrows a router seam the survey called its
 strongest evidence. Both sections argue the change in full and state what is
-lost. A third, **D8-A** in Open Questions, is an explicit owner decision that
-this spec has *not* taken unilaterally.
+lost. A third, **D8-A**, was put to the owner rather than taken unilaterally, and
+he answered it on 2026-08-04: **Go 1.27, generic methods.** It is no longer an
+open question — see D8 and D17, which are now written that way.
 
 
 ### D1: goga is layout-agnostic
@@ -639,7 +640,7 @@ name-keyed (D8).
   sqlc's generated code takes a `DBTX`. Both paths are real; the error was
   merging them.
 
-### D8: `goga/registry` is in v1, name-keyed, and does not require Go 1.27
+### D8: `goga/registry` is in v1, name-keyed, and ships as generic methods on Go 1.27
 
 **Reversed twice before this revision, and refined again here.** The history
 matters because the spec has argued every side of it.
@@ -672,6 +673,10 @@ a reading of release notes.
 
 #### The shape v1 ships
 
+`Register`, `Open`, `Provide` and `Names` are **generic methods on `*Registry`**,
+per the owner's decision on D8-A. The toolchain floor that buys this is `go 1.27`
+plus `toolchain go1.27rc2` (D17).
+
 ```go
 package registry
 
@@ -679,8 +684,9 @@ package registry
 type Registry struct{ m map[string]entry }
 
 type entry struct {
-	open     func(Settings, func(any) error) (any, error)
+	open     func(context.Context, Settings, func(any) error) (any, error)
 	settings reflect.Type
+	port     reflect.Type
 }
 
 // Settings is the raw config subtree for one adapter (koanf's node, in goga).
@@ -692,29 +698,35 @@ type Settings map[string]any
 // be distinct types and an adapter's option would then be unusable with
 // goga.Apply. This is why registry imports the root goga package.
 //
-// Language gate: go1.23, measured — at `go 1.22` the compiler says "generic type
-// alias requires go1.23 or later". It is NOT what sets the 1.24 floor; see D17.
+// Its own language gate is go1.23, measured — at `go 1.22` the compiler says
+// "generic type alias requires go1.23 or later". It is far below the floor the
+// module actually sets, which is 1.27 and is set by the generic methods below;
+// see D17.
 type Option[S any] = goga.Option[S]
 
 // Register records a constructor. BOTH type parameters are inferred from ctor —
-// the caller never writes either. S is baked into the closure and recorded with
-// reflect.TypeFor[S](), which is what lets S stay UNEXPORTED in the adapter's
-// own package. Verified: inference is unaffected by the leading context.
-func Register[P any, S any](r *Registry, name string, ctor func(context.Context, S) (P, error))
+// the caller never writes either, and the method form does not change that:
+// `r.Register("pgx", newPool)` needs no explicit instantiation. S is baked into
+// the closure and recorded with reflect.TypeFor[S](), which is what lets S stay
+// UNEXPORTED in the adapter's own package. Verified on go1.27rc2: inference is
+// unaffected either by the leading context or by the receiver.
+func (r *Registry) Register[P any, S any](name string, ctor func(context.Context, S) (P, error)) error
 
 // Open is the CONFIG-DRIVEN path. The caller names only the port; the adapter is
 // chosen by a runtime string, so P is result-only and must be instantiated
 // explicitly. The settings blob is decoded into the adapter's own S inside.
-func Open[P any](ctx context.Context, r *Registry, name string, raw Settings) (P, error)
+func (r *Registry) Open[P any](ctx context.Context, name string, raw Settings) (P, error)
 
 // Adapter[P,S] is the TYPED HANDLE returned by registration. It is what keeps
 // variadic options statically checked on the path that does not need a string.
 type Adapter[P any, S any] struct{ /* name, reg */ }
 
-func Provide[P any, S any](r *Registry, name string, ctor func(context.Context, S) (P, error)) (Adapter[P, S], error)
+func (r *Registry) Provide[P any, S any](name string, ctor func(context.Context, S) (P, error)) (Adapter[P, S], error)
 
 // Both P and S are static here: there is nothing to instantiate at the call
-// site, and a foreign adapter's option is a COMPILE error.
+// site, and a foreign adapter's option is a COMPILE error. This method is
+// UNCHANGED by D8-A — Adapter's type parameters belong to the type, not to the
+// method, so it was already a method in the package-level-function form.
 func (a Adapter[P, S]) Open(ctx context.Context, raw Settings, opts ...Option[S]) (P, error)
 ```
 
@@ -728,22 +740,27 @@ type settings struct {
 	MaxConns int    `koanf:"max_conns"`
 }
 
-func newPool(s settings) (*pgxpool.Pool, error) { … }
+func newPool(ctx context.Context, s settings) (*pgxpool.Pool, error) { … }
 
 func WithMaxConns(n int) registry.Option[settings] {
 	return func(s *settings) error { … }
 }
 
-func Provide(r *registry.Registry) registry.Adapter[*pgxpool.Pool, settings] {
-	return registry.Provide(r, "pgx", newPool)
+// Every adapter package exports this alias, so a wire provider downstream can
+// NAME the handle without `settings` being exported. See the worked
+// httptransport example in Package surfaces for why it is not optional.
+type Adapter = registry.Adapter[*pgxpool.Pool, settings]
+
+func Provide(r *registry.Registry) (Adapter, error) {
+	return r.Provide("pgx", newPool)
 }
 ```
 
 and the two call sites:
 
 ```go
-pool, err := registry.Open[*pgxpool.Pool](r, "pgx", cfg.Sub("database"))   // config-driven
-pool, err := pgx.Open(cfg.Sub("database"), pgxdb.WithMaxConns(32))         // typed handle
+pool, err := r.Open[*pgxpool.Pool](ctx, "pgx", cfg.Sub("database"))       // config-driven
+pool, err := pgx.Open(ctx, cfg.Sub("database"), pgxdb.WithMaxConns(32))   // typed handle
 ```
 
 **Why `any` is the right constraint here, stated once so it is not re-flagged.**
@@ -811,9 +828,14 @@ becomes a property `goga/config` can offer and the conformance tests can assert.
   both, split by path**, and the permission the owner granted is not needed.
 - **An interface cannot declare a generic method** (*"interface method must have
   no type parameters"*), and a generic method cannot satisfy a non-generic
-  interface method. **Ports therefore stay ordinary interfaces**, and per-call
-  generics live on concrete types only. This is a hard constraint on the whole
-  design and every port in this document has been checked against it.
+  interface method (*"impl does not implement Port (wrong type for method Do) —
+  have Do[T any](context.Context) error, want Do(context.Context) error"*).
+  **Ports therefore stay ordinary interfaces**, and per-call generics live on
+  concrete types only. This is a hard constraint on the whole design and every
+  port in this document has been checked against it. **Go 1.27 does not relax
+  it** — re-measured on `go1.27rc2` after the D8-A decision, with the same two
+  errors. This is the boundary of what generic methods buy: `*Registry` is a
+  concrete type, so its methods may carry type parameters; no port may.
 - **`reflect.TypeFor[P]()` in error messages, never `%T` on a zero value** — `%T`
   on a nil interface prints `<nil>`, which is the least useful thing an
   unknown-adapter error could say.
@@ -821,9 +843,10 @@ becomes a property `goga/config` can offer and the conformance tests can assert.
   and goga holds it.** The first spike reported that `Register` worked *because*
   the shape was `func(S) (P, error)`; that was too strong, and it was re-tested
   for this revision. Type inference is unaffected by a leading
-  `context.Context` — `registry.Provide(r, "http", newTransport)` still needs no
-  explicit instantiation, and a foreign adapter's option is still a compile
-  error. The context is not ceremonial: an OTLP exporter dials, an MCP HTTP or
+  `context.Context` — `r.Provide("http", newTransport)` still needs no explicit
+  instantiation, and a foreign adapter's option is still a compile error; both
+  re-verified on `go1.27rc2` in the method form. The context is not ceremonial:
+  an OTLP exporter dials, an MCP HTTP or
   SSE transport binds, and a listener opens a socket, all at construction. The
   alternative — keeping `func(S) (P, error)` and passing ctx "through the
   closure" — cannot work, because the constructor then has no parameter to
@@ -878,8 +901,8 @@ second candidate, and a one-entry table is the abstraction D7 warns about.
 #### The registry is the mechanism *under* each module's surface, not a replacement for it
 
 **Corrected here after an independent audit.** An earlier pass of this revision
-rewrote `telemetry`, `mcp` and `components` to call `registry.Provide` and
-`registry.Open` directly, deleting their own typed registration surfaces. That
+rewrote `telemetry`, `mcp` and `components` to call the registry's `Provide` and
+`Open` directly, deleting their own typed registration surfaces. That
 went too far in the other direction, and the audit was right that the
 module-owned surfaces were the better of the two: they take a `context.Context`,
 and they take a module-owned `Settings` accessor interface rather than an
@@ -889,7 +912,7 @@ So both survive, at different levels:
 
 - **Each adapter-bearing module keeps its own typed surface** — its port, its
   `Settings` accessor interface, and a registration function named for what it
-  registers (`mcp.RegisterTransport`, not a bare `registry.Register`). This is
+  registers (`mcp.RegisterTransport`, not a bare `r.Register`). This is
   what an adapter author and a composition root actually touch.
 - **`goga/registry` is what those surfaces are implemented over** — one copy of
   the storage, the name→constructor mapping, the settings decode, the duplicate
@@ -925,8 +948,9 @@ Three consequences, all deliberate:
   forgotten `Provide` is a visibly absent line rather than a missing underscore.
 - **The unknown-adapter error changes its hint** from *"did you forget a blank
   import?"* to *"did you call `httptransport.Provide(r)`?"*.
-- **The duplicate-registration panic is now per-registry**, so a test that builds
-  its own registry cannot collide with another test's.
+- **Duplicate-registration detection is now per-registry** — and, for the same
+  reason, a returned error rather than a panic (see `Register`'s doc below), so a
+  test that builds its own registry cannot collide with another test's.
 
 #### The registry is not the only way to bind a port, and often not the best one
 
@@ -986,83 +1010,91 @@ go-cloud's name for the second operation is `As(i any) bool`, and goga adopts it
 (D20). Calling it a cast does not make it static. Saying so plainly here is
 cheaper than a reviewer discovering it in the first adapter.
 
-#### The Go 1.27 question — an open decision for the owner
+#### D8-A: generic methods on Go 1.27 — decided by the owner
 
-The owner instructed: use Go 1.27's generic methods for the registry, RC or not.
-Two independent investigations now say the feature is **not what unlocks this
-design**, and the spec should not settle that quietly in either direction.
+**This was the one question the design put to the owner rather than answering.
+He answered it, and this section records the decision and the evidence that was
+weighed to reach it.**
 
-**What generic methods actually change.** The spike wrote the normative registry
-twice: once with `Register` and `Open` as generic **methods** on `*Registry`
-(`go1.27rc2`), and once with them as package-level generic **functions**
-(`go 1.22` language version). The two files differ in exactly four lines:
+The owner instructed originally: use Go 1.27's generic methods for the registry,
+RC or not. Two independent investigations found the feature was not what unlocked
+the design, and the spec was written on a Go 1.24 floor with the trade-off put to
+him explicitly. His answer, on the spec PR, 2026-08-04:
+
+> *"I don't care, use 1.27. Build dependencies from source if necessary."*
+
+**So the normative form is generic methods on `go 1.27`** (`toolchain
+go1.27rc2`), and the from-source golangci-lint build is scheduled work rather
+than a hypothetical cost. That is a reaffirmation after the concern was raised in
+full, and it is settled; the rest of this section is the rationale on the record,
+not an argument against it.
+
+**What the decision buys.** `r.Open[DB](ctx, "pgx", cfg)` instead of
+`registry.Open[DB](ctx, r, "pgx", cfg)`. A registry that is a value with methods
+is the shape the owner described — *"a structure that can cast interfaces (ports)
+into adapters"* — and the shape a wire-provided registry wants. 1.27 GA is close;
+adopting at the RC avoids a second migration later, and the owner has accepted RC
+risk in writing twice.
+
+**What it costs, measured, so the trade is on the record.** The spike wrote the
+normative registry twice: once with `Register`, `Open`, `Provide` and `Names` as
+generic **methods** on `*Registry` (`go1.27rc2`), and once as package-level
+generic **functions** (`go 1.22` language version). The two files differ in
+exactly four lines:
 
 ```go
-// Go 1.27 method form                     // toolchain-independent form
-r.Register(name, ctor)                     registry.Register(r, name, ctor)
-r.Open[DB]("pgx", cfg)                     registry.Open[DB](r, "pgx", cfg)
+// Normative — Go 1.27 method form        // superseded package-level form
+r.Register(name, ctor)                    registry.Register(r, name, ctor)
+r.Provide(name, ctor)                     registry.Provide(r, name, ctor)
+r.Open[DB](ctx, "pgx", cfg)               registry.Open[DB](ctx, r, "pgx", cfg)
+r.Names()                                 registry.Names(r)
 ```
 
 Everything else is byte-identical, **including `Adapter[P, S].Open` — the call
-site users actually spend their time on.** `pgx.Open(cfg,
-pgxdb.WithMaxConns(32))` is the same in both. The function form was verified here
-to compile *and run* on stock `go1.26.4` with `GOTOOLCHAIN=local`; its only floor
-is `reflect.TypeFor`, which is **Go 1.22**.
+site users actually spend their time on.** `pgx.Open(ctx, cfg,
+pgxdb.WithMaxConns(32))` is the same in both, because `Adapter`'s type parameters
+belong to the type rather than to the method. Three consequences follow, and all
+three were measured before the decision was taken:
 
-**The case for taking the instruction literally.** It is a real ergonomic gain —
-`r.Open[DB](…)` reads better than `registry.Open[DB](r, …)`, and a registry that
-is a value with methods is the shape the owner described and the shape a
-wire-provided registry wants. 1.27 GA is close. Betting early avoids a second
-migration later, and the owner has already accepted RC risk in writing.
+- **The floor propagates.** Go's module rule means `go >= 1.27` reaches gopgql,
+  epos, skill-test/go-service, mcp-anything and sysgo the moment any one of them
+  adopts *any* goga package — including packages that never touch the registry.
+  With the default `GOTOOLCHAIN=auto` a developer on 1.26.4 silently switches to
+  the RC compiler; with `GOTOOLCHAIN=local` (hermetic CI, packaging, air-gapped
+  builders) it is a hard failure. The API-conventions capability requires this to
+  be *stated* in goga's docs and skill rather than discovered (13.6).
+- **The linter is built from source, which is what the owner authorised.**
+  `golangci-lint v2.7.2` as shipped refuses to run against a Go 1.27 target;
+  rebuilt on `go1.27rc2` it still fails (*"export data version 4 is greater than
+  maximum supported version 2"*) because it pins `golang.org/x/tools v0.39.0`.
+  Only a rebuild against `x/tools v0.48.0` reports `0 issues`. D18 makes the
+  linter non-negotiable per milestone, so `go-lint` builds golangci-lint from
+  source with that bump for as long as the RC lasts — task 0.4d, reverted by 11.4
+  when upstream ships a release on a new enough `x/tools`.
+- **It buys call syntax, not capability.** The adapter configuration, the typed
+  options and the port check are all the `Adapter[P, S]` half and were never
+  gated on 1.27. That is the reason the earlier revision recommended against it;
+  it is not a reason to revisit a decision the owner has made, and the goal the
+  original instruction named — a registry that maps ports to adapters with the
+  settings marshalled into the adapter's own type — is delivered either way.
 
-**The case against.** Three costs, all measured:
-
-- **It propagates.** Go's module rule means `go >= 1.27` reaches gopgql, epos,
-  skill-test/go-service, mcp-anything and sysgo the moment any one of them adopts
-  *any* goga package — including packages that never touch the registry. With the
-  default `GOTOOLCHAIN=auto` a developer on 1.26.4 silently switches to an RC
-  compiler; with `GOTOOLCHAIN=local` (hermetic CI, packaging, air-gapped
-  builders) it is a hard failure.
-- **It breaks the enforcement pillar, which D18 makes non-negotiable.**
-  `golangci-lint v2.7.2` refuses to run against a Go 1.27 target; rebuilt on
-  `go1.27rc2` it still fails (*"export data version 4 is greater than maximum
-  supported version 2"*) because it pins `golang.org/x/tools v0.39.0`. Only a
-  rebuild against `x/tools v0.48.0` reports `0 issues`. So every milestone's
-  linter depends on a from-source golangci-lint build until upstream catches up.
-- **It buys no capability.** Not the adapter configuration, not the typed
-  options, not the port check — all of those are the `Adapter[P, S]` half, which
-  is identical in both forms.
-
-**What this spec therefore specifies, and what it leaves to the approval gate.**
-The normative form is the **toolchain-independent one**: package-level generic
-functions, `go 1.24` in `go.mod`. 1.24 rather than 1.22 because it is the oldest
-release still in upstream support at v1, and nothing in goga needs a newer one.
-The Go 1.27 method form is recorded as a **mechanical switch at GA** — four
-lines, no behaviour change, no consumer-visible API change on the typed path.
-
-> **Owner decision, D8-A.** Ship the registry as package-level generic functions
-> on Go 1.24 (this spec's default), or as generic methods on Go 1.27rc2 now?
-> Choosing 1.27 pins every consuming project to a pre-GA toolchain and requires a
-> from-source linter build for as long as the RC lasts; it gains `r.Open[DB](…)`
-> call syntax on the config-driven path only. Choosing 1.24 costs a four-line
-> diff at 1.27 GA. **This spec recommends 1.24 and is written that way**; say the
-> word and M0 flips it.
-
-This is the one place the design does not follow an explicit owner instruction,
-and it is flagged rather than absorbed. Both investigations that reached this
-conclusion were asked to check the premise, and both found the same thing: the
-instruction's *goal* — a registry that maps ports to adapters with the settings
-marshalled into the adapter's own type — is fully delivered, on Go 1.24, today.
+**What did not change.** Generic methods are still forbidden on interfaces, and a
+generic method still cannot satisfy an interface method, re-measured on
+`go1.27rc2`. Ports stay ordinary interfaces; only concrete types — `*Registry`
+here — carry per-call type parameters.
 
 #### What this reverses
 
 - **The previous revision deferred the registry out of v1 entirely**, on the
-  grounds that Go had no generic methods. That reasoning is superseded: the
-  registry never needed them. It returns to v1 — but **not for the reason
-  originally given**, and not in the `Table[P].Get[A any]` form the 2026-07-31
-  round specified. `Get[A any]` was an unconstrained downcast that compiled for
-  any `A` and failed at run time; it is replaced by `Open[P]` (checked by
-  construction) plus `As` (D20, honestly a runtime assertion).
+  grounds that Go had no generic methods. That reasoning is superseded twice
+  over: the registry did not need them, and Go 1.27 has them and goga now
+  requires it. It returns to v1 — but not in the `Table[P].Get[A any]` form the
+  2026-07-31 round specified. `Get[A any]` was an unconstrained downcast that
+  compiled for any `A` and failed at run time; it is replaced by `Open[P]`
+  (checked by construction) plus `As` (D20, honestly a runtime assertion).
+- **The package-level generic-function form is withdrawn** by the owner's answer
+  to D8-A. It remains in this document only as the measured alternative that was
+  weighed, never as a fallback the implementation may choose.
 - **URL-scheme keys are withdrawn** for adapter selection (above).
 - **The claim that the registry forces an exported settings struct stays
   withdrawn**, and is now proven twice: `S` is inferred from the constructor and
@@ -1425,8 +1457,8 @@ func (a Adapter[P, S]) Open(raw Settings, opts ...Option[S]) (P, error)
 
 Three things this buys, each a compiler result rather than an assumption:
 
-- **`S` is inferred, never written.** `pgx.Open(cfg, pgxdb.WithMaxConns(32))`
-  names no type at all: `S` was fixed when `registry.Provide` inferred it from
+- **`S` is inferred, never written.** `pgx.Open(ctx, cfg, pgxdb.WithMaxConns(32))`
+  names no type at all: `S` was fixed when `r.Provide` inferred it from
   the constructor. With **no** options it is still inferred, so the
   zero-configuration call needs no type argument either.
 - **The adapter's settings struct can stay unexported.** Because no caller ever
@@ -1486,7 +1518,7 @@ requirements were never about the same type.
 
 **Adapter configuration follows the same seam** (the owner's comment:
 *"The method should get settings and marshal it to the type that the adapter
-expects and use it to initialize the adapter"*). `registry.Register` bakes the
+expects and use it to initialize the adapter"*). `(*Registry).Register` bakes the
 decode into the closure: the raw config subtree is unmarshalled into the
 adapter's `S` — koanf into the type the adapter declared — then the caller's
 options are applied **on top**, then the constructor runs. Precedence is config
@@ -1603,7 +1635,7 @@ consumer, and a module with neither goes last or waits.
 
 | # | package | adopter, then second | why this one |
 |---|---|---|---|
-| M0 | *(repo, not a package)* — `go.mod` on Go 1.24 (D17), flat layout, root `goga` (`Option`/`Apply`), **`goga/registry`** (D8), the **`goga/lint` plugin scaffold** and the **skill skeleton** (D18), `.golangci.yml` / `Makefile` / `.goreleaser.yaml`, and the actions goga's own CI needs | goga itself | nothing can be delivered from an empty repo; and D18's six parts mean M1 cannot ship a linter rule or a skill section unless the mechanism for both exists first |
+| M0 | *(repo, not a package)* — `go.mod` on Go 1.27 + `toolchain go1.27rc2` (D17), flat layout, root `goga` (`Option`/`Apply`), **`goga/registry`** (D8), the **`goga/lint` plugin scaffold** and the **skill skeleton** (D18), `.golangci.yml` / `Makefile` / `.goreleaser.yaml`, the **from-source golangci-lint build**, and the actions goga's own CI needs | goga itself | nothing can be delivered from an empty repo; and D18's six parts mean M1 cannot ship a linter rule or a skill section unless the mechanism for both exists first |
 | M1 | `goga/telemetry` (+ generated `goga/semconv`) | **gopgql**, then **epos** | the owner's *"telemetry first"*; gopgql has none at all, epos has metrics only and never installs its meter provider |
 | M2 | `goga/serve` (+ `driver`, the stdlib listener, `servetest` **as helpers, not a conformance suite** — D21) | **epos**, then **gopgql** | the owner's *"http with telemetry for gopgql and epos"*; three router positions across three projects is what makes uniform *serving* valuable — it is not what justifies replacing their routing APIs (D22). **This is the thinnest milestone in the plan**: with the router seam gone the module is the otelhttp wrap, the untraced ops mux, bounded timeouts and one drain, over a port with a single implementation. That is real, duplicated-everywhere value and epos needs it — but if any milestone is a candidate for merging into another, it is this one |
 | M3 | `goga/config` | **epos**, then **skill-test/go-service**, then **mcp-anything** | the owner's *"config for all of them too"*; three koanf consumers with three incompatible arrangements, and epos's flag callback inverts its own precedence |
@@ -1651,43 +1683,57 @@ that *exactly one* handler exists is delivered with `cli`, not with `serve`. Eve
 capability that spans milestones this way names the milestone per requirement in
 its delta spec.
 
-### D17: goga's Go floor is 1.24, and what a 1.27 RC would cost is measured
+### D17: goga's Go floor is 1.27, on the owner's decision, and the cost is scheduled
 
-**This decision was reversed in this revision.** The 2026-07-31 round specified
-`go 1.27rc2` in `go.mod`, on the owner's *"let's use it even if it's alpha or
-beta version"*. The reversal is not a re-litigation of the owner's appetite for
-risk — it is that the thing the risk was being taken **for** turned out not to
-need it (D8). All the cost measurements below are that round's, re-used
-unchanged; only the conclusion moved.
+**Decided by the owner on 2026-08-04**, answering D8-A: *"I don't care, use 1.27.
+Build dependencies from source if necessary."* The 2026-07-31 round had specified
+`go 1.27rc2`; an intervening revision reversed it to 1.24 on the grounds that the
+capability the risk was being taken for did not need it (D8), and put the choice
+to the owner. He has taken the 1.27 side with the costs in front of him, so this
+section is now the *implementation* of that answer: what the floor is, exactly how
+it is written, and what it obliges M0 to build.
 
-**The floor.** `go.mod` says `go 1.24`. Nothing in the design needs anything
-newer: the registry's only real floor is `reflect.TypeFor`, added in **Go 1.22**,
-and the normative registry compiles and runs on stock `go1.26.4` under
-`GOTOOLCHAIN=local`. 1.24 is chosen over 1.22 because it is the oldest release
-still in upstream support at v1, and a framework should not hold its consumers
-below the security-patched range.
+**The floor, and the exact form.** `go.mod` says:
 
-**What a 1.27 requirement would do to a consumer, measured on go1.26.4.** Go's
-module rule is that a module cannot require a lower Go version than a module it
-depends on, so `go >= 1.27` propagates into gopgql, epos, skill-test/go-service,
-mcp-anything and sysgo the moment they adopt any goga package — including the
-ones that never touch the registry.
+```
+go 1.27
+
+toolchain go1.27rc2
+```
+
+**Both lines, and the `toolchain` line is not optional.** A bare `go 1.27` breaks
+under the default `GOTOOLCHAIN=auto`, because the toolchain tries to fetch a GA
+release that does not exist — measured: `go: downloading go1.27.0 … download
+go1.27.0 for darwin/amd64: toolchain not available`. With `toolchain go1.27rc2`
+present the same build succeeds. Only rc1 and rc2 are published, and the
+`toolchain` line moves to each successive RC and is dropped at GA.
+
+What sets the floor is the registry's generic methods (D8). Nothing else in the
+design needs anything newer than **Go 1.22** (`reflect.TypeFor`) or **1.23** (the
+generic type alias), so if the registry's four methods were ever reverted to
+package-level functions the floor would fall with them — which is the shape of the
+GA migration, not an option the implementation may take.
+
+**What the floor does to a consumer, measured on go1.26.4.** Go's module rule is
+that a module cannot require a lower Go version than a module it depends on, so
+`go >= 1.27` propagates into gopgql, epos, skill-test/go-service, mcp-anything and
+sysgo the moment they adopt any goga package — including the ones that never touch
+the registry. This is a consequence to **document**, per the API-conventions
+capability, not one to mitigate:
 
 - With the default `GOTOOLCHAIN=auto`, a developer on 1.26.4 building a goga
   consumer **silently downloads and switches to 1.27rc2**, and the build
   succeeds. No manual install, and no warning that a release candidate is now
-  compiling production code.
+  compiling production code. goga's README and skill say so (13.6).
 - With `GOTOOLCHAIN=local` — hermetic CI, distribution packaging, an air-gapped
   or proxy-restricted builder — it is a hard failure:
   `go: go.mod requires go >= 1.27rc2 (running go 1.26.4; GOTOOLCHAIN=local)`.
-- A further trap, if 1.27 is ever adopted: a bare `go 1.27` line breaks under
-  `GOTOOLCHAIN=auto`, because the toolchain tries to fetch a GA release that does
-  not exist. The working form is `go 1.27` plus `toolchain go1.27rc2`. Only rc1
-  and rc2 are published.
+  An adopting project on a pinned toolchain installs `go1.27rc2` before it can
+  adopt anything.
 
-**What it would do to the linters, which is the sharp edge.** D18 requires a
-linter with every milestone, and the current linter release cannot read Go 1.27
-code at all:
+**What it does to the linters, which is the sharp edge and is now M0 work.** D18
+requires a linter with every milestone, and the current linter release cannot read
+Go 1.27 code at all:
 
 - `golangci-lint v2.7.2` as shipped refuses outright — *"the Go language version
   (go1.26) used to build golangci-lint is lower than the targeted Go version
@@ -1701,19 +1747,19 @@ code at all:
   issues` — and a custom `x/tools/go/analysis` analyzer on v0.48.0 parses *and
   fully type-checks* a generic method.
 
-So a 1.27 dependency would not block the enforcement pillar, but it would mean
-goga's `go-lint` composite action builds golangci-lint from source with an
-`x/tools` bump instead of using the upstream prebuilt action, for as long as the
-RC lasts. **On the 1.24 floor this cost disappears entirely** — the upstream
-prebuilt action works, and M0 is that much smaller.
+So the 1.27 floor does not block the enforcement pillar, but it does mean goga's
+`go-lint` composite action **builds golangci-lint from source with the `x/tools`
+bump** instead of using the upstream prebuilt action, for as long as the RC lasts.
+That is the *"build dependencies from source if necessary"* half of the owner's
+answer, and it is scheduled: task **0.4d** builds it in M0, and task **11.4**
+drops it once upstream ships a release on a new enough `x/tools`.
 
-**The upgrade path, if the owner chooses 1.27 (D8-A).** Four lines in
-`goga/registry` change from package-level generic functions to generic methods;
-`go.mod` gains `go 1.27` + `toolchain go1.27rc2`; the `go-lint` action switches
-to the from-source build. No consumer-visible API change on the typed
-`Adapter[P, S].Open` path, which is where consumers actually are. The same four
-lines run in reverse at any point, which is why this is a cheap decision to defer
-and an expensive one to guess at.
+**The path at 1.27 GA.** Delete the `toolchain go1.27rc2` line, and revert
+`go-lint` to the upstream prebuilt action once golangci-lint ships against a GA
+1.27. `goga/registry` does not change at all — generic methods are the same
+feature at GA that they are at rc2 — and there is no consumer-visible API change
+on the typed `Adapter[P, S].Open` path at any point, which is where consumers
+actually are.
 
 ### D18: the definition of done — six parts, every milestone, no splitting
 
@@ -2123,9 +2169,10 @@ rather than a second declaration (below). The registry carries no
 `Instrumentation`: the resolve span belongs to the module that owns the port,
 where its instrumentation already is (D6).
 
-Normative form is package-level generic **functions**, per D8-A. The Go 1.27
-generic-method form is the same file with four lines changed and is not the
-default.
+Normative form is generic **methods** on `*Registry`, per the owner's answer to
+D8-A. This is what sets the module's `go 1.27` floor (D17); the superseded
+package-level-function form is the same file with four lines changed and is
+recorded in D8 as the alternative that was weighed, not as a fallback.
 
 ```go
 package registry
@@ -2150,17 +2197,17 @@ type Settings map[string]any
 // dependencies — is untouched; the depguard rule is written to permit exactly
 // this one edge and nothing else.
 //
-// Its language gate is go1.23, not 1.24 — measured against the compiler, which
-// rejects it at `go 1.22` with "generic type alias requires go1.23 or later".
-// The 1.24 floor is chosen for the support window and because generic aliases
-// were only enabled by default in 1.24 (GOEXPERIMENT=aliastypeparams before
-// that), so a `go 1.23` module would build here and fail on a stock 1.23
-// toolchain. See D17.
+// Its own language gate is go1.23, measured against the compiler, which rejects
+// it at `go 1.22` with "generic type alias requires go1.23 or later". That is
+// far below the module's actual floor of 1.27, which the generic methods below
+// set (D17). Noted anyway, because it is what the floor would fall to if those
+// methods ever became package-level functions again.
 type Option[S any] = goga.Option[S]
 
 type entry struct {
-	open     func(Settings, func(any) error) (any, error)
+	open     func(context.Context, Settings, func(any) error) (any, error)
 	settings reflect.Type // recorded for diagnostics; S is otherwise invisible
+	port     reflect.Type // recorded so Open can check P against registration
 }
 
 type Registry struct {
@@ -2181,7 +2228,8 @@ type Decode func(raw Settings, dst any) error
 // Register records a constructor under a plain adapter NAME. BOTH type
 // parameters are inferred from ctor, so no caller — and no other package — ever
 // writes S. That is what lets an adapter keep its settings struct unexported
-// (D14).
+// (D14). Verified on go1.27rc2 that the method form does not disturb this:
+// `r.Register("pgx", newPool)` needs no explicit instantiation of either.
 //
 // Register RETURNS AN ERROR on a duplicate name rather than panicking. The
 // previous revision panicked, following gocloud.dev — but that was justified by
@@ -2200,7 +2248,7 @@ type Decode func(raw Settings, dst any) error
 // ctx is the better choice, because adapter construction is I/O in every
 // adapter-bearing module. (The first spike reported the ctx-less shape as
 // necessary; re-measured, inference is unaffected by a leading context.)
-func Register[P any, S any](r *Registry, name string, ctor func(context.Context, S) (P, error)) error
+func (r *Registry) Register[P any, S any](name string, ctor func(context.Context, S) (P, error)) error
 
 // Open is the CONFIG-DRIVEN path: the adapter is named by a runtime string, so
 // P is result-only and must be instantiated explicitly. Decodes raw into the
@@ -2217,26 +2265,30 @@ func Register[P any, S any](r *Registry, name string, ctor func(context.Context,
 // Open checks the recorded port against P before constructing, so an adapter
 // registered for one port cannot be retrieved as an unrelated interface that
 // happens to have the same method set.
-func Open[P any](ctx context.Context, r *Registry, name string, raw Settings) (P, error)
+func (r *Registry) Open[P any](ctx context.Context, name string, raw Settings) (P, error)
 
-// Names is a free function rather than a method purely for symmetry with
-// Register/Open/Provide, which MUST be free functions because they carry their
-// own type parameters (D8-A). Keeping all four in one form means the Go 1.27
-// switch is a uniform edit rather than a partial one.
+// Names carries no type parameters of its own and needs no 1.27 feature; it is a
+// method for symmetry with Register/Open/Provide, which are methods because the
+// owner's answer to D8-A puts the registry on generic methods. Keeping all four
+// in one form means the GA migration, if the floor ever moves, is a uniform edit
+// rather than a partial one.
 //
 // It TAKES THE READ LOCK. This looks read-only enough to skip and is not:
 // -race flags it immediately against a concurrent Register.
-func Names(r *Registry) []string
+func (r *Registry) Names() []string
 
 // Adapter[P,S] is the TYPED HANDLE. Both type parameters are static, so there
 // is nothing to instantiate at the call site and a foreign adapter's option is
-// a compile error.
+// a compile error. Its type parameters belong to the TYPE, not to its methods,
+// so nothing on this half of the surface was touched by D8-A.
 type Adapter[P any, S any] struct {
 	name string
 	reg  *Registry
 }
 
-func Provide[P any, S any](r *Registry, name string, ctor func(context.Context, S) (P, error)) Adapter[P, S]
+// Provide registers and returns the handle in one call, so it returns Register's
+// duplicate-name error rather than swallowing it.
+func (r *Registry) Provide[P any, S any](name string, ctor func(context.Context, S) (P, error)) (Adapter[P, S], error)
 
 // Open applies raw config first, then the caller's options ON TOP. Precedence
 // is deliberate: options are the explicit, more specific form (D14). An option
@@ -2257,7 +2309,7 @@ type settings struct {
 	IdleTimeout time.Duration `koanf:"idle_timeout"`
 }
 
-func newTransport(s settings) (mcp.Transport, error) { … }
+func newTransport(ctx context.Context, s settings) (mcp.Transport, error) { … }
 
 func WithIdleTimeout(d time.Duration) registry.Option[settings] {
 	return func(s *settings) error {
@@ -2283,12 +2335,14 @@ func WithIdleTimeout(d time.Duration) registry.Option[settings] {
 //
 // Note this is an alias to an ALREADY-INSTANTIATED generic type, which is not
 // the version-gated feature — it compiles at go1.22. Only aliases carrying their
-// own type parameters need go1.23 (D17).
+// own type parameters need go1.23, and neither is what sets goga's 1.27 floor
+// (D17).
 type Adapter = registry.Adapter[mcp.Transport, settings]
 
-// Provide is the wire-facing entry point and the typed handle in one.
+// Provide is the wire-facing entry point and the typed handle in one. It calls
+// the METHOD form of registry.Provide (D8-A) and returns its error.
 func Provide(r *registry.Registry) (Adapter, error) {
-	return registry.Provide(r, "http", newTransport)
+	return r.Provide("http", newTransport)
 }
 
 var Set = wire.NewSet(Provide)
@@ -2306,10 +2360,10 @@ All three ways to bind a port to an adapter, and when each applies (D8):
 wire.Bind(new(mcp.Transport), new(*stdiotransport.Transport))
 
 // 2. Typed handle — adapter known at build time, options statically checked:
-tr, err := httpTr.Open(cfg.Cut("mcp"), httptransport.WithIdleTimeout(30*time.Second))
+tr, err := httpTr.Open(ctx, cfg.Cut("mcp"), httptransport.WithIdleTimeout(30*time.Second))
 
 // 3. Config-driven — adapter named in configuration, chosen at startup:
-tr, err := registry.Open[mcp.Transport](r, cfg.String("mcp.transport"), cfg.Cut("mcp"))
+tr, err := r.Open[mcp.Transport](ctx, cfg.String("mcp.transport"), cfg.Cut("mcp"))
 ```
 
 The third form is the only one that needs the string, and it is the only one
@@ -2357,10 +2411,10 @@ func RegisterLogExporter[S any](r *registry.Registry, name string,
 	ctor func(ctx context.Context, s S) (sdklog.Exporter, error)) error
 //
 // Setup resolves a configured name that autoexport does not recognise through
-// registry.Open, passing the ctx it was called with — an exporter dials at
-// construction, which is exactly why the ctor takes one (D8):
+// the registry's Open METHOD (D8-A), passing the ctx it was called with — an
+// exporter dials at construction, which is exactly why the ctor takes one (D8):
 //
-//	exp, err := registry.Open[sdktrace.SpanExporter](ctx, r, name, cfg.Cut("telemetry.traces"))
+//	exp, err := r.Open[sdktrace.SpanExporter](ctx, name, cfg.Cut("telemetry.traces"))
 //
 // goga/registry is a leaf that carries no Instrumentation, so
 // registry -> telemetry -> registry cannot form (D6, D8).
@@ -3492,7 +3546,7 @@ is no "not enforced" column, by decision.
   construction time rather than being retrofitted.
 - **[The config-driven registry path is the one place a wrong adapter name is a
   runtime error]** — the residual cost of D8. Static binding (`wire.Bind`) and
-  the typed handle are both compile-checked; only `registry.Open[P](r, name, …)`
+  the typed handle are both compile-checked; only `r.Open[P](ctx, name, …)`
   can fail at startup, and only because configuration is allowed to choose. It is
   bounded — `Register` takes a typed constructor and records the port, so both
   what is *in* the registry and what comes *out* of it are checked — and it is
@@ -3500,7 +3554,7 @@ is no "not enforced" column, by decision.
   `Provide(r)` call. The risk worth watching
   is projects reaching for the string path when they meant the typed one, which
   is why D8 states the default explicitly and `goga/lint` flags a
-  `registry.Open` whose name argument is a string literal: a literal means the
+  `(*registry.Registry).Open` whose name argument is a string literal: a literal means the
   adapter *was* known at build time and the typed handle was the right call.
 - **[Two enforcement claims: one restored, one still bounded]** — the previous
   revision gave up both the claim that a parameter struct is unconstructible and
@@ -3564,27 +3618,19 @@ Answered by the review, recorded here so the trail is legible:
   consumer for it exists. The interface is still designed (D12) so that whichever
   deployer arrives first is an adapter and not a rewrite.
 
-Still open:
+- **D8-A: the Go version floor — answered by the owner on 2026-08-04.** The
+  design had specified a Go 1.24 floor with package-level generic functions, and
+  put the alternative to him rather than absorbing it, because two independent
+  investigations found that generic methods change call syntax
+  (`r.Open[DB](…)` versus `registry.Open[DB](r, …)`) rather than capability. His
+  answer: *"I don't care, use 1.27. Build dependencies from source if
+  necessary."* **The spec is now written that way**: `go 1.27` plus
+  `toolchain go1.27rc2`, generic methods on `*Registry`, and the from-source
+  golangci-lint build as scheduled M0 work (task 0.4d) rather than a
+  hypothetical. D8 and D17 carry the decision and the measurements that were
+  weighed to reach it.
 
-- **D8-A: the Go version floor, and whether to take the Go 1.27 instruction
-  literally.** This is the one place the design does not follow an explicit owner
-  instruction, and it is put here rather than absorbed. The owner said to use Go
-  1.27 generic methods for the registry, RC or not. Two independent
-  investigations found the premise does not hold: the feature changes call syntax
-  (`r.Open[DB](…)` versus `registry.Open[DB](r, …)`), not capability, and the
-  normative registry compiles and runs on stock `go1.26.4` at language version
-  `go 1.22`. Everything the instruction was *for* — a registry mapping ports to
-  adapters, with settings marshalled into the adapter's own type — ships either
-  way, and `Adapter[P, S].Open`, the call site consumers actually use, is
-  byte-identical in both.
-  **This spec specifies the Go 1.24 floor and is written that way.** Taking the
-  instruction literally instead costs: a pre-GA toolchain requirement propagated
-  into all six consuming projects (silently under `GOTOOLCHAIN=auto`, as a hard
-  failure under `GOTOOLCHAIN=local`), and a from-source golangci-lint build for
-  as long as the RC lasts, because the shipped linter cannot read Go 1.27 code
-  at all. It gains better call syntax on the config-driven path and avoids a
-  four-line migration at 1.27 GA. **The owner's call; M0 flips it in either
-  direction cheaply.** Recorded in D8 and D17.
+Still open:
 
 - **The default home for a service's own non-adapter code** — the surviving half
   of the layout contradiction (D13), now live in merged guidance on `main` rather

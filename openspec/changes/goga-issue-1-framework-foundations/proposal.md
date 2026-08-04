@@ -65,21 +65,24 @@ the house rules today.
   nothing checked, which is the exact failure this proposal is written against.*
   `goga/lint` and the skill stop being milestones and become columns; M0 grows
   the plugin scaffold and the skill skeleton so that M1 has somewhere to write.
-- **goga's Go floor is 1.24, and the Go 1.27 question is put to the owner rather
-  than decided quietly** (design D17, open question D8-A). The owner instructed
-  that the registry use Go 1.27 generic methods — *"even if it's alpha or beta
-  version"*. Two independent investigations found the premise does not hold: the
-  registry never needed them. The normative implementation compiles **and runs**
-  on stock `go1.26.4` at language version `go 1.22`, and the 1.27 form differs in
-  exactly four lines — `r.Open[DB](…)` instead of `registry.Open[DB](r, …)` — with
-  the call site consumers actually use byte-identical either way. Requiring 1.27
-  would propagate a pre-release toolchain into every consumer's `go.mod`
-  (silently under `GOTOOLCHAIN=auto`, as a hard failure under
-  `GOTOOLCHAIN=local`) and would mean **the current golangci-lint release cannot
-  lint the code at all**, forcing a from-source build against a newer
-  `golang.org/x/tools` for as long as the RC lasts. This spec therefore specifies
-  1.24 and **flags the choice for the owner at the approval gate**; M0 flips it
-  in either direction for the cost of that four-line diff.
+- **goga's Go floor is 1.27, on the owner's decision** (design D17, D8-A). He
+  instructed that the registry use Go 1.27 generic methods — *"even if it's alpha
+  or beta version"*. Two independent investigations found the feature buys call
+  syntax rather than capability — the normative registry compiles **and runs** on
+  stock `go1.26.4` at language version `go 1.22`, and the two forms differ in
+  exactly four lines, `r.Open[DB](…)` instead of `registry.Open[DB](ctx, r, …)`,
+  with the call site consumers actually use byte-identical either way — so the
+  trade-off was put to him with the costs measured. He reaffirmed: *"I don't
+  care, use 1.27. Build dependencies from source if necessary."* So `go.mod` is
+  **`go 1.27` plus `toolchain go1.27rc2`** (the `toolchain` line is required: a
+  bare `go 1.27` fails under `GOTOOLCHAIN=auto`, which tries to fetch a GA
+  release that does not exist), the registry ships as generic methods on
+  `*Registry`, and the two consequences are scheduled rather than hypothetical:
+  the pre-release toolchain propagates into every consumer's `go.mod` (silently
+  under `GOTOOLCHAIN=auto`, as a hard failure under `GOTOOLCHAIN=local`), and
+  **the current golangci-lint release cannot lint the code at all**, so M0 builds
+  it from source against a newer `golang.org/x/tools` for as long as the RC
+  lasts.
 - **Every module that does anything at runtime has telemetry, with no
   exemptions** (design D6). This is the
   owner's rule — *"Every part of the framework must have telemetry"* — and it is
@@ -185,7 +188,7 @@ linter rule, CI action where one is needed, and a merged adoption PR.
 
 | # | package | adopter, then second |
 |---|---|---|
-| M0 | *(the repo itself — `go.mod` on Go 1.24, layout, root `goga`, **`goga/registry`**, the **lint plugin scaffold**, the **skill skeleton**, lint/release config, actions)* | goga |
+| M0 | *(the repo itself — `go.mod` on Go 1.27 + `toolchain go1.27rc2`, layout, root `goga`, **`goga/registry`**, the **lint plugin scaffold**, the **skill skeleton**, the **from-source golangci-lint build**, lint/release config, actions)* | goga |
 | M1 | `goga/telemetry` (+ generated `goga/semconv`) | **gopgql**, then **epos** |
 | M2 | `goga/serve` (+ `driver`, the stdlib listener, `servetest`) | **epos**, then **gopgql** |
 | M3 | `goga/config` | **epos**, then **skill-test/go-service**, **mcp-anything** |
@@ -274,22 +277,25 @@ CI actions, the spec-wide conventions — each requirement names its own.
 ## Impact
 
 - **New repo content**: `goga` is currently empty. Everything here is additive.
-- **Every adopting project's `go.mod` moves to goga's floor of Go 1.24** (D17),
-  because a module cannot require a lower Go version than something it depends
-  on. That is gopgql, epos, skill-test/go-service, mcp-anything and sysgo, from
-  their first adopted package onward. At 1.24 this is a formality — all five are
-  already at or above it. It is called out because the same mechanism is what
-  makes the Go 1.27 question (D8-A) consequential: at 1.27 the identical
-  propagation would put a pre-release toolchain into all five.
+- **Every adopting project's `go.mod` moves to goga's floor of Go 1.27** (D17,
+  D8-A), because a module cannot require a lower Go version than something it
+  depends on. That is gopgql, epos, skill-test/go-service, mcp-anything and
+  sysgo, from their first adopted package onward, and it puts a **pre-release
+  toolchain** into all five: under the default `GOTOOLCHAIN=auto` the switch to
+  `go1.27rc2` is silent, and under `GOTOOLCHAIN=local` the build fails outright
+  until the developer installs it. This is the owner's decision taken with the
+  measurement in front of him, and goga's job is to state it plainly in its own
+  README and skill rather than let a consumer discover it.
 - **Two independent spikes back D8, D14 and D17**, both built with **go1.27rc2**
   and kept outside the repository as evidence rather than shipped code. Each has
   one directory per question and compiles its negative cases to confirm they
-  fail — including that an interface cannot declare a generic method, which is a
-  hard constraint every port in this design was checked against. The second spike
-  additionally rewrote the normative registry with the two generic *methods* as
-  package-level generic *functions* and verified it compiles **and runs** on
-  stock `go1.26.4` under `GOTOOLCHAIN=local`, which is the evidence behind the
-  1.24 floor.
+  fail — including that an interface cannot declare a generic method, which
+  **Go 1.27 does not relax** and which is a hard constraint every port in this
+  design was checked against. The second spike additionally rewrote the normative
+  registry's generic *methods* as package-level generic *functions* and verified
+  that form compiles **and runs** on stock `go1.26.4` under `GOTOOLCHAIN=local`;
+  that measurement is what made the four-line cost of D8-A checkable, and the
+  owner chose the method form with it in front of him.
 - **The go-cloud study backing D7, D19, D20, D21 and D22** was done against
   `github.com/google/go-cloud` at commit `35f55f24` (2026-08-04), and every claim
   in those decisions cites a file and line so a reviewer can check it. It
