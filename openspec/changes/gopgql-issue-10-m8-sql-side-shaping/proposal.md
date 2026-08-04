@@ -62,9 +62,10 @@ mean, and makes that version true by construction rather than by hope.
   `-benchtime 1x` so it cannot rot, and a generated-and-checked axes table so
   the docs cannot drift from the benchmark (design D7).
 - **Playground**: a shaping toggle showing the SQL each strategy emits for the
-  same query, side by side, running the real compiled Go. It shows *SQL*, not
-  results — the browser has no database, and executing SQL in the playground is
-  gopgql#31, which is blocked (design D8).
+  same query, running the real compiled Go — and, since gopgql#31 merged and put
+  a real PostgreSQL in the page, a Run that executes *both* statements against
+  one database and reports whether the responses agree. It says what "agree"
+  means: the canonical encodings, not the database's bytes (design D8).
 
 ## Capabilities
 

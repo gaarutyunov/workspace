@@ -334,27 +334,61 @@ benchmark reports that directly:
   the issue, and correctly: an unbuilt benchmark stops compiling within two
   milestones.
 
-### D8: The playground shows **two SQL texts**, and says so
+### D8: The playground runs **both strategies** and shows they agree
+
+> **Amended after gopgql#31 merged.** As first written, this decision said the
+> playground shows *two SQL texts and no results*, because it had no database:
+> "The panel must **not** show a response, a row count, or a timing. Executing
+> SQL in the playground is gopgql#31, which is Blocked on postgres-pglite#28."
+> That blocker has cleared — #31 merged, and the playground now runs a pinned
+> wasm build of the forked PostgreSQL in a Web Worker. The constraint above was
+> a consequence of the missing database and nothing else, so it lapses with it.
+> The part of D8 that was never about the database — what the panel may claim —
+> is unchanged and is restated below, because a page that shows a response is
+> in *more* danger of implying the stronger guarantee, not less.
 
 The playground compiles `sdl` + `generator` + `migrate` + `compiler` to WASM and
-runs them for real; it has no database and never has had. Compiling a query
-under a strategy is pure compiler work, so a shaping toggle is entirely within
-what the playground can honestly do: the same SDL, the same query, the same
-variables, compiled twice, both SQL texts shown.
+runs them for real. Compiling a query under a strategy is pure compiler work, so
+a shaping toggle is entirely within what the playground can honestly do: the
+same SDL, the same query, the same variables, compiled twice, both SQL texts
+available and the selected one shown.
 
-`playground.CompileWithShaping(sdlSrc, query, vars, strategy)` is the entry
-point, alongside the existing `Compile` / `CompileWithMaxDepth`. The panel
-states that it shows generated SQL and not results, for the same reason the
-conformance tab states that its report is a fixture (M7, design D5).
+`playground.CompileWithShaping(sdlSrc, query, vars, sqlSide)` is the entry
+point, alongside the existing `Compile` / `CompileWithMaxDepth`. It returns the
+bind values as well as the SQL, because the caller now executes what it emits.
 
-It may also show one thing computed rather than asserted: the **shape of the
+The panel shows one thing computed rather than executed: the **shape of the
 result set** each strategy asks for — *k* projected columns assembled in Go
 versus a single `response` column assembled in PostgreSQL. That is derivable
-from the projection with no database, and it is the point of the whole
-milestone made visible.
+from the projection with no database, and it is the point of the whole milestone
+made visible before anything runs.
 
-The panel must **not** show a response, a row count, or a timing. Executing SQL
-in the playground is gopgql#31, which is Blocked on postgres-pglite#28.
+And it runs both. `playground.ShapeParity` takes the result set each statement
+returned, shapes the Go-side rows with `shape.Rows` and decodes the SQL-side
+JSON with `shape.Decode`, and reports whether the two `shape.Encode` outputs are
+equal bytes. That is `test/parity`'s assertion executed in front of the reader
+instead of in CI — the milestone's central claim demonstrated rather than
+asserted.
+
+Three constraints on that, all of which survive from the original decision:
+
+- **One database, one run.** Both statements execute against the same database
+  in a single worker round trip. Each run starts from a fresh database, so two
+  runs would build the data twice and any difference between the responses
+  could always be blamed on the data rather than on the strategies.
+- **The panel must say what "identical" means.** It is `shape.Encode` of each
+  response — the definition in D3 — and *not* the bytes PostgreSQL sent, which
+  differ and always will. Both paths are decoded into the same Go value and
+  re-encoded by one encoder, and that is why the bytes agree. A panel showing
+  two responses side by side and the word "identical" implies the stronger
+  guarantee unless it says otherwise, so it says otherwise.
+- **The fixture has to fan out.** The tab's seed is `ExampleShapingSeed`, not
+  the `ExampleSeed` chain the Traversal tab uses: the shaping query branches
+  twice at one level, and a chain gives each branch one edge — a 1×1
+  cross-product, the single case where the two strategies' result sets look
+  alike. Alice follows two people and is followed by two others, so Go-side asks
+  for 2×2 = 4 flat rows and SQL-side for one. `test/seed` asserts both counts,
+  because an equality that holds over a degenerate fixture proves nothing.
 
 ## Risks / Trade-offs
 
