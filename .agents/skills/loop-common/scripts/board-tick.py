@@ -299,6 +299,17 @@ class Item:
     wt_dirty: int = 0  # uncommitted files
     wt_unpushed: int = 0  # commits ahead of the remote branch
     wt_stat: str = ""
+    # The spec half of the same task, which lives in a *different repo* — a
+    # workspace worktree on the `spec…` branch. Checked separately because
+    # `projects/<repo>/.worktrees/issue-<N>` never contains it, so a task whose
+    # only uncommitted work is its spec read `LOCAL -` and UNPUSHED stayed
+    # silent. That is exactly how goga#1's 2026-07-31 revision round sat
+    # unnoticed for three days.
+    spec_local_checked: bool = False
+    spec_worktree: str | None = None
+    spec_wt_dirty: int = 0
+    spec_wt_unpushed: int = 0
+    spec_wt_stat: str = ""
     comments: list[Comment] = field(default_factory=list)
     seen_cids: set[int] = field(default_factory=set)
     unresolved_threads: int = 0
@@ -335,8 +346,31 @@ class Item:
 
     @property
     def local_work(self) -> bool:
-        """Is there work on this machine that never reached GitHub?"""
-        return self.wt_dirty > 0 or self.wt_unpushed > 0
+        """Is there work on this machine that never reached GitHub?
+
+        Either half counts. A spec revision stranded in the workspace worktree is
+        lost just as surely as stranded code, and it is the half nothing used to
+        look at.
+        """
+        return bool(self.local_locations())
+
+    def local_locations(self) -> list[tuple[str, int, int]]:
+        """(path, unpushed commits, uncommitted files) for each checkout holding
+        work GitHub has never seen. Empty when everything is pushed.
+
+        Both the ⚠ and the UNPUSHED reason render from this, so they can never
+        disagree about which checkout the work is in — and the path is always
+        named, because "there is stranded work" without "here" costs the next
+        tick the same search that lost the three days.
+        """
+        out = []
+        for path, unpushed, dirty in (
+            (self.worktree, self.wt_unpushed, self.wt_dirty),
+            (self.spec_worktree, self.spec_wt_unpushed, self.spec_wt_dirty),
+        ):
+            if path and (unpushed or dirty):
+                out.append((path, unpushed, dirty))
+        return out
 
     @property
     def work_started(self) -> bool:
@@ -515,27 +549,40 @@ def inspect_worktree(item: Item, projects_dir) -> None:
         candidates.append(base)
 
     for path in candidates:
-        if not (path / ".git").exists():
-            continue
-        if git(path, "rev-parse", "--is-inside-work-tree") != "true":
+        state = checkout_state(path)
+        if state is None:
             continue
         item.worktree = str(path)
-
-        status = git(path, "status", "--porcelain")
-        item.wt_dirty = len([l for l in (status or "").splitlines() if l.strip()])
-
-        # Commits reachable from HEAD but from no remote-tracking branch. This
-        # covers the case that matters most — a branch that was never pushed at
-        # all, where `@{upstream}` does not resolve.
-        ahead = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes")
-        if ahead is None:
-            ahead = git(path, "rev-list", "--count", "@{upstream}..HEAD")
-        item.wt_unpushed = int(ahead) if ahead and ahead.isdigit() else 0
-
-        stat = git(path, "diff", "--shortstat", "HEAD")
-        if stat:
-            item.wt_stat = stat
+        item.wt_dirty, item.wt_unpushed, item.wt_stat = state
         return
+
+
+def checkout_state(path) -> tuple[int, int, str] | None:
+    """(uncommitted files, unpushed commits, diffstat) for one checkout.
+
+    None when `path` is not a usable work tree. Shared by the code-side and
+    spec-side checks so the two can never drift on what "unpushed" means — the
+    case that actually happened was a *committed but unpushed* commit
+    (goga#1's `dd827c9`), not a dirty file, so both halves must count commits
+    and not just `git status`.
+    """
+    if not (path / ".git").exists():
+        return None
+    if git(path, "rev-parse", "--is-inside-work-tree") != "true":
+        return None
+
+    status = git(path, "status", "--porcelain")
+    dirty = len([l for l in (status or "").splitlines() if l.strip()])
+
+    # Commits reachable from HEAD but from no remote-tracking branch. This
+    # covers the case that matters most — a branch that was never pushed at
+    # all, where `@{upstream}` does not resolve.
+    ahead = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes")
+    if ahead is None:
+        ahead = git(path, "rev-list", "--count", "@{upstream}..HEAD")
+    unpushed = int(ahead) if ahead and ahead.isdigit() else 0
+
+    return dirty, unpushed, git(path, "diff", "--shortstat", "HEAD") or ""
 
 
 SPEC_REPO = "workspace"  # specs are always authored in the workspace repo
@@ -566,6 +613,69 @@ def spec_branch_key(branch: str) -> tuple[str, int] | None:
     if not m:
         return None
     return m.group("repo"), int(m.group("num"))
+
+
+def spec_worktrees(workspace_dir) -> dict[tuple[str, int], list]:
+    """Map (repo, issue) → the workspace worktrees holding that task's spec.
+
+    Located by **branch**, never by directory name. The directories are named by
+    hand and are not derivable from the branch: `spec/garutyunov-com-issue-5`
+    lives in `spec-issue-5`, `spec/goga-1-framework-foundations` in
+    `spec-goga-1`, `spec/gopgql-14-http` in `spec-gopgql-14-http`. Any naming
+    convention would miss a third of them, and a missed worktree is precisely
+    the silence this check exists to break. `git worktree list` is authoritative
+    and `spec_branch_key` already parses every branch style the ticks have
+    produced, so this reuses it rather than growing a second parser.
+
+    The value is a **list**: a respun spec keeps its predecessors' worktrees
+    (gopgql#38 has three — `-issue-38`, `-v2`, `-d4a`), and work stranded in a
+    superseded one is still work that can be lost.
+    """
+    from pathlib import Path
+
+    out: dict[tuple[str, int], list] = {}
+    listing = git(workspace_dir, "worktree", "list", "--porcelain")
+    if not listing:
+        return out
+    path = None
+    for line in listing.splitlines():
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            path = value
+        elif key == "branch" and path:
+            # `branch refs/heads/spec/goga-1-framework-foundations`
+            task = spec_branch_key(value.removeprefix("refs/heads/"))
+            if task:
+                out.setdefault(task, []).append(Path(path))
+            path = None
+    return out
+
+
+def inspect_spec_worktree(item: Item, specs: dict) -> None:
+    """Look for stranded spec work in the workspace repo.
+
+    Aggregates across every worktree matching this task, because a respin does
+    not make its predecessor's uncommitted revision round any less lost. Reports
+    the first checkout that actually holds work, so the ⚠ names somewhere worth
+    opening rather than the alphabetically-first clean one.
+    """
+    paths = specs.get((item.repo, item.number))
+    if paths is None:
+        return  # spec_local_checked stays False → this half is unknown, not clean
+    item.spec_local_checked = True
+    picked_work = False
+    for path in paths:
+        state = checkout_state(path)
+        if state is None:
+            continue
+        dirty, unpushed, stat = state
+        item.spec_wt_dirty += dirty
+        item.spec_wt_unpushed += unpushed
+        has_work = bool(dirty or unpushed)
+        if item.spec_worktree is None or (has_work and not picked_work):
+            item.spec_worktree = str(path)
+            item.spec_wt_stat = stat
+            picked_work = picked_work or has_work
 
 
 def spec_pr_rank(pr: dict) -> tuple[int, int]:
@@ -1156,13 +1266,8 @@ def compute_signal(item: Item) -> None:
             "move it to Blocked"
         )
     if item.local_work:
-        bits = []
-        if item.wt_unpushed:
-            bits.append(f"{item.wt_unpushed} unpushed commit(s)")
-        if item.wt_dirty:
-            bits.append(f"{item.wt_dirty} uncommitted file(s)")
         item.warnings.append(
-            f"local work not on GitHub: {', '.join(bits)} in {item.worktree} — "
+            f"local work not on GitHub: {describe_local_work(item)} — "
             "push it (or discard it deliberately) before doing anything else"
         )
     if item.status == "In progress" and not item.work_started and "tracker" not in labels:
@@ -1201,12 +1306,7 @@ def compute_signal(item: Item) -> None:
         item.signal = "SPEC-APPROVED"
     elif item.local_work:
         # Work exists only on this machine — the one state that can lose effort.
-        detail = []
-        if item.wt_unpushed:
-            detail.append(f"{item.wt_unpushed} unpushed commit(s)")
-        if item.wt_dirty:
-            detail.append(f"{item.wt_dirty} uncommitted file(s)")
-        reasons.append("stranded local work: " + ", ".join(detail))
+        reasons.append("stranded local work: " + describe_local_work(item))
         item.signal = "UNPUSHED"
     elif item.spec_merged and not item.work_started:
         # The spec cleared days ago and nobody started coding — the exact way a
@@ -1364,7 +1464,7 @@ def local_check_notice(items: list[Item], projects, no_local: bool) -> str | Non
     and the `UNPUSHED` signal cannot fire for any task, so the run has to say so
     rather than let a wall of `?` pass for a quiet board.
     """
-    if not items or any(i.local_checked for i in items):
+    if not items or any(i.local_checked or i.spec_local_checked for i in items):
         return None
     if no_local:
         return (
@@ -1381,22 +1481,65 @@ def local_check_notice(items: list[Item], projects, no_local: bool) -> str | Non
     )
 
 
+def describe_local_work(item: Item) -> str:
+    """Prose for every checkout holding stranded work, each with its path.
+
+    Both the ⚠ and the UNPUSHED reason render from this. Naming the path is the
+    point: the digest reported goga#1 as quiet for three days while an entire
+    uncommitted revision round sat in a directory nothing had told anyone to
+    look in.
+    """
+    out = []
+    for path, unpushed, dirty in item.local_locations():
+        bits = []
+        if unpushed:
+            bits.append(f"{unpushed} unpushed commit(s)")
+        if dirty:
+            bits.append(f"{dirty} uncommitted file(s)")
+        out.append(f"{', '.join(bits)} in {path}")
+    return "; ".join(out)
+
+
+def _counts(unpushed: int, dirty: int) -> str:
+    bits = []
+    if unpushed:
+        bits.append(f"{unpushed}c")
+    if dirty:
+        bits.append(f"{dirty}f")
+    return "+".join(bits)
+
+
 def local_cell(item: Item) -> str:
-    """Work sitting in the local worktree that GitHub has never seen.
+    """Work sitting in a local checkout that GitHub has never seen.
 
     `?` = not checked (no clone here, or --no-local). `-` = checked, no worktree.
     The distinction is the whole point: `-` must not double as "didn't look".
+
+    Two checkouts feed this one cell — the code worktree and the spec worktree in
+    the workspace repo. They are **not** given separate columns: the table
+    auto-sizes, so a 17th column would cost width on every row for a signal most
+    rows do not have, and `TestTableColumnAlignment` pins the count at 16. The
+    cell instead stays byte-identical to before whenever there is no spec work
+    (`2c+3f`, `clean`, `-`, `?`) and only widens when it has something to say —
+    `spec:1c`, or `code:2c+3f spec:1c` when both halves are stranded. The wide
+    form is the rare case and the one that most needs reading.
     """
+    code, spec = _counts(item.wt_unpushed, item.wt_dirty), _counts(
+        item.spec_wt_unpushed, item.spec_wt_dirty
+    )
+    if code and spec:
+        return f"code:{code} spec:{spec}"
+    if spec:
+        return f"spec:{spec}"
+    if code:
+        return code
+    # Nothing stranded. Never claim more certainty than was actually obtained:
+    # an unchecked code side stays `?` even when the spec side came back clean.
     if not item.local_checked:
         return "?"
-    if not item.worktree:
+    if not item.worktree and not item.spec_worktree:
         return "-"
-    bits = []
-    if item.wt_unpushed:
-        bits.append(f"{item.wt_unpushed}c")
-    if item.wt_dirty:
-        bits.append(f"{item.wt_dirty}f")
-    return "+".join(bits) if bits else "clean"
+    return "clean"
 
 
 def render_table(items: list[Item]) -> str:
@@ -1470,16 +1613,27 @@ def render_details(items: list[Item], include_bots: bool, body_limit: int) -> st
             mark = "closed" if b.closed else f"OPEN, {age_of(b.created)} old"
             out.append(f"   blocked by {b.repo}#{b.number} ({mark}) — {b.title}")
             out.append(f"     {b.url}")
-        if it.worktree:
+        for kind, path, unpushed, dirty, stat in (
+            ("worktree", it.worktree, it.wt_unpushed, it.wt_dirty, it.wt_stat),
+            (
+                "spec worktree",
+                it.spec_worktree,
+                it.spec_wt_unpushed,
+                it.spec_wt_dirty,
+                it.spec_wt_stat,
+            ),
+        ):
+            if not path:
+                continue
             state = []
-            if it.wt_unpushed:
-                state.append(f"{it.wt_unpushed} unpushed commit(s)")
-            if it.wt_dirty:
-                state.append(f"{it.wt_dirty} uncommitted file(s)")
-            if it.wt_stat:
-                state.append(it.wt_stat)
+            if unpushed:
+                state.append(f"{unpushed} unpushed commit(s)")
+            if dirty:
+                state.append(f"{dirty} uncommitted file(s)")
+            if stat:
+                state.append(stat)
             out.append(
-                f"   worktree: {it.worktree} — {', '.join(state) if state else 'clean, in sync'}"
+                f"   {kind}: {path} — {', '.join(state) if state else 'clean, in sync'}"
             )
         if it.spec_pr_number:
             bits = [f"spec PR #{it.spec_pr_number} ({it.spec_pr_state.lower()})"]
@@ -1604,6 +1758,17 @@ def render_json(items: list[Item]) -> str:
                     if it.worktree
                     else None
                 ),
+                "spec_local": (
+                    {
+                        "worktree": it.spec_worktree,
+                        "repo": SPEC_REPO,
+                        "uncommitted_files": it.spec_wt_dirty,
+                        "unpushed_commits": it.spec_wt_unpushed,
+                        "diff_stat": it.spec_wt_stat or None,
+                    }
+                    if it.spec_worktree
+                    else None
+                ),
                 "pr": (
                     {
                         "number": it.pr_number,
@@ -1709,9 +1874,12 @@ def cmd_tick(args: argparse.Namespace) -> int:
     attach_spec_prs(items)
     hydrate(items)
     projects = args.projects_dir or (workspace_root() / "projects")
+    # One `git worktree list` for the whole board, not one per task.
+    specs = {} if args.no_local else spec_worktrees(workspace_root())
     for it in items:
         if not args.no_local:
             inspect_worktree(it, projects)
+            inspect_spec_worktree(it, specs)
         drop_acked(it)
         compute_signal(it)
     local_notice = local_check_notice(items, projects, args.no_local)

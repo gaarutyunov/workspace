@@ -1356,6 +1356,196 @@ class TestLocalCheck(unittest.TestCase):
         checked.local_checked = True
         self.assertIn("no local worktree", bt.diagnose_empty(checked))
 
+    def test_spec_worktree_is_not_derivable_from_the_branch_name(self):
+        """Why the lookup goes through `git worktree list` and not a convention."""
+        for branch, directory in [
+            ("spec/garutyunov-com-issue-5", "spec-issue-5"),
+            ("spec/goga-1-framework-foundations", "spec-goga-1"),
+            ("spec/gopgql-14-http", "spec-gopgql-14-http"),
+            ("spec-ui-kit-6", "spec-ui-kit-6"),
+        ]:
+            self.assertIsNotNone(bt.spec_branch_key(branch), branch)
+            # The point: no rule turns the branch into the directory. All four
+            # are real, and three of them disagree with any naming convention.
+        self.assertNotIn("garutyunov-com", "spec-issue-5")
+
+
+class TestSpecWorktreeLocalCheck(unittest.TestCase):
+    """The spec half of a task lives in a *different repo*, and nothing looked.
+
+    goga#1 held an entire uncommitted revision round in
+    `workspace/.worktrees/spec-goga-1` for three days while every digest
+    reported `LOCAL -`. The case that actually happened was a **committed but
+    unpushed** commit, so that is the one asserted hardest here.
+    """
+
+    def _workspace(self, *branches):
+        """A real workspace repo with a worktree per branch. Returns its root.
+
+        Real git, not a mock: the existing local-state tests build real repos
+        (see `test_workspace_root_resolves_the_main_worktree`), and the whole
+        bug was about what git actually reports.
+
+        **A bare remote with `main` pushed is not optional.** Unpushed commits
+        are counted as `rev-list HEAD --not --remotes`, so in a repo with no
+        remote *every* commit is unpushed and every fixture worktree would look
+        stranded — the fixture has to match the real workspace, which has an
+        origin, or the tests assert a state that cannot occur.
+        """
+        import subprocess
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        origin = root / "origin.git"
+        main = root / "workspace"
+        main.mkdir()
+        run = lambda *a, **k: subprocess.run(
+            a, cwd=k.get("cwd", main), capture_output=True, check=True
+        )
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)],
+                       capture_output=True, check=True)
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@t.t")
+        run("git", "config", "user.name", "t")
+        (main / "README.md").write_text("x\n")
+        run("git", "add", "README.md")
+        run("git", "commit", "-qm", "init")
+        run("git", "remote", "add", "origin", str(origin))
+        run("git", "push", "-q", "origin", "main")
+        for branch, directory in branches:
+            run("git", "worktree", "add", "-q", "-b", branch,
+                str(main / ".worktrees" / directory))
+        return main
+
+    def _commit(self, path, name="extra.md"):
+        import subprocess
+
+        (path / name).write_text("spec revision\n")
+        subprocess.run(["git", "add", name], cwd=path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-qm", "revision round"],
+                       cwd=path, capture_output=True, check=True)
+
+    def _dirty(self, path, name="draft.md"):
+        (path / name).write_text("uncommitted\n")
+
+    # ── the case that actually happened ─────────────────────────────────────
+
+    def test_spec_worktree_with_unpushed_commit_is_seen(self):
+        ws = self._workspace(("spec/goga-1-framework-foundations", "spec-goga-1"))
+        self._commit(ws / ".worktrees" / "spec-goga-1")
+        item = make_item(repo="goga", number=1)
+        item.local_checked = True  # code side looked, found nothing
+        bt.inspect_spec_worktree(item, bt.spec_worktrees(ws))
+        self.assertEqual(item.spec_wt_unpushed, 1)
+        self.assertEqual(item.spec_wt_dirty, 0)
+        self.assertTrue(item.local_work, "a committed-but-unpushed spec is stranded work")
+        self.assertEqual(bt.local_cell(item), "spec:1c")
+        self.assertEqual(signal_of(item), "UNPUSHED")
+
+    def test_warning_names_the_spec_path(self):
+        ws = self._workspace(("spec/goga-1-framework-foundations", "spec-goga-1"))
+        self._commit(ws / ".worktrees" / "spec-goga-1")
+        item = make_item(repo="goga", number=1)
+        item.local_checked = True
+        bt.inspect_spec_worktree(item, bt.spec_worktrees(ws))
+        bt.compute_signal(item)
+        warning = "\n".join(item.warnings)
+        self.assertIn("spec-goga-1", warning)
+        self.assertIn("1 unpushed commit(s)", warning)
+
+    # ── the rest of the matrix ──────────────────────────────────────────────
+
+    def test_spec_worktree_dirty(self):
+        ws = self._workspace(("spec/epos-issue-44", "spec-epos-44"))
+        self._dirty(ws / ".worktrees" / "spec-epos-44")
+        item = make_item(repo="epos", number=44)
+        item.local_checked = True
+        bt.inspect_spec_worktree(item, bt.spec_worktrees(ws))
+        self.assertEqual((item.spec_wt_unpushed, item.spec_wt_dirty), (0, 1))
+        self.assertEqual(bt.local_cell(item), "spec:1f")
+
+    def test_both_worktrees_dirty_renders_both(self):
+        ws = self._workspace(("spec/goga-1-framework-foundations", "spec-goga-1"))
+        self._commit(ws / ".worktrees" / "spec-goga-1")
+        item = make_item(repo="goga", number=1, worktree="/tmp/code",
+                         wt_unpushed=2, wt_dirty=3)
+        item.local_checked = True
+        bt.inspect_spec_worktree(item, bt.spec_worktrees(ws))
+        self.assertEqual(bt.local_cell(item), "code:2c+3f spec:1c")
+        bt.compute_signal(item)
+        warning = "\n".join(item.warnings)
+        self.assertIn("/tmp/code", warning)
+        self.assertIn("spec-goga-1", warning)
+
+    def test_spec_worktree_clean_does_not_fire(self):
+        ws = self._workspace(("spec/goga-1-framework-foundations", "spec-goga-1"))
+        item = make_item(repo="goga", number=1)
+        item.local_checked = True
+        bt.inspect_spec_worktree(item, bt.spec_worktrees(ws))
+        self.assertTrue(item.spec_local_checked)
+        self.assertFalse(item.local_work)
+        self.assertEqual(bt.local_cell(item), "clean")
+
+    def test_spec_branch_exists_but_worktree_is_not_on_this_machine(self):
+        """Branch parses, no worktree here: unknown for that half, never clean."""
+        ws = self._workspace()  # no worktrees at all
+        item = make_item(repo="goga", number=1)
+        item.local_checked = True
+        bt.inspect_spec_worktree(item, bt.spec_worktrees(ws))
+        self.assertFalse(item.spec_local_checked)
+        self.assertIsNone(item.spec_worktree)
+        self.assertEqual(bt.local_cell(item), "-")
+
+    def test_no_spec_branch_at_all(self):
+        ws = self._workspace(("spec/epos-issue-44", "spec-epos-44"))
+        item = make_item(repo="goga", number=1)  # a different task
+        item.local_checked = True
+        bt.inspect_spec_worktree(item, bt.spec_worktrees(ws))
+        self.assertFalse(item.spec_local_checked)
+        self.assertEqual(bt.local_cell(item), "-")
+
+    def test_respun_spec_aggregates_every_worktree(self):
+        """gopgql#38 really has three. Work in a superseded one is still lost."""
+        ws = self._workspace(
+            ("spec/gopgql-issue-38", "spec-gopgql-38"),
+            ("spec/gopgql-issue-38-v2", "spec-gopgql-38-v2"),
+            ("spec/gopgql-issue-38-d4a", "spec-gopgql-38-d4a"),
+        )
+        self._commit(ws / ".worktrees" / "spec-gopgql-38")
+        self._dirty(ws / ".worktrees" / "spec-gopgql-38-v2")
+        item = make_item(repo="gopgql", number=38)
+        item.local_checked = True
+        specs = bt.spec_worktrees(ws)
+        self.assertEqual(len(specs[("gopgql", 38)]), 3)
+        bt.inspect_spec_worktree(item, specs)
+        self.assertEqual((item.spec_wt_unpushed, item.spec_wt_dirty), (1, 1))
+        # The named path is one that actually holds work, not a clean sibling.
+        self.assertIn("spec-gopgql-38", item.spec_worktree)
+
+    def test_unchecked_code_side_stays_unknown_even_when_spec_is_clean(self):
+        """`?` must not become `-` just because the other half was checked."""
+        ws = self._workspace(("spec/goga-1-framework-foundations", "spec-goga-1"))
+        item = make_item(repo="goga", number=1)  # local_checked stays False
+        bt.inspect_spec_worktree(item, bt.spec_worktrees(ws))
+        self.assertEqual(bt.local_cell(item), "?")
+
+    def test_spec_work_shows_even_when_code_side_was_never_checked(self):
+        """Known work always beats `?` — never hide a finding behind unknown."""
+        ws = self._workspace(("spec/goga-1-framework-foundations", "spec-goga-1"))
+        self._commit(ws / ".worktrees" / "spec-goga-1")
+        item = make_item(repo="goga", number=1)  # no clone for the code side
+        bt.inspect_spec_worktree(item, bt.spec_worktrees(ws))
+        self.assertEqual(bt.local_cell(item), "spec:1c")
+
+    def test_run_level_notice_suppressed_when_only_spec_was_checkable(self):
+        ws = self._workspace(("spec/goga-1-framework-foundations", "spec-goga-1"))
+        items = [make_item(repo="goga", number=1)]
+        bt.inspect_spec_worktree(items[0], bt.spec_worktrees(ws))
+        self.assertIsNone(bt.local_check_notice(items, "/anywhere", no_local=False))
+
+
+class TestLocalCheckRemainder(unittest.TestCase):
     def test_workspace_root_resolves_the_main_worktree(self):
         """The actual bug: from a linked worktree, projects/ lives in the main one."""
         import subprocess
