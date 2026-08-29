@@ -107,73 +107,68 @@ system is run, and commits them.
   needs nothing gopgql does not already ship, and in particular does **not**
   depend on `gopgql#47`.
 
-## Open Questions
+## Decisions  *(all four answered by the owner, 2026-08-29)*
 
-Each carries a recommendation. None is decided here.
+Recorded on gaarutyunov/workspace#51 and checked off in `tasks.md` §0.
 
-### Q1. Does codiq replace gortex, or sit beside it?
+### D-Q1. codiq sits beside gortex — and **gortex is repaired first**
 
-The issue does not say, and the whole change reads differently either way. If
-codiq is a replacement, the comparison is a go/no-go gate and the settings work
-ends with removing `gortex` from `.mcp.json`. If it sits beside, the comparison
-is a characterisation and both stay registered.
+> *"We need to compare so we need to fix gortex."*
 
-**Recommendation: beside, and say so in the change.** gortex today supplies
-~40 task-shaped tools, LSP integration, dataflow, clone detection, blame
-enrichment and session memory; codiq supplies a structural navigation core over
-two generic MCP tools. Replacement is not on the table on capability grounds
-this year, and framing it as a bake-off makes the comparison's purpose
-dishonest. The comparison's stated purpose should be *"is codiq a viable second
-source for structural navigation, and where is it already better"* — a question
-with a real answer. **Both stay registered; the agent is told which to reach
-for.**
+The comparison stands, so it needs a baseline worth comparing against. gortex's
+index is not one today, measured against the running daemon: the `codiq` entry
+holds **only `.worktrees/*` copies of stale branches** and no canonical source
+(its base checkout is 2 files, 16 commits behind); worktrees are indexed twice,
+so symbols appear 7–9×; and eight base repos are untracked. A comparison run
+against that would measure gortex's misconfiguration and hand codiq an
+unearned win.
 
-### Q2. Which projects?
+**`tasks.md` gains M0 — repair gortex tracking — and it blocks M5.** This is the
+one milestone here that pays off whether or not codiq ever ships, because it
+fixes a tool in daily use.
 
-`projects/` holds twenty trees. They are not comparable: `pglite` is 1.4 GB,
-`postgres-pglite` 1.1 GB (a PostgreSQL fork — by far the largest C corpus here,
-and it carries no manifest codiq reads), `workout` 766 MB, `agentiq` 248 KB of
-documents with no code at all. Seven have no resolvable manifest in their
-working tree. "All" is not a well-defined instruction.
+### D-Q2. All projects, with their worktrees — **77 trees, not eight**
 
-**Recommendation: a declared list of eight, committed as config, not "all".**
-`codiq`, `gopgql`, `sysgo`, `mcp-anything`, `epos` (Go); `ui-kit`, `boids`,
-`site-review` (JS/TS). Rationale: they span the two ecosystems both systems
-index well, every one has a resolvable manifest, together they are ~40 MB of
-walked source after codiq's `node_modules`/`vendor`/dot-dir pruning, and they
-are the repos this workspace actually works in — so a bad answer is one a human
-here can spot. `postgres-pglite` and `pglite` are explicitly deferred to a
-second run once the eight are green: they are where scale problems will surface,
-and they should not be the run that also debugs the corpus column. The list is
-config, so extending it is an edit, not a change.
+> *"We need all projects with their worktrees tracked."*
 
-### Q3. Where does Postgres come from?
+The recommendation of a curated eight is **overruled**. Measured 2026-08-29:
+**20 base repos + 57 worktrees = 77 trees.** `postgres-pglite` (1.1 GB) and
+`pglite` (1.4 GB) are **in**, not deferred to a second run.
 
-**This is not academic: `/System/Volumes/Data` has 490 MiB free, 100% used.**
-`postgres:19beta2` alone does not fit, before any data.
+The owner's reason is the one that matters, and it changes the character of the
+whole change:
 
-**Recommendation: codiq's own `deploy/docker-compose.yml`, unmodified, and a
-hard disk gate before the milestone that runs it.** Reusing codiq's compose
-means the workspace configures nothing about Postgres and inherits the pinned
-`postgres:19beta2`, the `codiq_dbos` database and the read-only MCP service
-already proven in codiq's CI. PGlite is not an option — SQL/PGQ is a server
-feature and gopgql's PGlite work (`gopgql#31`) is itself blocked. An existing
-instance is not an option — there is no PostgreSQL 19 on this machine. The gate
-is stated in `tasks.md` as a numbered precondition with a measured floor rather
-than left as a footnote, because every milestone from M2 on is unrunnable
-without it.
+> *"Indexing the projects is a way to test and fix all the functionality."*
 
-### Q4. Does the codiq corpus work land under this issue, or as a codiq issue?
+The run is codiq's **acceptance test**, not merely corpus preparation. A defect
+surfaced while indexing is fixed under this issue. Excluding the awkward
+repositories would therefore defeat the exercise — they are precisely where the
+defects are. `pglite` and `postgres-pglite` stop being a scale risk to avoid and
+become the point.
 
-Capability 1 is a change to codiq's data model — its SDL, a migration, file
-identity and coordinate resolution. The board forbids splitting an issue into
-sub-issues, but this is a different repository, and `Blocked` exists for an
-issue waiting on another issue.
+This also sharpens M1 rather than complicating it. 57 of the 77 trees share
+every repo-relative path with their base repo, and six trees resolve no manifest
+at all — `agentiq`, `bikelanes`, `workout`, `qonnect`, `skill-test`, `goga`,
+with `/Users/germanarutyunov/package.json` verified present as the first
+manifest above them. Corpus isolation is load-bearing for the **majority** of
+the corpus instead of an edge case, and **each worktree is its own corpus**
+(`<repo>@<branch>`).
 
-**Recommendation: land it under this issue, as M1, as its own PR in
-`gaarutyunov/codiq` referenced from #51.** It is not separable work — nothing
-else in #51 is correct without it, so filing it separately would park #51 in
-`Blocked` behind an issue that exists only because #51 exists. Filing it in
-codiq would also be right if codiq wanted a corpus for its own reasons; it does
-not — codiq's `SPEC.md` deliberately leaves the corpus unmodelled, and this
-change is the first caller that needs one.
+### D-Q3. `postgres:19beta2`, the published Docker image
+
+> *"Postgres has a docker image for pg19 with beta 2."*
+
+codiq's own `deploy/docker-compose.yml`, unmodified, which already pins exactly
+that image. The earlier framing of this as doubtful was wrong on two counts:
+the image is published and is the intended answer, and **the disk gate is
+clear** — re-measured 2026-08-29 at **49 GiB free / 78% used**, against the
+490 MiB / 100% the change was written under. The gate stays in `tasks.md` only
+because the corpus grew almost tenfold.
+
+### D-Q4. The corpus lands under this issue
+
+> *"Corpus is necessary in 51."*
+
+As recommended: its own PR in `gaarutyunov/codiq`, referenced from #51, not a
+separate codiq issue with #51 parked in `Blocked`.
+
