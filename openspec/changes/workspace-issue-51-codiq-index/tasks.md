@@ -5,21 +5,99 @@ diff is never a gate.
 Line and file references are to `gaarutyunov/codiq` at `origin/main` `c11e46b`
 and `gaarutyunov/gopgql` at `origin/main` `060922e`.
 
-## 0. Before anything — the four owner decisions
+## 0. The four owner decisions — **ANSWERED 2026-08-29**
 
-Sequenced first because M1 is a data-model change to another repository and
-should not be written if Q4 is answered differently.
+All four are decided. Recorded on gaarutyunov/workspace#51.
 
-- [ ] 0.1 Q1 — codiq replaces gortex, or sits beside it. Recommendation:
-      **beside**, and the comparison is a characterisation rather than a
-      bake-off. Everything below assumes it.
-- [ ] 0.2 Q2 — the project list. Recommendation: the eight named in
-      `proposal.md`; `postgres-pglite` and `pglite` deferred to a second run.
-- [ ] 0.3 Q3 — where Postgres comes from. Recommendation: codiq's own
-      `deploy/docker-compose.yml`, unmodified.
-- [ ] 0.4 Q4 — the codiq change lands under this issue as its own PR in
-      `gaarutyunov/codiq`, or as a separate codiq issue with #51 `Blocked`.
-      Recommendation: **under this issue**.
+- [x] 0.1 **Q1 — codiq replaces gortex, or sits beside it.** Decided: **the
+      comparison stands, and gortex is repaired first.** The owner: *"We need to
+      compare so we need to fix gortex."* gortex's index cannot serve as a
+      baseline in its current state (see M0), so a comparison run against it
+      today would measure a misconfiguration rather than the tool. **M0 is added
+      below and blocks M5.**
+- [x] 0.2 **Q2 — the project list.** Decided: **all projects, with their
+      worktrees** — *not* the eight recommended. The owner: *"We need all
+      projects with their worktrees tracked."* Measured 2026-08-29: **20 base
+      repos + 57 worktrees = 77 trees.** `postgres-pglite` and `pglite` are
+      **in**, not deferred.
+- [x] 0.3 **Q3 — where Postgres comes from.** Decided: **`postgres:19beta2`, the
+      published Docker image**, via codiq's own `deploy/docker-compose.yml`
+      unmodified. The owner: *"Postgres has a docker image for pg19 with beta
+      2."* The disk gate that made this doubtful is **clear** — see 2.1.
+- [x] 0.4 **Q4 — where the corpus work lands.** Decided: **under this issue.**
+      The owner: *"Corpus is necessary in 51."* It ships as its own PR in
+      `gaarutyunov/codiq`, referenced from #51.
+
+### The purpose, restated by the owner
+
+> *"Indexing the projects is a way to test and fix all the functionality."*
+
+This reframes the run. Indexing is **not** merely corpus preparation for the
+comparison — it is codiq's acceptance test. A defect surfaced while indexing the
+77 trees is **fixed under this issue**, not filed for later. That is why the
+scope is every tree rather than a curated eight: the awkward repositories are
+where the defects are, and excluding them would defeat the exercise.
+
+**Consequence for M1.** 57 of the 77 trees are worktrees that share every
+repo-relative path with their base repo, and six trees resolve **no manifest**
+(`agentiq`, `bikelanes`, `workout`, `qonnect`, `skill-test`, `goga` — verified;
+`/Users/germanarutyunov/package.json` exists and is the first manifest above
+them). Corpus isolation is therefore load-bearing for the **majority** of the
+corpus, and **each worktree is its own corpus**. This is the sharpest available
+test of M1.
+
+---
+
+## 0b. M0 — repair gortex tracking  *(repo: this machine's gortex daemon; blocks M5)*
+
+The comparison's baseline has to be a correctly configured gortex. It is not one
+today. Measured 2026-08-29 against the running daemon (v0.60.0):
+
+- [ ] G.1 **Base checkouts are stale, so the graph indexes the wrong code.**
+      `projects/codiq` is at `1aabe02` — **2 files, zero `.go` files, 16 commits
+      behind `origin/main`**. Other base checkouts: `sysgo` 39 behind, `epos` 22,
+      `gopgql` 17, `bikelanes` 15, `mcp-anything` 12, `workout` 12. Refresh every
+      base checkout to its default branch before re-indexing.
+- [ ] G.2 **The `codiq` repo entry contains no canonical source at all.** gortex
+      reports it as 1319 files / 93853 nodes, but every hit is a `.worktrees/*`
+      copy: `search_symbols Resolve --repo codiq` returns
+      `codiq/.worktrees/issue-19/coord/coord.go`,
+      `codiq/.worktrees/issue-21/…`, `codiq/.worktrees/baseline-main/…` and **no
+      `codiq/coord/coord.go`**. Cause: the base entry's walk descends into
+      `.worktrees/`, and the base checkout has no source of its own to outweigh
+      it. Exclude `.worktrees/` from every **base** repo's walk.
+- [ ] G.3 **Worktrees are double-indexed** — once inside the base entry's walk,
+      once as their own tracked repo. Every symbol therefore appears 7–9×.
+      Fixing G.2 also fixes this; assert it rather than assuming.
+- [ ] G.4 **Eight base repos are not tracked at all**: `epos`, `skill-test`,
+      `goga`, `e2e-review`, `pglite`, `pglite-js`, `postgres-pglite`,
+      `goga-spike-go127`. `epos` is the sharp case — its *worktrees* are tracked
+      while the repo is not. Track each with `gortex track projects/<repo>`.
+- [ ] G.5 **Track every worktree explicitly** with
+      `gortex track --as-worktree projects/<repo>/.worktrees/<branch>`, per
+      `AGENTS.md` — gortex does not discover them, and the owner's instruction is
+      that all projects **and their worktrees** are tracked. 57 worktrees.
+- [ ] G.6 The same 77 trees that codiq indexes are the 77 gortex covers.
+      Any divergence makes the M5 comparison uninterpretable, so the two lists
+      come from **one** source: `codiq/projects.yaml` (2.3).
+
+### Gate — M0
+
+- [ ] G.7 `gortex daemon status` lists every base repo, and
+      `search_symbols` for a symbol defined in a base repo returns the **base**
+      path first, not a `.worktrees/` copy.
+- [ ] G.8 A symbol that exists in exactly one place returns exactly one hit —
+      the duplication in G.3 is gone, demonstrated on a symbol that returned 7+
+      hits before.
+- [ ] G.9 The tree list gortex covers equals `codiq/projects.yaml`, checked
+      mechanically rather than by eye.
+
+**Why this is M0 and not follow-up work.** The owner tied it directly to the
+comparison — *"We need to compare so we need to fix gortex."* It is also the
+only milestone here that improves a tool in daily use regardless of whether
+codiq ever ships.
+
+---
 
 ## 1. M1 — codiq gains a corpus  *(repo: `gaarutyunov/codiq`)*
 
@@ -129,19 +207,26 @@ Real Postgres, real gopgql, via the existing godog + testcontainers harness.
 
 - [ ] 2.1 **`df -h /System/Volumes/Data` reports ≥ 15 GiB free.** That path, not
       `df /` — on macOS `/` is the sealed system volume and its percentage
-      lies. At the time this change was written the figure was **490 MiB, 100%
-      used**, so this is a real gate and not a formality. `postgres:19beta2` and
-      the `golang:1.25-alpine` layer both of codiq's Dockerfiles pull do not fit
-      below it.
+      lies. When this change was written the figure was **490 MiB, 100% used**.
+      **Re-measured 2026-08-29: 49 GiB free, 78% used — the gate is clear.** It
+      stays in the task list because the corpus grew from eight repos to 77
+      trees, so re-check it immediately before the run rather than trusting this
+      line. `postgres:19beta2` and the `golang:1.25-alpine` layer both of
+      codiq's Dockerfiles pull do not fit below the floor.
 - [ ] 2.2 If any step hits `ENOSPC`: stop and report. Do not free space — no
       image prune, no module-cache clean, nothing outside a scratch directory.
 
 ### The run
 
 - [ ] 2.3 `codiq/projects.yaml` in this repository: corpus name and path per
-      project, the eight from Q2. `postgres-pglite` and `pglite` present but
-      commented out, each with its reason (size; and for `postgres-pglite`, no
-      manifest any resolver reads).
+      tree, **all 77** — 20 base repos and 57 worktrees (Q2). Nothing is
+      commented out: `postgres-pglite` (1.1 GB, `meson.build`, the largest C
+      corpus here) and `pglite` (1.4 GB) are **in**, because the purpose of the
+      run is to test and fix codiq and they are where scale defects live.
+      **Each worktree is its own corpus**, named `<repo>@<branch>` so a base
+      repo and its worktrees never share a corpus key. The file is generated by
+      a committed script and then committed, so it is reproducible as trees come
+      and go, and it is the single source for G.6.
 - [ ] 2.4 `codiq/index.py` — python3, matching
       `.claude/skills/loop-common/scripts/board-tick.py`, and not a shell script:
       the config is YAML and this machine has no Node, so python3 is the only
@@ -166,11 +251,16 @@ Real Postgres, real gopgql, via the existing godog + testcontainers harness.
 
 ### Gate — M2
 
-- [ ] 2.8 All eight projects indexed into one database in one run.
-- [ ] 2.9 Assert over MCP that a repo-relative path present in more than one of
-      the eight resolves to one file row **per corpus**. Identify such a path
-      from the run first; if none of the eight share one, add a ninth project
-      that does rather than declaring the gate vacuously passed.
+- [ ] 2.8 All 77 trees indexed into one database in one run. A tree that fails
+      is reported and the run continues (2.4); the gate is that **every failure
+      is understood and fixed**, per the owner's framing of the run as codiq's
+      acceptance test — not that the first attempt is clean.
+- [ ] 2.9 Assert over MCP that a repo-relative path present in more than one
+      tree resolves to one file row **per corpus**. This can no longer be
+      vacuous: 57 of the 77 trees are worktrees sharing every path with their
+      base repo, so `go.mod`, `main.go` and `coord/coord.go` each appear in
+      many corpora by construction. Assert on a path shared by a base repo and
+      **at least two** of its worktrees.
 - [ ] 2.10 Assert no derived edge crosses a corpus boundary — the M1 property, now
       on real repositories instead of fixtures.
 - [ ] 2.11 Record per project: files present with a supported extension, files
